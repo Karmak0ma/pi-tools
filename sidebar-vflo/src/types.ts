@@ -41,6 +41,7 @@ export interface ModelState {
 	provider: string;
 	id: string;
 	name: string;
+	subscriptionRemaining?: number;
 }
 
 export interface ActivitySnapshot {

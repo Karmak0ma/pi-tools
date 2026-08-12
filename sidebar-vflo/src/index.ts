@@ -2,6 +2,12 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	adapterForProvider,
+	queryProviderUsage,
+	resolveUsageAuth,
+	type UsageReport,
+} from "@narumitw/pi-usage/src/index.js";
 import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { renderSidebar, type SidebarTheme } from "./render.js";
 import {
@@ -36,6 +42,8 @@ interface Runtime {
 	subagents: SubagentItem[];
 	activeToolCalls: Map<string, string>;
 	subagentBatches: Map<string, SubagentItem[]>;
+	subscriptionRemaining?: number;
+	usageRefresh?: AbortController;
 	overlayGeneration: number;
 	overlayStarting: boolean;
 	tui?: TUI;
@@ -84,6 +92,7 @@ function snapshot(runtime: Runtime): SidebarSnapshot {
 					provider: model.provider,
 					id: model.id,
 					name: model.name,
+					subscriptionRemaining: runtime.subscriptionRemaining,
 				  }
 			: undefined,
 		thinkingLevel: runtime.ctx.thinkingLevel,
@@ -93,6 +102,37 @@ function snapshot(runtime: Runtime): SidebarSnapshot {
 		todos: runtime.todos,
 		subagents: runtime.subagents,
 	};
+}
+
+function subscriptionRemaining(report: UsageReport): number | undefined {
+	const buckets = report.buckets.filter((bucket) => bucket.unit === "percent" && bucket.remaining !== undefined);
+	if (report.semantics.kind !== "consumer-subscription" || buckets.length === 0) return undefined;
+	return Math.max(0, Math.min(100, Math.min(...buckets.map((bucket) => bucket.remaining as number))));
+}
+
+async function refreshSubscription(runtime: Runtime): Promise<void> {
+	runtime.usageRefresh?.abort();
+	runtime.subscriptionRemaining = undefined;
+	const model = runtime.ctx.model;
+	const adapter = adapterForProvider(model?.provider);
+	if (!model || !adapter || adapter.semantics.kind !== "consumer-subscription") {
+		requestRender(runtime);
+		return;
+	}
+	const controller = new AbortController();
+	runtime.usageRefresh = controller;
+	try {
+		const auth = await resolveUsageAuth(runtime.ctx, adapter);
+		if (!auth) return;
+		const report = await queryProviderUsage(adapter, auth, controller.signal, 15_000);
+		if (controller.signal.aborted || runtime.ctx.model !== model) return;
+		runtime.subscriptionRemaining = subscriptionRemaining(report);
+		requestRender(runtime);
+	} catch {
+		// pi-usage owns the authoritative status; the sidebar simply omits unavailable data.
+	} finally {
+		if (runtime.usageRefresh === controller) runtime.usageRefresh = undefined;
+	}
 }
 
 function requestRender(runtime: Runtime): void {
@@ -208,6 +248,7 @@ function closeOverlay(runtime: Runtime): void {
 }
 
 function disposeRuntime(runtime: Runtime): void {
+	runtime.usageRefresh?.abort();
 	closeOverlay(runtime);
 }
 
@@ -243,6 +284,7 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 		};
 		current = runtime;
 		startOverlay(runtime);
+		void refreshSubscription(runtime);
 		if (runtime.sidebarVisible) {
 			suppressTodoWidget(runtime);
 			queueMicrotask(() => suppressTodoWidget(runtime));
@@ -405,7 +447,10 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 	});
 	pi.on("model_select", (_event, ctx) => {
 		const runtime = runtimeFor(current, ctx);
-		if (runtime) requestRender(runtime);
+		if (runtime) {
+			void refreshSubscription(runtime);
+			requestRender(runtime);
+		}
 	});
 	pi.on("thinking_level_select", (_event, ctx) => {
 		const runtime = runtimeFor(current, ctx);

@@ -1,6 +1,8 @@
 # Sidebar VFLO
 
-Configurable Pi right sidebar with model, activity, context, cumulative usage, TODOs, and subagent panels. It intentionally does **not** install a footer.
+Configurable Pi right sidebar with model, activity, context, cumulative usage, TODOs, subagent panels, and optional subscription allowance. It intentionally does **not** install a footer.
+
+For supported consumer subscriptions, the model panel can show the minimum remaining percentage reported by `@narumitw/pi-usage` (currently OpenAI Codex and GitHub Copilot). Unsupported/free providers such as OpenCode show no subscription row.
 
 ## Install
 

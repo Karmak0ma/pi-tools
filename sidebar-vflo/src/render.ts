@@ -61,6 +61,9 @@ function modelRows(snapshot: SidebarSnapshot, theme: SidebarTheme, width: number
 		paint(theme, "text", truncateToWidth(model, width, "")),
 		paint(theme, "muted", truncateToWidth(snapshot.model.provider || "unknown provider", width, "")),
 		pair(paint(theme, "muted", "Thinking"), paint(theme, "accent", safe(snapshot.thinkingLevel, "off")), width),
+		...(snapshot.model.subscriptionRemaining === undefined
+			? []
+			: [pair(paint(theme, "muted", "Subscription"), paint(theme, "accent", `${snapshot.model.subscriptionRemaining.toFixed(1)}% left`), width)]),
 	];
 }
 

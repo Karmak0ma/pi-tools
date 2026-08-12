@@ -9,6 +9,25 @@ const theme = {
 };
 
 describe("Sidebar VFLO renderer", () => {
+	it("renders subscription allowance when available", () => {
+		const lines = renderSidebar(
+			{
+				model: { provider: "openai-codex", id: "model", name: "Model", subscriptionRemaining: 42.5 },
+				thinkingLevel: "medium",
+				activity: { state: "ready", label: "Ready", activeTools: [] },
+				context: undefined,
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				todos: [],
+				subagents: [],
+			},
+			DEFAULT_CONFIG,
+			theme,
+			44,
+			20,
+		);
+		expect(lines.some((line) => line.includes("42.5% left"))).toBe(true);
+	});
+
 	it("renders a width-safe context meter and enabled panels", () => {
 		const lines = renderSidebar(
 			{
