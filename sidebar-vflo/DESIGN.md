@@ -54,7 +54,7 @@ Example:
 }
 ```
 
-`/sidebar-panel <panel> [on|off|toggle]` changes a panel and persists immediately. `/sidebar-reset` restores defaults. Invalid or missing configuration falls back to defaults; values are clamped and unknown panel keys are ignored.
+The `/sidebar` settings menu changes panel visibility and color presets. The `monokai` preset uses the Sonokai Andromeda palette from the configured Neovim theme. `/sidebar-reset` restores defaults. Invalid or missing configuration falls back to defaults; values are clamped and unknown panel keys are ignored.
 
 ## TODO integration
 

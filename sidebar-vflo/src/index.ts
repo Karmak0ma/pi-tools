@@ -8,7 +8,7 @@ import {
 	resolveUsageAuth,
 	type UsageReport,
 } from "@narumitw/pi-usage/src/index.js";
-import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import { matchesKey, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 import { renderSidebar, type SidebarTheme } from "./render.js";
 import {
 	applySubagentDetails,
@@ -31,7 +31,6 @@ import {
 } from "./types.js";
 
 const CONFIG_PATH = join(homedir(), ".pi", "agent", "sidebar-vflo.json");
-const PANEL_IDS: SidebarPanelId[] = ["model", "activity", "context", "usage", "todos", "subagents"];
 
 interface Runtime {
 	ctx: ExtensionContext;
@@ -183,10 +182,10 @@ async function openSettings(runtime: Runtime): Promise<void> {
 			render,
 			invalidate() {},
 			handleInput(data: string) {
-				if (data === "\u001b" || data === "\u0003") { done(); return; }
-				if (data === "\u001b[A" || data === "k") selected = (selected + items - 1) % items;
-				else if (data === "\u001b[B" || data === "j") selected = (selected + 1) % items;
-				else if (data === "\r" || data === " ") {
+				if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) { done(); return; }
+				if (matchesKey(data, "up") || data === "k") selected = (selected + items - 1) % items;
+				else if (matchesKey(data, "down") || data === "j") selected = (selected + 1) % items;
+				else if (matchesKey(data, "enter") || matchesKey(data, "space")) {
 					if (selected === 0) {
 						const current = presets.indexOf(runtime.config.colorPreset);
 						runtime.config.colorPreset = presets[(current + 1) % presets.length] ?? "monokai";
@@ -244,6 +243,7 @@ function startOverlay(runtime: Runtime): void {
 				};
 				return {
 					render(width: number): string[] {
+						sidebarTheme.preset = runtime.config.colorPreset;
 						return renderSidebar(snapshot(runtime), runtime.config, sidebarTheme, width, tui.terminal.rows);
 					},
 					invalidate() {},
@@ -363,24 +363,6 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 			const runtime = runtimeFor(current, ctx);
 			if (!runtime) return;
 			setSidebarVisible(runtime, !runtime.sidebarVisible);
-			await persist(runtime);
-		},
-	});
-
-	pi.registerCommand("sidebar-panel", {
-		description: "Toggle a Sidebar VFLO panel: model, activity, context, usage, todos, subagents",
-		handler: async (args, ctx) => {
-			const runtime = runtimeFor(current, ctx);
-			if (!runtime) return;
-			const [name, action = "toggle"] = args.trim().toLowerCase().split(/\s+/);
-			if (!name || !PANEL_IDS.includes(name as SidebarPanelId) || !["on", "off", "toggle"].includes(action)) {
-				ctx.ui.notify("Usage: /sidebar-panel <model|activity|context|usage|todos|subagents> [on|off|toggle]", "warning");
-				return;
-			}
-			const panel = name as SidebarPanelId;
-			runtime.config.panels[panel] = action === "on" ? true : action === "off" ? false : !runtime.config.panels[panel];
-			if (panel === "todos" && runtime.config.panels.todos) suppressTodoWidget(runtime);
-			requestRender(runtime);
 			await persist(runtime);
 		},
 	});

@@ -18,10 +18,9 @@ After publishing, install the package with its npm name. The extension entrypoin
 
 - `/sidebar` opens the interactive settings menu for panel visibility and color preset
 - `/sidebar [show|hide|toggle]` controls dock visibility
-- Color presets: `monokai`, `catppuccin`, and `dracula`
+- Color presets: `monokai` (Sonokai Andromeda, matching the configured Neovim theme), `catppuccin`, and `dracula`
 - Context usage is accent-colored through 40%, yellow from >40% through 60%, and red above 60%.
 
-- `/sidebar-panel <model|activity|context|usage|todos|subagents> [on|off|toggle]`
 - `/sidebar-reset`
 - `Alt+S` toggles the dock.
 

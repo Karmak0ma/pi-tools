@@ -24,15 +24,41 @@ const colors: Record<Role, ThemeColor> = {
 	cache: "syntaxType",
 };
 
-const PRESET_CODES: Record<NonNullable<SidebarTheme["preset"]>, Record<Role, number>> = {
-	monokai: { text: 252, muted: 245, dim: 240, accent: 148, working: 208, success: 148, warning: 221, error: 197, input: 81, output: 141, cache: 115 },
+type PresetColor = number | `#${string}`;
+
+// Sonokai Andromeda, matching the user's active Neovim colorscheme.
+// Keep these as truecolor values so the sidebar matches the selected palette exactly.
+const PRESET_COLORS: Record<NonNullable<SidebarTheme["preset"]>, Record<Role, PresetColor>> = {
+	monokai: {
+		text: "#E1E3E4",
+		muted: "#7E8294",
+		dim: "#5A5E7A",
+		accent: "#6DCAE8",
+		working: "#EDC763",
+		success: "#9ED06C",
+		warning: "#EDC763",
+		error: "#FB617E",
+		input: "#77D5F0",
+		output: "#BB97EE",
+		cache: "#9ED06C",
+	},
 	catppuccin: { text: 189, muted: 146, dim: 103, accent: 183, working: 215, success: 151, warning: 221, error: 210, input: 117, output: 176, cache: 152 },
 	dracula: { text: 253, muted: 146, dim: 61, accent: 141, working: 212, success: 84, warning: 228, error: 203, input: 117, output: 212, cache: 141 },
 };
 
+const truecolor = (hex: `#${string}`, text: string): string => {
+	const value = hex.slice(1);
+	const red = Number.parseInt(value.slice(0, 2), 16);
+	const green = Number.parseInt(value.slice(2, 4), 16);
+	const blue = Number.parseInt(value.slice(4, 6), 16);
+	return `\u001b[38;2;${red};${green};${blue}m${text}\u001b[39m`;
+};
+
 const paint = (theme: SidebarTheme, role: Role, text: string): string => {
 	const preset = theme.preset;
-	return preset ? `\u001b[38;5;${PRESET_CODES[preset][role]}m${text}\u001b[39m` : theme.fg(colors[role], text);
+	if (!preset) return theme.fg(colors[role], text);
+	const color = PRESET_COLORS[preset][role];
+	return typeof color === "number" ? `\u001b[38;5;${color}m${text}\u001b[39m` : truecolor(color, text);
 };
 const clean = (value: string): string => value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
 const safe = (value: unknown, fallback = "—"): string => {
@@ -141,7 +167,7 @@ function subagentRows(items: readonly SubagentItem[], theme: SidebarTheme, width
 function panel(title: string, rows: readonly string[], width: number, theme: SidebarTheme): string[] {
 	const inner = Math.max(1, width - 4);
 	const titleText = ` ${title.toUpperCase()} `;
-	const topFill = Math.max(0, width - visibleWidth(titleText) - 4);
+	const topFill = Math.max(0, width - visibleWidth(titleText) - 3);
 	const top = `${paint(theme, "accent", `╭─${titleText}${"─".repeat(topFill)}╮`)}`;
 	const body = rows.map((row) => `${paint(theme, "dim", "│")} ${pad(row, inner)} ${paint(theme, "dim", "│")}`);
 	return [top, ...body, paint(theme, "dim", `╰${"─".repeat(Math.max(0, width - 2))}╯`), ""];

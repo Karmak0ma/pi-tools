@@ -6,6 +6,7 @@ const DISABLE_MOUSE = "\u001b[?1006l\u001b[?1002l";
 const SGR_MOUSE = /^\u001b\[<(\d+);(\d+);(\d+)([Mm])$/;
 const PI_084_REGULAR_RENDER_ADAPTER = Symbol("pi-atelier.regular-render-adapter");
 const PI_084_FULLSCREEN_LAYOUT_ADAPTER = Symbol("pi-atelier.fullscreen-layout-adapter");
+const PI_084_HAS_OVERLAY_ADAPTER = Symbol("pi-atelier.has-overlay-adapter");
 
 interface RegularRenderAdapterState {
 	owner: object;
@@ -19,9 +20,23 @@ interface FullscreenLayoutAdapterState {
 	sidebarWidth: number;
 }
 
+interface HasOverlayAdapterState {
+	owner: object;
+	baseHasOverlay: () => boolean;
+}
+
+interface OverlayStackEntry {
+	hidden?: boolean;
+	options?: {
+		nonCapturing?: boolean;
+		visible?(width: number, height: number): boolean;
+	};
+}
+
 type AdaptedTui = TUI & {
 	[PI_084_REGULAR_RENDER_ADAPTER]: RegularRenderAdapterState | undefined;
 	[PI_084_FULLSCREEN_LAYOUT_ADAPTER]: FullscreenLayoutAdapterState | undefined;
+	[PI_084_HAS_OVERLAY_ADAPTER]: HasOverlayAdapterState | undefined;
 	layoutRoot?: Component;
 	setLayoutRoot(component: Component | undefined): void;
 };
@@ -208,6 +223,45 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 		adaptedTui[PI_084_FULLSCREEN_LAYOUT_ADAPTER] = undefined;
 	};
 
+	const syncHasOverlayAdapter = () => {
+		if (!tui || tui.mode !== "fullscreen") return;
+		const adaptedTui = tui as AdaptedTui;
+		const prototype = Object.getPrototypeOf(tui) as { constructor?: { name?: string } } | null;
+		if (prototype?.constructor?.name !== "TuiAltScreen") return;
+		const currentState = adaptedTui[PI_084_HAS_OVERLAY_ADAPTER];
+		if (currentState?.owner === adapterOwner) return;
+		if (currentState) return;
+		const baseHasOverlay = adaptedTui.hasOverlay;
+		if (typeof baseHasOverlay !== "function") return;
+		adaptedTui[PI_084_HAS_OVERLAY_ADAPTER] = { owner: adapterOwner, baseHasOverlay };
+		// Pi 0.84's alt-screen viewport listener stops resolving scroll views for
+		// selection as soon as ANY overlay is visible, even a nonCapturing one
+		// such as our dock. That makes drags in the chat operate on the composited
+		// screen: the sidebar pixels end up both highlighted and copied. A
+		// nonCapturing overlay never intercepts input, so treat it as absent.
+		adaptedTui.hasOverlay = () => {
+			const state = adaptedTui[PI_084_HAS_OVERLAY_ADAPTER];
+			if (state?.owner !== adapterOwner) return baseHasOverlay();
+			const stack = (adaptedTui as unknown as { overlayStack?: OverlayStackEntry[] }).overlayStack;
+			if (!Array.isArray(stack)) return baseHasOverlay();
+			const columns = adaptedTui.terminal.columns;
+			const rows = adaptedTui.terminal.rows;
+			const isVisible = (entry: OverlayStackEntry): boolean =>
+				entry.hidden !== true &&
+				(entry.options?.visible === undefined || entry.options.visible(columns, rows));
+			return stack.some((entry) => entry.options?.nonCapturing !== true && isVisible(entry));
+		};
+	};
+
+	const restoreHasOverlayAdapter = () => {
+		if (!tui) return;
+		const adaptedTui = tui as AdaptedTui;
+		const currentState = adaptedTui[PI_084_HAS_OVERLAY_ADAPTER];
+		if (currentState?.owner !== adapterOwner) return;
+		adaptedTui.hasOverlay = currentState.baseHasOverlay;
+		adaptedTui[PI_084_HAS_OVERLAY_ADAPTER] = undefined;
+	};
+
 	const prioritizeFullscreenResizeInput = (
 		handler: (data: string) => { consume?: boolean; data?: string } | undefined,
 	) => {
@@ -300,6 +354,7 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 		syncOverlayWidth(nextTui.terminal.columns);
 		syncRegularRenderAdapter();
 		syncFullscreenLayoutAdapter();
+		syncHasOverlayAdapter();
 		requestRender();
 	};
 
@@ -426,6 +481,7 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 			enabled = false;
 			restoreRegularRenderAdapter();
 			restoreFullscreenLayoutAdapter();
+			restoreHasOverlayAdapter();
 			tui?.requestRender();
 			tui = undefined;
 		},
