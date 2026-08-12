@@ -155,6 +155,54 @@ function suppressTodoWidget(runtime: Runtime): void {
 	runtime.ctx.ui.setWidget("rpiv-todos", undefined);
 }
 
+async function openSettings(runtime: Runtime): Promise<void> {
+	if (runtime.ctx.mode !== "tui") {
+		runtime.ctx.ui.notify("Sidebar settings require TUI mode", "warning");
+		return;
+	}
+	const panelLabels: Array<[SidebarPanelId, string]> = [
+		["model", "Model"], ["activity", "Activity"], ["context", "Context"],
+		["usage", "Session usage"], ["todos", "Todos"], ["subagents", "Subagents"],
+	];
+	const presets: SidebarConfig["colorPreset"][] = ["monokai", "catppuccin", "dracula"];
+	await runtime.ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+		let selected = 0;
+		const items = panelLabels.length + 1;
+		const render = (width: number): string[] => {
+			const lines = [theme.bold("Sidebar VFLO settings"), "", "Color preset: " + runtime.config.colorPreset, ""];
+			for (let index = 0; index < items; index += 1) {
+				const isPreset = index === 0;
+				const label = isPreset ? "Color preset" : panelLabels[index - 1]?.[1] ?? "";
+				const value = isPreset ? runtime.config.colorPreset : runtime.config.panels[panelLabels[index - 1]?.[0] ?? "model"] ? "on" : "off";
+				lines.push(`${selected === index ? "❯" : " "} ${label.padEnd(14)} ${value}`);
+			}
+			lines.push("", "↑/↓ select  Enter change  Esc close");
+			return lines.map((line) => line.length > width ? line.slice(0, width) : line);
+		};
+		return {
+			render,
+			invalidate() {},
+			handleInput(data: string) {
+				if (data === "\u001b" || data === "\u0003") { done(); return; }
+				if (data === "\u001b[A" || data === "k") selected = (selected + items - 1) % items;
+				else if (data === "\u001b[B" || data === "j") selected = (selected + 1) % items;
+				else if (data === "\r" || data === " ") {
+					if (selected === 0) {
+						const current = presets.indexOf(runtime.config.colorPreset);
+						runtime.config.colorPreset = presets[(current + 1) % presets.length] ?? "monokai";
+					} else {
+						const panel = panelLabels[selected - 1]?.[0];
+						if (panel) runtime.config.panels[panel] = !runtime.config.panels[panel];
+					}
+					void writeConfig(runtime.config);
+					requestRender(runtime);
+				}
+				tui.requestRender();
+			},
+		};
+	}, { overlay: true, overlayOptions: { anchor: "center", width: 48, maxHeight: "80%", margin: 2 } });
+}
+
 function setSidebarVisible(runtime: Runtime, visible: boolean): void {
 	runtime.sidebarVisible = visible;
 	runtime.config.showSidebarOnStartup = visible;
@@ -192,6 +240,7 @@ function startOverlay(runtime: Runtime): void {
 				const sidebarTheme: SidebarTheme = {
 					fg: (color, text) => theme.fg(color, text),
 					bold: (text) => theme.bold(text),
+					preset: runtime.config.colorPreset,
 				};
 				return {
 					render(width: number): string[] {
@@ -297,8 +346,9 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 			const runtime = runtimeFor(current, ctx);
 			if (!runtime) return;
 			const action = args.trim().toLowerCase();
+			if (!action) { await openSettings(runtime); return; }
 			const visible = action === "show" ? true : action === "hide" ? false : !runtime.sidebarVisible;
-			if (action && !["show", "hide", "toggle"].includes(action)) {
+			if (!["show", "hide", "toggle"].includes(action)) {
 				ctx.ui.notify("Usage: /sidebar [show|hide|toggle]", "warning");
 				return;
 			}

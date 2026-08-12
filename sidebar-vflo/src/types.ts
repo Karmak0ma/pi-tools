@@ -1,9 +1,11 @@
 export type SidebarPanelId = "model" | "activity" | "context" | "usage" | "todos" | "subagents";
+export type SidebarColorPreset = "monokai" | "catppuccin" | "dracula";
 
 export type ActivityState = "ready" | "working" | "warning" | "error";
 
 export interface SidebarConfig {
 	showSidebarOnStartup: boolean;
+	colorPreset: SidebarColorPreset;
 	width: number;
 	panels: Record<SidebarPanelId, boolean>;
 }
@@ -62,6 +64,7 @@ export interface SidebarSnapshot {
 
 export const DEFAULT_CONFIG: SidebarConfig = {
 	showSidebarOnStartup: true,
+	colorPreset: "monokai",
 	width: 44,
 	panels: {
 		model: true,

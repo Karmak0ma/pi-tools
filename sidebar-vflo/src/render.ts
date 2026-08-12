@@ -5,6 +5,7 @@ import type { SidebarConfig, SidebarPanelId, SidebarSnapshot, SubagentItem, Todo
 export interface SidebarTheme {
 	fg(color: ThemeColor, text: string): string;
 	bold(text: string): string;
+	preset?: "monokai" | "catppuccin" | "dracula";
 }
 
 type Role = "text" | "muted" | "dim" | "accent" | "working" | "success" | "warning" | "error" | "input" | "output" | "cache";
@@ -23,7 +24,16 @@ const colors: Record<Role, ThemeColor> = {
 	cache: "syntaxType",
 };
 
-const paint = (theme: SidebarTheme, role: Role, text: string): string => theme.fg(colors[role], text);
+const PRESET_CODES: Record<NonNullable<SidebarTheme["preset"]>, Record<Role, number>> = {
+	monokai: { text: 252, muted: 245, dim: 240, accent: 148, working: 208, success: 148, warning: 221, error: 197, input: 81, output: 141, cache: 115 },
+	catppuccin: { text: 189, muted: 146, dim: 103, accent: 183, working: 215, success: 151, warning: 221, error: 210, input: 117, output: 176, cache: 152 },
+	dracula: { text: 253, muted: 146, dim: 61, accent: 141, working: 212, success: 84, warning: 228, error: 203, input: 117, output: 212, cache: 141 },
+};
+
+const paint = (theme: SidebarTheme, role: Role, text: string): string => {
+	const preset = theme.preset;
+	return preset ? `\u001b[38;5;${PRESET_CODES[preset][role]}m${text}\u001b[39m` : theme.fg(colors[role], text);
+};
 const clean = (value: string): string => value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
 const safe = (value: unknown, fallback = "—"): string => {
 	const text = typeof value === "string" ? clean(value) : "";
@@ -83,7 +93,7 @@ function contextRows(snapshot: SidebarSnapshot, theme: SidebarTheme, width: numb
 	const percentText = percent === null ? "?" : `${percent.toFixed(1)}%`;
 	const tokenText = usage.tokens === null ? "?" : formatTokens(usage.tokens);
 	const maxText = usage.contextWindow > 0 ? formatTokens(usage.contextWindow) : "—";
-	const role: Role = percent !== null && percent >= 90 ? "error" : percent !== null && percent >= 70 ? "warning" : "accent";
+	const role: Role = percent !== null && percent > 60 ? "error" : percent !== null && percent > 40 ? "warning" : "accent";
 	const meterWidth = Math.max(4, Math.min(18, width - 4));
 	const filled = percent === null ? 0 : Math.round((percent / 100) * meterWidth);
 	return [

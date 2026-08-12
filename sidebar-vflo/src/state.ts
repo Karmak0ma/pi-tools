@@ -1,4 +1,4 @@
-import type { SidebarConfig, SidebarPanelId, SidebarSnapshot, SubagentItem, TodoItem, TokenUsage } from "./types.js";
+import type { SidebarColorPreset, SidebarConfig, SidebarPanelId, SidebarSnapshot, SubagentItem, TodoItem, TokenUsage } from "./types.js";
 
 const TODO_STATUSES = new Set(["pending", "in_progress", "completed"]);
 const SUBAGENT_STATUSES = new Set(["queued", "running", "completed", "error", "aborted"]);
@@ -134,9 +134,13 @@ export function parseConfig(value: unknown, fallback: SidebarConfig): SidebarCon
 		}
 	}
 	const width = typeof value.width === "number" && Number.isFinite(value.width) ? Math.trunc(value.width) : fallback.width;
+	const colorPreset: SidebarColorPreset = value.colorPreset === "catppuccin" || value.colorPreset === "dracula" || value.colorPreset === "monokai"
+		? value.colorPreset
+		: fallback.colorPreset;
 	return {
 		showSidebarOnStartup:
 			typeof value.showSidebarOnStartup === "boolean" ? value.showSidebarOnStartup : fallback.showSidebarOnStartup,
+		colorPreset,
 		width: Math.min(72, Math.max(28, width)),
 		panels,
 	};
