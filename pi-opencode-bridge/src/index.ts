@@ -403,6 +403,16 @@ function extractBalancedJson(text: string): string | undefined {
   return undefined;
 }
 
+function extractLeadingBalancedJson(text: string): string | undefined {
+  const firstJsonStart = text.search(/[\{\[]/);
+  if (firstJsonStart < 0) return undefined;
+  const fromRoot = text.slice(firstJsonStart);
+  const balanced = extractBalancedJson(fromRoot);
+  // extractBalancedJson may skip an unbalanced outer object and find a nested one;
+  // only a payload rooted at the first JSON delimiter completes the marker.
+  return balanced && fromRoot.startsWith(balanced) ? balanced : undefined;
+}
+
 function convertSingleQuotedStrings(text: string): string {
   let result = "";
   let inSingle = false;
@@ -495,8 +505,12 @@ function extractMarkerBodies(text: string): {
     const bodyStart = cursor + opening.index + opening[0].length;
     const closing = /<\s*\/\s*pi_tool_call\s*>/i.exec(decoded.slice(bodyStart));
     if (!closing || closing.index === undefined) {
-      bodies.push(decoded.slice(bodyStart));
-      incomplete = true;
+      const unterminatedBody = decoded.slice(bodyStart);
+      const balancedPayload = extractLeadingBalancedJson(unterminatedBody);
+      // The opening marker establishes tool intent; a balanced payload is a complete
+      // protocol unit even when a model substitutes its own DSML closing token.
+      bodies.push(balancedPayload ?? unterminatedBody);
+      incomplete = balancedPayload === undefined;
       break;
     }
     bodies.push(decoded.slice(bodyStart, bodyStart + closing.index));
@@ -606,7 +620,7 @@ function validateToolCall(call: ParsedToolCall, tools: Tool[]): string | undefin
   return undefined;
 }
 
-function parseToolCalls(text: string, tools: Tool[]): ParsedToolResult {
+export function parseToolCalls(text: string, tools: Tool[]): ParsedToolResult {
   const markers = extractMarkerBodies(text);
   const trimmed = decodeHtmlEntities(text).trim();
   let bodies = markers.bodies;
@@ -614,10 +628,17 @@ function parseToolCalls(text: string, tools: Tool[]): ParsedToolResult {
   let issue = markers.incomplete ? "tool-call marker is missing its closing tag" : undefined;
 
   if (bodies.length === 0 && !detected) {
-    const looksLikeJson =
-      /^[\s`]*(?:\{|\[)/.test(trimmed) ||
-      /["'](?:name|tool|tool_calls)["']\s*:/.test(trimmed);
-    if (looksLikeJson) {
+    // Markerless fallback is deliberately narrow: ordinary JSON answers must stay
+    // text, while a root JSON object/array carrying tool-call keys is recoverable.
+    const startsWithJson = /^[\s`]*(?:\{|\[)/.test(trimmed);
+    const hasToolCallEnvelope = /["']tool_calls["']\s*:/.test(trimmed);
+    const hasToolIdentity = /["'](?:name|tool|function)["']\s*:/.test(trimmed);
+    const hasArgumentEnvelope =
+      /["'](?:arguments|args|input|parameters)["']\s*:/.test(trimmed);
+    const looksLikeToolJson =
+      startsWithJson &&
+      (hasToolCallEnvelope || (hasToolIdentity && hasArgumentEnvelope));
+    if (looksLikeToolJson) {
       bodies = [trimmed];
       detected = true;
     }
@@ -819,7 +840,9 @@ function streamOpenCode(
           );
 
         parsed = parseToolCalls(result.text, context.tools ?? []);
-        if (!parsed.issue || !parsed.detected) break;
+        // Never discard executable calls because a malformed sibling or harmless
+        // terminator also produced a diagnostic; repair is only for zero-call intent.
+        if (parsed.calls.length > 0 || !parsed.issue || !parsed.detected) break;
         if (attempt === TOOL_REPAIR_ATTEMPTS) {
           const preview = result.text.trim().slice(0, TOOL_OUTPUT_PREVIEW_LIMIT);
           throw new Error(

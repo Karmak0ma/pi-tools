@@ -109,13 +109,13 @@ For each Pi model call, the extension:
 3. Sends Pi's current prompt/context to `opencode run --format json` over stdin.
 4. Streams the final OpenCode text back into Pi.
 5. Converts `<pi_tool_call>{...}</pi_tool_call>` markers into real Pi tool calls, so Pi executes tools rather than OpenCode.
-6. Validates tool names and required arguments, tolerates common formatting mistakes, and retries once when a tool-call response is invalid instead of silently returning it as plain text.
+6. Validates tool names and required arguments, tolerates common formatting mistakes (including model-specific DSML closing tokens), and retries once only when tool intent is present but no valid call can be recovered.
 
 This keeps file access and edits under Pi's normal tool pipeline.
 
 ## Notes and limitations
 
 - This is a CLI bridge, not a native provider API. It is slower than direct HTTP providers because it starts `opencode run` for each model turn.
-- Tool calling is prompt-bridged. This bridge adds tolerant parsing, validation, and one bounded repair attempt, but native tool-call providers will still be more reliable.
+- Tool calling is prompt-bridged. This bridge treats an explicit opening marker plus balanced tool-call JSON as complete even if the model substitutes a malformed closing token. It preserves recovered valid calls, validates them, and makes one bounded repair attempt only when zero calls are executable. Native tool-call providers will still be more reliable.
 - Image input is not registered; these models are exposed as text-only in Pi.
 - If OpenCode ever attempts to use its own tools, the extension fails the turn instead of hiding it.
