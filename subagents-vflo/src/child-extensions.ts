@@ -65,13 +65,21 @@ function readPackageJson(packageDir: string): PackageJson | null {
  * Resolve a package source to its filesystem directory.
  * Handles:
  * - Absolute paths: /path/to/extension
+ * - Home-relative paths: ~/path/to/extension
  * - npm packages: npm:@scope/name or npm:name
  * - git packages: git:github.com/user/repo
  */
-function resolvePackageDir(source: string): string | null {
-  // Absolute path
-  if (source.startsWith("/")) {
-    if (fs.existsSync(source)) return source;
+export function resolvePackageDir(source: string): string | null {
+  // Pi settings commonly use ~/... package paths. Child resolution must expand
+  // these itself because the path is passed directly to spawn, without a shell.
+  const filesystemSource = source === "~"
+    ? os.homedir()
+    : source.startsWith("~/")
+      ? path.join(os.homedir(), source.slice(2))
+      : source;
+
+  if (path.isAbsolute(filesystemSource)) {
+    if (fs.existsSync(filesystemSource)) return filesystemSource;
     return null;
   }
 
