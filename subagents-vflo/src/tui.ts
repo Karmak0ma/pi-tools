@@ -10,9 +10,12 @@
  * - Ctrl+up: return to main view
  * - Left/Right: cycle between tabs
  * - Up/Down/PgUp/PgDn/Home/End: scroll transcript
- * - Escape: abort selected running subagent, or exit if completed
+ * - t: enter message mode; Enter steers the active subagent
+ * - x: abort selected running subagent, or exit if completed
+ * - Escape: cancel message entry only
  */
 
+import { isKeyRelease } from "@earendil-works/pi-tui";
 import type { SubagentTracker, RuntimeSubagentInstance } from "./tracker.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -30,6 +33,24 @@ export const INSPECTOR_VISIBILITY_CHANNEL = "subagent-inspector:visibility";
 
 export interface InspectorVisibilityEvent {
   visible: boolean;
+}
+
+// pi-tui keeps input listeners in a Set and dispatches them before the focused
+// component. In fullscreen mode, TuiAltScreen's built-in viewport listener
+// consumes PgUp/PgDn, so the inspector must be placed ahead of that listener.
+// Keep this local rather than depending on a private pi-tui type.
+type InputListener = (data: string) => { consume?: boolean; data?: string } | undefined;
+
+function prioritizeInputListener(tui: any, listener: InputListener): void {
+  if (tui?.mode !== "fullscreen") return;
+
+  const listeners = tui.inputListeners;
+  if (!(listeners instanceof Set) || !listeners.delete(listener)) return;
+
+  const existingListeners = [...listeners];
+  listeners.clear();
+  listeners.add(listener);
+  for (const existingListener of existingListeners) listeners.add(existingListener);
 }
 
 // ─── TUI Mode Manager ────────────────────────────────────────────────────────
@@ -52,6 +73,7 @@ export class SubagentTuiManager {
   private tuiRef: any = null;
   private overlayHandle: any = null;
   private inspectorComponent: InstanceType<typeof import("./components/inspector.js").InspectorComponent> | null = null;
+  private removePageNavigationListener: (() => void) | null = null;
 
   constructor(tracker: SubagentTracker) {
     this.tracker = tracker;
@@ -117,10 +139,39 @@ export class SubagentTuiManager {
           {
             onClose: () => this.exit(),
             onAbort: (instance) => this.abortInstance(instance),
+            onMessage: (instance, text) => this.sendMessage(instance, text),
           },
+          _keybindings,
         );
         inspector.setSelectedIndex(initialIndex);
         this.inspectorComponent = inspector;
+
+        // TuiAltScreen handles PgUp/PgDn in an input listener registered by
+        // the host before it dispatches to the focused overlay. Register a
+        // higher-priority listener so those keys scroll this inspector rather
+        // than the main transcript. Arrow keys do not need this detour because
+        // the host viewport listener does not consume them.
+        this.clearPageNavigationListener();
+        const pageNavigationListener: InputListener = (data) => {
+          if (
+            manager.overlayHandle &&
+            typeof manager.overlayHandle.isFocused === "function" &&
+            !manager.overlayHandle.isFocused()
+          ) {
+            return;
+          }
+          if (!inspector.isPageNavigationInput(data)) return;
+
+          // Input listeners run before TuiBase filters Kitty key-release
+          // events for focused components. Consume releases without scrolling
+          // so a press/release pair cannot move two pages.
+          if (!isKeyRelease(data)) inspector.handleInput(data);
+          return { consume: true };
+        };
+        if (typeof tui.addInputListener === "function") {
+          this.removePageNavigationListener = tui.addInputListener(pageNavigationListener);
+          prioritizeInputListener(tui, pageNavigationListener);
+        }
 
         return {
           render: (width: number): string[] => {
@@ -152,6 +203,7 @@ export class SubagentTuiManager {
       // If ctx.ui.custom throws, TUI mode is unavailable
       this._available = false;
     } finally {
+      this.clearPageNavigationListener();
       this._active = false;
       (globalThis as any).__powerlineVflo_yieldScroll = false;
       this.closeCallback = null;
@@ -167,6 +219,7 @@ export class SubagentTuiManager {
   exit(): void {
     if (!this._active) return;
     this._active = false;
+    this.clearPageNavigationListener();
     // Release scroll key ownership back to compositor
     (globalThis as any).__powerlineVflo_yieldScroll = false;
     if (this.closeCallback) {
@@ -176,6 +229,11 @@ export class SubagentTuiManager {
     this.tuiRef = null;
     this.overlayHandle = null;
     this.inspectorComponent = null;
+  }
+
+  private clearPageNavigationListener(): void {
+    this.removePageNavigationListener?.();
+    this.removePageNavigationListener = null;
   }
 
   /**
@@ -188,18 +246,43 @@ export class SubagentTuiManager {
   }
 
   /**
-   * Abort a specific subagent instance.
+   * Send a steering message to a selected active child session.
    */
+  private async sendMessage(
+    instance: RuntimeSubagentInstance,
+    text: string,
+  ): Promise<void> {
+    if (instance.status !== "running" || !instance.control || !instance.process || instance.process.exitCode !== null) {
+      instance.summary.errorMessage = "Subagent process is no longer available";
+      instance.status = "error";
+      instance.summary.status = "error";
+      this.requestRender();
+      return;
+    }
+
+    instance.summary.errorMessage = undefined;
+    instance.summary.isPartial = true;
+    this.requestRender();
+
+    try {
+      await instance.control.sendMessage(text, "steer");
+    } catch (error) {
+      instance.status = "error";
+      instance.summary.status = "error";
+      instance.summary.isPartial = false;
+      instance.summary.errorMessage = error instanceof Error ? error.message : String(error);
+      this.requestRender();
+    }
+  }
+
+  /** Abort a specific subagent instance. */
   private abortInstance(instance: RuntimeSubagentInstance): void {
-    if (instance.status !== "running" || !instance.process) return;
-    const proc = instance.process;
-    proc.kill("SIGTERM");
-    const timer = setTimeout(() => {
-      if (instance.process === proc && instance.status === "running") {
-        proc.kill("SIGKILL");
-      }
-    }, 5000);
-    proc.once("close", () => clearTimeout(timer));
+    if (instance.status !== "running" || !instance.control) return;
+    instance.control.abort();
+    instance.status = "aborted";
+    instance.summary.status = "aborted";
+    instance.summary.isPartial = false;
+    this.requestRender();
   }
 
   /**

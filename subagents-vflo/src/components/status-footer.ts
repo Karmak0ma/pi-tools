@@ -16,6 +16,7 @@ export interface FooterMetrics {
   scrollOffset: number;
   maxScroll: number;
   selectedRunning: boolean;
+  messageMode: boolean;
 }
 
 export class StatusFooterComponent implements Component {
@@ -28,6 +29,7 @@ export class StatusFooterComponent implements Component {
     scrollOffset: 0,
     maxScroll: 0,
     selectedRunning: false,
+    messageMode: false,
   };
   private cachedLines: string[] | null = null;
   private cachedWidth: number = -1;
@@ -46,7 +48,8 @@ export class StatusFooterComponent implements Component {
       m.errored !== metrics.errored ||
       m.scrollOffset !== metrics.scrollOffset ||
       m.maxScroll !== metrics.maxScroll ||
-      m.selectedRunning !== metrics.selectedRunning
+      m.selectedRunning !== metrics.selectedRunning ||
+      m.messageMode !== metrics.messageMode
     ) {
       this.metrics = { ...metrics };
       this.cachedLines = null;
@@ -87,7 +90,13 @@ export class StatusFooterComponent implements Component {
     // Line 3: Keyboard hints
     const hints: string[] = [];
     hints.push("←/→ switch");
-    hints.push(this.metrics.selectedRunning ? "Esc abort" : "Esc close");
+    if (this.metrics.messageMode) {
+      hints.push("Enter steer");
+      hints.push("Esc cancel input");
+    } else {
+      hints.push("t talk");
+      hints.push(this.metrics.selectedRunning ? "x abort" : "x close");
+    }
     hints.push("↑/↓ scroll");
     hints.push("PgUp/PgDn page");
     lines.push(truncateToWidth(this.theme.fg("muted", " " + hints.join("  │  ")), safeWidth));

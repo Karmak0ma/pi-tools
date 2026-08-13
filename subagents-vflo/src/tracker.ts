@@ -15,6 +15,13 @@ import {
   emptyUsage,
 } from "./types.js";
 
+export type ChildMessageDelivery = "prompt" | "steer";
+
+export interface SubagentProcessControl {
+  sendMessage(message: string, delivery: ChildMessageDelivery): Promise<void>;
+  abort(): void;
+}
+
 // ─── Runtime Instance ────────────────────────────────────────────────────────
 
 export interface RuntimeSubagentInstance {
@@ -33,6 +40,7 @@ export interface RuntimeSubagentInstance {
   status: TaskStatus;
   summary: LiveTaskSummary;
   process?: ChildProcess;
+  control?: SubagentProcessControl;
 }
 
 // ─── Subagent Tracker ────────────────────────────────────────────────────────
@@ -73,26 +81,31 @@ export class SubagentTracker {
   }
 
   killAll(): Promise<void> {
-    const runningInstances = Array.from(this.instances.values()).filter(
-      (i) => i.status === "running" && i.process,
+    // Shut down every live child during session cleanup, including children
+    // that are between an agent-settled event and their RPC process close.
+    const liveInstances = Array.from(this.instances.values()).filter(
+      (i) => (i.control || i.process) && i.process?.exitCode === null,
     );
-    if (runningInstances.length === 0) return Promise.resolve();
+    if (liveInstances.length === 0) return Promise.resolve();
 
     return new Promise<void>((resolve) => {
-      let remaining = runningInstances.length;
+      let remaining = liveInstances.length;
       const done = () => { if (--remaining <= 0) resolve(); };
 
-      for (const instance of runningInstances) {
-        const proc = instance.process!;
+      for (const instance of liveInstances) {
+        const proc = instance.process;
+        if (!proc) {
+          done();
+          continue;
+        }
+
         let exited = false;
         let resolved = false;
-
         const doneOnce = () => {
           if (resolved) return;
           resolved = true;
           done();
         };
-
         const onExit = () => {
           exited = true;
           doneOnce();
@@ -100,7 +113,8 @@ export class SubagentTracker {
         proc.once("close", onExit);
         proc.once("error", onExit);
 
-        proc.kill("SIGTERM");
+        instance.control?.abort();
+        if (!instance.control) proc.kill("SIGTERM");
         setTimeout(() => {
           if (!exited) {
             proc.kill("SIGKILL");

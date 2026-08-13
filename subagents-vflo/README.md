@@ -146,7 +146,11 @@ Inside the inspector:
 | `Ctrl+↑` | Exit inspector mode |
 | `←` / `→` | Cycle between subagent tabs (wraps around) |
 | `↑` / `↓` | Scroll conversation body |
-| `Escape` | Abort running subagent / Exit if completed |
+| `PgUp` / `PgDn` | Scroll by page |
+| `t` | Enter message mode for the selected subagent |
+| `Enter` | Steer the selected running subagent (in message mode) |
+| `x` | Abort running subagent / Exit if completed |
+| `Escape` | Cancel message entry only |
 
 The inspector shows:
 - **Tab bar** — All subagent instances with status icons (○ queued, ⏳ running, ✓ completed, ✗ error, ⊘ aborted)

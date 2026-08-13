@@ -366,11 +366,18 @@ export default function (pi: ExtensionAPI) {
               signal,
               onEvent(event) {
                 instance.events.push(event);
-                // Update live summary
-                if (event.type === "message_start") {
+
+                if (event.type === "agent_start") {
+                  tracker.updateStatus(id, "running", { isPartial: true, errorMessage: undefined });
+                  updater.immediate();
+                }
+
+                // Update live summary for streaming text. The same callback
+                // remains attached after the first turn so inspector messages
+                // can update the existing transcript as well.
+                if (event.type === "message_start" && event.message?.role === "assistant") {
                   instance.summary.isPartial = true;
                 }
-                // Handle streaming text deltas for live display
                 if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
                   instance.summary.isPartial = true;
                   instance.summary.latestOutput += event.assistantMessageEvent.delta ?? "";
@@ -378,8 +385,10 @@ export default function (pi: ExtensionAPI) {
                 }
                 if (event.type === "message_end" && event.message?.role === "assistant") {
                   const msg = event.message;
-                  if (msg.content) {
+                  let messageText = "";
+                  if (Array.isArray(msg.content)) {
                     for (const part of msg.content) {
+                      if (part.type === "text") messageText += (messageText ? "\n" : "") + part.text;
                       if (part.type === "toolCall") {
                         const argsStr = JSON.stringify(part.arguments || {});
                         instance.summary.toolCalls.push({
@@ -389,7 +398,12 @@ export default function (pi: ExtensionAPI) {
                       }
                     }
                   }
+                  if (messageText) instance.summary.latestOutput = messageText;
                   instance.summary.isPartial = false;
+                  updater.immediate();
+                }
+                if (event.type === "agent_settled") {
+                  tracker.updateStatus(id, "completed", { isPartial: false });
                   updater.immediate();
                 }
               },
@@ -398,8 +412,20 @@ export default function (pi: ExtensionAPI) {
                 instance.summary.stderrPreview = instance.stderr.slice(0, 500);
                 updater.throttled();
               },
-              onProcessReady(proc) {
+              onProcessReady(proc, control) {
                 instance.process = proc;
+                instance.control = control;
+              },
+              onProcessExit(code) {
+                instance.process = undefined;
+                instance.control = undefined;
+                if (instance.status === "running") {
+                  tracker.updateStatus(id, code === 0 ? "completed" : "error", code === 0 ? undefined : {
+                    errorMessage: instance.summary.errorMessage || `Subagent exited with code ${code ?? 1}`,
+                    isPartial: false,
+                  });
+                  updater.immediate();
+                }
               },
             });
 
@@ -433,7 +459,8 @@ export default function (pi: ExtensionAPI) {
             updater.immediate();
             return makeErrorSummaryFromInstance(instance, err.message || "Unknown error");
           } finally {
-            instance.process = undefined;
+            // runChild closes the RPC child after the agent settles; the
+            // process/control references are cleared by onProcessExit.
           }
         },
       );

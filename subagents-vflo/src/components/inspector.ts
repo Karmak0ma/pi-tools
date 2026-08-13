@@ -10,8 +10,13 @@
  * - No frameMarker — output stability guaranteed by component caching
  */
 
-import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { AssistantMessageComponent, ToolExecutionComponent, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { Input, Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+  AssistantMessageComponent,
+  ToolExecutionComponent,
+  UserMessageComponent,
+  getMarkdownTheme,
+} from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import type { RuntimeSubagentInstance } from "../tracker.js";
 import type { SubagentTracker } from "../tracker.js";
@@ -29,9 +34,9 @@ interface TabState {
   components: Component[];
   lastProcessedEventIndex: number;
   activeAssistantMessage: AssistantMessageComponent | null;
+  activeAssistantText: string;
   activeToolExecutions: Map<string, ToolExecutionComponent>;
   dirty: boolean;
-  finalized: boolean;
 }
 
 function createTabState(): TabState {
@@ -39,9 +44,9 @@ function createTabState(): TabState {
     components: [],
     lastProcessedEventIndex: 0,
     activeAssistantMessage: null,
+    activeAssistantText: "",
     activeToolExecutions: new Map(),
     dirty: true,
-    finalized: false,
   };
 }
 
@@ -54,34 +59,60 @@ function processNewEvents(
   cwd: string,
   theme: TuiTheme,
 ): void {
-  if (tab.finalized) return;
-
   const events = instance.events;
   for (let i = tab.lastProcessedEventIndex; i < events.length; i++) {
     const event = events[i];
     try {
       switch (event.type) {
         case "message_start": {
-          // Create new AssistantMessageComponent
+          // User messages are rendered from message_end below. Only create a
+          // streaming assistant component for assistant message starts.
+          if (event.message?.role !== "assistant") break;
           const component = new AssistantMessageComponent(undefined, false, getMarkdownTheme());
           tab.activeAssistantMessage = component;
+          tab.activeAssistantText = "";
           tab.components.push(component);
           tab.dirty = true;
           break;
         }
 
         case "message_update": {
-          // Update active assistant message with partial
-          if (event.assistantMessageEvent?.partial && tab.activeAssistantMessage) {
-            tab.activeAssistantMessage.updateContent(event.assistantMessageEvent.partial);
-            tab.dirty = true;
+          // JSON/RPC mode sends deltas rather than cumulative partial messages.
+          // Rebuild a minimal streaming assistant message for visible text.
+          const update = event.assistantMessageEvent;
+          if (tab.activeAssistantMessage && update) {
+            if (update.type === "text_delta") tab.activeAssistantText += update.delta ?? "";
+            if (tab.activeAssistantText) {
+              tab.activeAssistantMessage.updateContent({
+                role: "assistant",
+                content: [{ type: "text", text: tab.activeAssistantText }],
+              } as any, true);
+              tab.dirty = true;
+            } else if (update.partial) {
+              tab.activeAssistantMessage.updateContent(update.partial);
+              tab.dirty = true;
+            }
           }
           break;
         }
 
         case "message_end": {
-          // Finalize assistant message
           const msg = event.message;
+          if (msg?.role === "user") {
+            const text = Array.isArray(msg.content)
+              ? msg.content
+                  .filter((part: any) => part?.type === "text")
+                  .map((part: any) => part.text)
+                  .join("\n")
+              : typeof msg.content === "string" ? msg.content : "";
+            if (text) {
+              tab.components.push(new UserMessageComponent(text, getMarkdownTheme()));
+              tab.dirty = true;
+            }
+            break;
+          }
+
+          // Finalize assistant message
           if (msg?.role === "assistant") {
             // Check if message has visible text content (not just tool calls)
             const hasVisibleContent =
@@ -102,6 +133,7 @@ function processNewEvents(
                 if (idx >= 0) tab.components.splice(idx, 1);
               }
               tab.activeAssistantMessage = null;
+              tab.activeAssistantText = "";
             } else if (hasVisibleContent) {
               // Fallback: message_start was missed, but we have visible content
               const component = new AssistantMessageComponent(msg, false, getMarkdownTheme());
@@ -270,10 +302,8 @@ function processNewEvents(
 
   tab.lastProcessedEventIndex = events.length;
 
-  // Mark finalized if instance is done
-  if (instance.status !== "running" && instance.status !== "queued") {
-    tab.finalized = true;
-  }
+  // Continue processing until the RPC child closes so the final events are
+  // rendered before the inspector tab is considered complete.
 }
 
 // ─── StderrComponent ─────────────────────────────────────────────────────────
@@ -349,6 +379,10 @@ class PlaceholderComponent implements Component {
 export interface InspectorCallbacks {
   onClose: () => void;
   onAbort: (instance: RuntimeSubagentInstance) => void;
+  onMessage: (
+    instance: RuntimeSubagentInstance,
+    text: string,
+  ) => Promise<void>;
 }
 
 export class InspectorComponent {
@@ -356,6 +390,8 @@ export class InspectorComponent {
   private tui: TUI;
   private theme: TuiTheme;
   private callbacks: InspectorCallbacks;
+  private keybindings: any;
+  private messageInput: Input | null = null;
 
   // Sub-components
   private tabBar: TabBarComponent;
@@ -374,11 +410,13 @@ export class InspectorComponent {
     tui: TUI,
     theme: TuiTheme,
     callbacks: InspectorCallbacks,
+    keybindings?: any,
   ) {
     this.tracker = tracker;
     this.tui = tui;
     this.theme = theme;
     this.callbacks = callbacks;
+    this.keybindings = keybindings;
 
     this.tabBar = new TabBarComponent(theme);
     this.taskHeader = new TaskHeaderComponent(theme);
@@ -396,6 +434,16 @@ export class InspectorComponent {
   /** Get selected tab index. */
   getSelectedIndex(): number {
     return this.selectedIndex;
+  }
+
+  /**
+   * Identify page-navigation input before the host TUI's fullscreen viewport
+   * listener sees it. TuiAltScreen consumes PgUp/PgDn for the main transcript
+   * before forwarding input to the focused overlay, so the manager uses this
+   * predicate to route those keys directly to this component.
+   */
+  isPageNavigationInput(data: string): boolean {
+    return this.isPageUp(data) || this.isPageDown(data);
   }
 
   // ─── Component Interface ─────────────────────────────────────────────────
@@ -431,8 +479,8 @@ export class InspectorComponent {
     this.taskHeader.setInstance(selectedInstance || null);
     lines.push(...this.taskHeader.render(width));
 
-    // Footer height is always 3
-    const footerHeight = 3;
+    // The message editor occupies two additional rows while active.
+    const footerHeight = 3 + (this.messageInput ? 2 : 0);
     const usedHeight = lines.length + footerHeight;
     const viewportHeight = Math.max(3, termHeight - usedHeight);
 
@@ -501,7 +549,14 @@ export class InspectorComponent {
     // Transcript viewport (fills remaining space)
     lines.push(...this.viewport.getVisibleLines(width, viewportHeight));
 
-    // Footer
+    // Optional message editor, followed by the status/footer hints.
+    if (this.messageInput) {
+      lines.push(this.theme.fg("accent", " message to subagent (Enter steer):"));
+      for (const inputLine of this.messageInput.render(Math.max(1, width - 2))) {
+        lines.push(truncateToWidth(" " + inputLine, width));
+      }
+    }
+
     this.footer.update({
       total: instances.length,
       running: instances.filter((i) => i.status === "running").length,
@@ -510,6 +565,7 @@ export class InspectorComponent {
       scrollOffset: this.viewport.scrollOffset,
       maxScroll: this.viewport.getMaxScroll(),
       selectedRunning: selectedInstance?.status === "running",
+      messageMode: !!this.messageInput,
     });
     lines.push(...this.footer.render(width));
 
@@ -525,18 +581,53 @@ export class InspectorComponent {
   handleInput(data: string): void {
     const instances = this.tracker.getOrdered();
 
-    if (matchesKey(data, "escape")) {
-      const selected = instances[this.selectedIndex];
-      if (selected?.status === "running") {
-        this.callbacks.onAbort(selected);
-      } else {
-        this.callbacks.onClose();
-      }
+    // Ctrl+Up remains an explicit alternate close shortcut.
+    if (matchesKey(data, "ctrl+up")) {
+      this.cancelMessageInput();
+      this.callbacks.onClose();
       return;
     }
 
-    if (matchesKey(data, "ctrl+up")) {
-      this.callbacks.onClose();
+    // Escape only cancels message entry. It never aborts a subagent or closes
+    // the inspector; x owns both of those actions now.
+    if (this.messageInput) {
+      if (matchesKey(data, Key.escape)) {
+        this.cancelMessageInput();
+        this.tui.requestRender();
+        return;
+      }
+      if (this.isPageUp(data)) {
+        this.viewport.scrollBy(-this.viewport.pageSize);
+        this.tui.requestRender();
+        return;
+      }
+      if (this.isPageDown(data)) {
+        this.viewport.scrollBy(this.viewport.pageSize);
+        this.tui.requestRender();
+        return;
+      }
+      if (matchesKey(data, Key.enter)) {
+        void this.submitMessage();
+        return;
+      }
+      this.messageInput.handleInput(data);
+      this.tui.requestRender();
+      return;
+    }
+
+    // x aborts the selected active subagent, or closes the inspector once the
+    // selected subagent is no longer running.
+    if (matchesKey(data, "x")) {
+      const selected = instances[this.selectedIndex];
+      if (selected?.status === "running") this.callbacks.onAbort(selected);
+      else this.callbacks.onClose();
+      return;
+    }
+
+    // Enter message mode with t. Keeping this separate from the navigation
+    // mode makes x usable as a command without preventing x in messages.
+    if (matchesKey(data, "t")) {
+      this.beginMessageInput();
       return;
     }
 
@@ -562,25 +653,25 @@ export class InspectorComponent {
       return;
     }
 
-    if (matchesKey(data, "up")) {
+    if (this.isUp(data)) {
       this.viewport.scrollBy(-1);
       this.tui.requestRender();
       return;
     }
 
-    if (matchesKey(data, "down")) {
+    if (this.isDown(data)) {
       this.viewport.scrollBy(1);
       this.tui.requestRender();
       return;
     }
 
-    if (matchesKey(data, "pageup" as any)) {
+    if (this.isPageUp(data)) {
       this.viewport.scrollBy(-this.viewport.pageSize);
       this.tui.requestRender();
       return;
     }
 
-    if (matchesKey(data, "pagedown" as any)) {
+    if (this.isPageDown(data)) {
       this.viewport.scrollBy(this.viewport.pageSize);
       this.tui.requestRender();
       return;
@@ -609,15 +700,67 @@ export class InspectorComponent {
 
   // ─── Private ─────────────────────────────────────────────────────────────
 
+  private matchesBinding(data: string, binding: string, fallback: any): boolean {
+    return !!this.keybindings?.matches?.(data, binding) || matchesKey(data, fallback);
+  }
+
+  private isUp(data: string): boolean {
+    return this.matchesBinding(data, "tui.select.up", Key.up);
+  }
+
+  private isDown(data: string): boolean {
+    return this.matchesBinding(data, "tui.select.down", Key.down);
+  }
+
+  private isPageUp(data: string): boolean {
+    // Use the injected keybinding manager first so custom page bindings work,
+    // then retain the standard and shift-arrow aliases for terminals that
+    // encode paging with a modified CSI sequence.
+    return this.matchesBinding(data, "tui.select.pageUp", Key.pageUp) || matchesKey(data, "shift+up");
+  }
+
+  private isPageDown(data: string): boolean {
+    return this.matchesBinding(data, "tui.select.pageDown", Key.pageDown) || matchesKey(data, "shift+down");
+  }
+
+  private beginMessageInput(): void {
+    const selected = this.tracker.getOrdered()[this.selectedIndex];
+    if (selected?.status !== "running") return;
+    this.messageInput = new Input();
+    this.messageInput.focused = true;
+    this.messageInput.onEscape = () => this.cancelMessageInput();
+    this.tui.requestRender(true);
+  }
+
+  private cancelMessageInput(): void {
+    this.messageInput = null;
+  }
+
+  private async submitMessage(): Promise<void> {
+    const input = this.messageInput;
+    if (!input) return;
+    const text = input.getValue().trim();
+    if (!text) return;
+
+    const selected = this.tracker.getOrdered()[this.selectedIndex];
+    this.messageInput = null;
+    if (!selected) return;
+
+    try {
+      await this.callbacks.onMessage(selected, text);
+    } catch {
+      // The manager records the error on the instance and requests a redraw.
+    }
+    this.tui.requestRender(true);
+  }
+
   private getTabState(instance: RuntimeSubagentInstance): TabState {
     let tab = this.tabStates.get(instance.id);
     if (!tab) {
       tab = createTabState();
       this.tabStates.set(instance.id, tab);
     }
-    if (!tab.finalized) {
-      processNewEvents(instance, tab, this.tui, instance.cwd, this.theme);
-    }
+    processNewEvents(instance, tab, this.tui, instance.cwd, this.theme);
     return tab;
   }
 }
