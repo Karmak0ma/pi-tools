@@ -1,17 +1,29 @@
 /**
  * TaskHeaderComponent — renders the pinned task metadata section.
  *
- * Shows: agent name + status, model, cwd, thinking effort, tools, warnings, task prompt.
+ * Shows: agent name + status, model, cwd, thinking effort, tools, live token/context usage, warnings, and task prompt.
  * Uses UserMessageComponent for the task prompt to achieve parity with main UI.
  * Variable height (parity-first) — renders at natural height, no artificial cap.
  */
 
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { UserMessageComponent, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import type { RuntimeSubagentInstance } from "../tracker.js";
 import type { TuiTheme } from "./types.js";
 import type { TaskStatus } from "../types.js";
+
+/**
+ * Keep the lazy-loaded inspector header self-contained. Importing this helper
+ * from the tool-row renderer made the overlay depend on a named export that
+ * is not guaranteed to exist in pi's runtime module loader.
+ */
+function formatTokens(count: number): string {
+  if (count < 1000) return count.toString();
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1000000) return `${Math.round(count / 1000)}k`;
+  return `${(count / 1000000).toFixed(1)}M`;
+}
 
 function statusIcon(status: TaskStatus, theme: TuiTheme): string {
   switch (status) {
@@ -41,6 +53,7 @@ export class TaskHeaderComponent implements Component {
   private lastModel: string | undefined = undefined;
   private lastCwd: string = "";
   private lastWarningsKey: string = "";
+  private lastUsageKey: string = "";
 
   constructor(theme: TuiTheme) {
     this.theme = theme;
@@ -56,10 +69,20 @@ export class TaskHeaderComponent implements Component {
       this.lastModel = undefined;
       this.lastCwd = "";
       this.lastWarningsKey = "";
+      this.lastUsageKey = "";
       return;
     }
 
     const warningsKey = instance.warnings.join("|");
+    const usage = instance.summary.usage;
+    const usageKey = [
+      usage.input,
+      usage.output,
+      usage.cacheRead,
+      usage.cacheWrite,
+      usage.contextTokens,
+      instance.contextWindow ?? "",
+    ].join("|");
 
     if (instance.id !== this.lastInstanceId) {
       // New instance — full rebuild
@@ -69,13 +92,15 @@ export class TaskHeaderComponent implements Component {
       this.lastModel = instance.model;
       this.lastCwd = instance.cwd;
       this.lastWarningsKey = warningsKey;
+      this.lastUsageKey = usageKey;
       this.taskComponent = new UserMessageComponent(instance.task, getMarkdownTheme());
       this.cachedLines = null;
     } else if (
       instance.status !== this.lastStatus ||
       instance.model !== this.lastModel ||
       instance.cwd !== this.lastCwd ||
-      warningsKey !== this.lastWarningsKey
+      warningsKey !== this.lastWarningsKey ||
+      usageKey !== this.lastUsageKey
     ) {
       // Same instance, but rendered fields changed
       this.instance = instance;
@@ -83,6 +108,7 @@ export class TaskHeaderComponent implements Component {
       this.lastModel = instance.model;
       this.lastCwd = instance.cwd;
       this.lastWarningsKey = warningsKey;
+      this.lastUsageKey = usageKey;
       this.cachedLines = null;
     }
   }
@@ -125,6 +151,42 @@ export class TaskHeaderComponent implements Component {
     if (inst.tools.length > 0) {
       lines.push(truncateToWidth(
         this.theme.fg("dim", `  tools: ${inst.tools.join(", ")}`),
+        width,
+      ));
+    }
+
+    // Usage is kept in the pinned header so it remains visible while the
+    // transcript is scrolled. Cache reads and writes are intentionally shown
+    // as one total because the request is interested in cached token volume,
+    // not billing-category detail.
+    const usage = inst.summary.usage;
+    const cachedTokens = usage.cacheRead + usage.cacheWrite;
+    lines.push(truncateToWidth(
+      this.theme.fg(
+        "dim",
+        `  tokens: input ${formatTokens(usage.input)}  output ${formatTokens(usage.output)}  cached ${formatTokens(cachedTokens)}`,
+      ),
+      width,
+    ));
+
+    if (inst.contextWindow && inst.contextWindow > 0) {
+      const contextPercent = (usage.contextTokens / inst.contextWindow) * 100;
+      const contextColor = contextPercent > 90
+        ? "error"
+        : contextPercent > 70
+          ? "warning"
+          : "dim";
+      lines.push(truncateToWidth(
+        this.theme.fg(
+          contextColor,
+          `  context: ${formatTokens(usage.contextTokens)} / ${formatTokens(inst.contextWindow)} (${contextPercent.toFixed(1)}%)`,
+        ),
+        width,
+      ));
+    } else {
+      // A queued task can be visible before model resolution finishes.
+      lines.push(truncateToWidth(
+        this.theme.fg("dim", `  context: ${formatTokens(usage.contextTokens)} / ?`),
         width,
       ));
     }

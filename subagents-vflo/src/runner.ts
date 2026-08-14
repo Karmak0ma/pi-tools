@@ -12,7 +12,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import type { ChildMessageDelivery, SubagentProcessControl } from "./tracker.js";
-import { emptyUsage, type TaskUsage, type ThinkingLevel } from "./types.js";
+import { contextTokensFromUsage, emptyUsage, type TaskUsage, type ThinkingLevel } from "./types.js";
 
 // ─── Pi Invocation ───────────────────────────────────────────────────────────
 
@@ -236,7 +236,10 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
           result.usage.cacheRead += usage.cacheRead || 0;
           result.usage.cacheWrite += usage.cacheWrite || 0;
           result.usage.cost += usage.cost?.total || 0;
-          result.usage.contextTokens = usage.totalTokens || 0;
+          const contextTokens = contextTokensFromUsage(usage);
+          // Preserve the last known context after providers emit an error or
+          // zero-usage response, which cannot describe the active context.
+          if (contextTokens > 0) result.usage.contextTokens = contextTokens;
         }
         if (!result.model && msg.model) result.model = msg.model;
         if (msg.stopReason) result.stopReason = msg.stopReason;

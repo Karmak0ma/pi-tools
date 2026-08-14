@@ -32,6 +32,8 @@ export interface RuntimeSubagentInstance {
   task: string;
   cwd: string;
   model?: string;
+  /** Context-window capacity for the resolved model, used by the live inspector header. */
+  contextWindow?: number;
   thinking?: ThinkingLevel;
   tools: string[];
   warnings: string[];
@@ -151,6 +153,7 @@ export function createInstance(opts: {
   task: string;
   cwd: string;
   model?: string;
+  contextWindow?: number;
   thinking?: ThinkingLevel;
   tools?: string[];
   warnings?: string[];
@@ -178,6 +181,7 @@ export function createInstance(opts: {
     task: opts.task,
     cwd: opts.cwd,
     model: opts.model,
+    contextWindow: opts.contextWindow,
     thinking: opts.thinking,
     tools: opts.tools || [],
     warnings: opts.warnings || [],

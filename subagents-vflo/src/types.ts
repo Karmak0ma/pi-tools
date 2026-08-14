@@ -67,6 +67,27 @@ export function emptyUsage(): TaskUsage {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }
 
+/**
+ * Return the context size reported for an assistant response.
+ *
+ * Providers normally populate `totalTokens`, but the component-level fields
+ * are the safest fallback for providers that omit it. Keeping this fallback
+ * in one place also ensures live and final usage display the same number.
+ */
+export function contextTokensFromUsage(usage: {
+  totalTokens?: number;
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+}): number {
+  return usage.totalTokens ||
+    (usage.input || 0) +
+      (usage.output || 0) +
+      (usage.cacheRead || 0) +
+      (usage.cacheWrite || 0);
+}
+
 // ─── Task Status ─────────────────────────────────────────────────────────────
 
 export type TaskStatus = "queued" | "running" | "completed" | "error" | "aborted";

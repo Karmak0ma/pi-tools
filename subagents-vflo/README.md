@@ -9,6 +9,7 @@ A pi extension that enables delegating tasks to specialized subagents running in
 - **Full isolation** — Each subagent runs in its own `pi` subprocess with no shared state
 - **TUI Inspector** — Visual inspector mode to monitor subagent progress in real-time
 - **Live streaming** — See subagent output as it's generated
+- **Live usage header** — Track input, output, cached tokens, and context-window utilization while each subagent works
 - **Context-aware abort** — Graceful SIGTERM → SIGKILL escalation with timer cleanup
 - **Agent discovery** — Built-in, user, and project agents with clear override precedence
 
@@ -154,6 +155,7 @@ Inside the inspector:
 
 The inspector shows:
 - **Tab bar** — All subagent instances with status icons (○ queued, ⏳ running, ✓ completed, ✗ error, ⊘ aborted)
+- **Task header** — Model, thinking effort, allowed tools, live input/output/cached token totals, and context usage as `X / Y (N%)`
 - **Conversation body** — Reconstructed transcript with assistant text, tool calls, tool results, and stderr
 - **Footer** — Navigation hints and current status
 - **Live updates** — Streaming text as it arrives

@@ -25,6 +25,7 @@ import {
   type TaskItem,
   type TaskStatus,
   THINKING_LEVELS,
+  contextTokensFromUsage,
   emptyUsage,
 } from "./types.js";
 import { SubagentTuiManager } from "./tui.js";
@@ -321,6 +322,15 @@ export default function (pi: ExtensionAPI) {
           }
           instance.model = modelResult.model;
           instance.summary.model = modelResult.model;
+          // Resolve the same model metadata used by the parent registry so the
+          // inspector can show context capacity before the first response.
+          const modelParts = modelResult.model.split("/");
+          const resolvedModel = availableModels.find(
+            (availableModel) =>
+              availableModel.provider === modelParts[0] &&
+              availableModel.id === modelParts.slice(1).join("/"),
+          );
+          instance.contextWindow = resolvedModel?.contextWindow;
 
           // Resolve tools
           const toolResult = resolveTools(agent, parentActiveToolNames);
@@ -385,6 +395,7 @@ export default function (pi: ExtensionAPI) {
                 }
                 if (event.type === "message_end" && event.message?.role === "assistant") {
                   const msg = event.message;
+                  updateLiveUsage(instance, msg);
                   let messageText = "";
                   if (Array.isArray(msg.content)) {
                     for (const part of msg.content) {
@@ -681,6 +692,30 @@ function emitUpdate(
   if (tuiManager?.isActive) {
     tuiManager.requestRender();
   }
+}
+
+/**
+ * Copy usage from each completed assistant response into the live summary.
+ *
+ * RPC streaming events intentionally omit cumulative partial assistant
+ * snapshots, so `message_end` is the earliest authoritative point at which
+ * token counts are available. Updating here keeps the inspector current after
+ * every model turn instead of waiting for the child process to exit.
+ */
+function updateLiveUsage(instance: { summary: LiveTaskSummary }, message: any): void {
+  const usage = message?.usage;
+  if (!usage) return;
+
+  const current = instance.summary.usage;
+  current.input += usage.input || 0;
+  current.output += usage.output || 0;
+  current.cacheRead += usage.cacheRead || 0;
+  current.cacheWrite += usage.cacheWrite || 0;
+  current.cost += usage.cost?.total || 0;
+  current.turns++;
+
+  const contextTokens = contextTokensFromUsage(usage);
+  if (contextTokens > 0) current.contextTokens = contextTokens;
 }
 
 function makePersistedSummary(instance: {
