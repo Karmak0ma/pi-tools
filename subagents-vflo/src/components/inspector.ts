@@ -485,8 +485,10 @@ export class InspectorComponent {
     const viewportHeight = Math.max(3, termHeight - usedHeight);
 
     // Process events and build transcript for selected instance
+    let selectedTab: TabState | null = null;
     if (selectedInstance) {
       const tab = this.getTabState(selectedInstance);
+      selectedTab = tab;
 
       // Only rebuild the component list if tab state changed
       if (tab.dirty || !this.lastTranscriptComponents) {
@@ -547,6 +549,16 @@ export class InspectorComponent {
     }
 
     // Transcript viewport (fills remaining space)
+    //
+    // Some child renderers have time-dependent output. The built-in bash
+    // renderer, for example, invalidates itself every second while a command
+    // is running so its `Elapsed ...` line stays current. That invalidation
+    // requests a TUI frame but cannot reach this viewport's cached virtual
+    // document. Re-render the virtual document while a tool is active so
+    // those child-level invalidations are reflected in the overlay.
+    if (selectedTab && selectedTab.activeToolExecutions.size > 0) {
+      this.viewport.markDirty();
+    }
     lines.push(...this.viewport.getVisibleLines(width, viewportHeight));
 
     // Optional message editor, followed by the status/footer hints.
