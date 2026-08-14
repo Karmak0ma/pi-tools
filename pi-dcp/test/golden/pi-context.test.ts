@@ -1,0 +1,4 @@
+import { describe, expect, it } from "vitest";
+import { buildContextEntries } from "@earendil-works/pi-coding-agent";
+
+describe("installed Pi 0.84.1 compaction behavior", () => { it("does not synthesize a retained-tail projection", () => { const entries = [{ type: "message", id: "old", parentId: null, timestamp: new Date(1).toISOString(), message: { role: "user", content: "old", timestamp: 1 } }, { type: "compaction", id: "compact", parentId: "old", timestamp: new Date(2).toISOString(), summary: "summary", firstKeptEntryId: "kept", tokensBefore: 10, details: { retainedTail: [{ role: "user", content: "materialized tail" }] } }, { type: "message", id: "kept", parentId: "compact", timestamp: new Date(3).toISOString(), message: { role: "user", content: "kept", timestamp: 3 } }] as any; const result = buildContextEntries(entries, "kept"); expect(result.map((entry) => entry.id)).toEqual(["compact", "kept"]); }); });

@@ -1,0 +1,3 @@
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { DcpRuntime } from "../runtime.ts";
+export async function statsCommand(ctx: ExtensionCommandContext, runtime: DcpRuntime): Promise<void> { const blocks = [...runtime.reduced.blocks.values()]; const prunes = [...runtime.reduced.toolPrunes.values()]; ctx.ui.notify(`pi-dcp stats${runtime.sessionFile ? "" : " (ephemeral in-memory session)"}: ${runtime.reduced.operationCount} operation(s), ${blocks.length} block(s) (${blocks.filter((block) => block.active).length} active), ${prunes.length} pruned tool(s) on this branch.`, "info"); }

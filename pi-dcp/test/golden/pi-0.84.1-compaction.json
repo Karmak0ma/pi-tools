@@ -1,0 +1,5 @@
+{
+  "version": "0.84.1",
+  "description": "A compaction projects one summary; firstKeptEntryId entries remain ordinary projections. retainedTail metadata is intentionally not projected separately.",
+  "entries": []
+}

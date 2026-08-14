@@ -1,0 +1,1 @@
+{"provider":"openai","api":"openai-responses","credentialFree":true,"cases":["text","tool-call","tool-result","custom-summary","pending"]}

@@ -1,0 +1,34 @@
+import type { ContextSnapshot } from "../identity/types.ts";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { EffectiveConfig } from "../config/defaults.ts";
+
+export type NudgeType = "soft" | "imperative" | "critical";
+export type NudgeReason = "ready" | "usage_unavailable" | "already_nudged_this_turn" | "below_minimum" | "interval_not_elapsed";
+export interface NudgeDecision { kind: "context"; type: NudgeType; force: "soft" | "strong"; }
+export interface NudgeEvaluation { decision?: NudgeDecision; reason: NudgeReason; tokens: number | null | undefined; contextWindow: number; min: number; max: number; critical: number; turnsSinceNudge: number; alreadyNudgedThisTurn: boolean; modelId?: string; }
+
+export function metadataMessage(snapshot: ContextSnapshot): AgentMessage { const lines = [`[pi-dcp snapshot ${snapshot.snapshotId}; expires ${new Date(snapshot.expiresAt).toISOString()}]`, "Select contiguous protocol units with mNNNN aliases; active summaries use bNNNN.", ...[...snapshot.unitAliases.entries()].map(([alias, index]) => `${alias}: ${snapshot.units[index]?.descriptor || "unit"}`), ...[...snapshot.blockAliases.values()].map((block) => `${block.alias}: ${block.topic} (~${block.estimatedSummaryTokens} tokens)`), "Compression ranges: startId/endId; nested summaries must use each selected (bNNNN) exactly once."]; return { role: "custom", customType: "pi-dcp.metadata", content: lines.join("\n"), display: false, timestamp: 0, details: { snapshotId: snapshot.snapshotId } }; }
+
+export function nudgeMessage(kind: "context" | "turn" | "iteration", tokens: number, type: NudgeType | "strong"): AgentMessage {
+  const normalizedType: NudgeType = type === "strong" ? "imperative" : type;
+  const definition = "Select older, resolved conversation whose work is finished or no longer needed immediately—such as completed and verified implementation, concluded research, exhausted exploration, or dead-end noise. Keep active work, unresolved questions, still-needed exact details, pending tool exchanges, and protected content out of the range. Use a contiguous range of complete protocol units from the current snapshot.";
+  const text = normalizedType === "critical"
+    ? `CRITICAL WARNING: pi-dcp context is approximately ${tokens} tokens, at or above the critical threshold. You must use the pi-dcp compress tool now. Finish only the current atomic operation first, then select as much older resolved conversation as can be safely summarized. ${definition}`
+    : kind === "context"
+    ? normalizedType === "soft"
+      ? `When convenient, use the pi-dcp compress tool for an older resolved range. Context is approximately ${tokens} tokens. ${definition}`
+      : normalizedType === "imperative"
+        ? `You must use the pi-dcp compress tool now if the current snapshot supports a safe range. Context is approximately ${tokens} tokens. ${definition}`
+        : `CRITICAL WARNING: pi-dcp context is approximately ${tokens} tokens, at or above the critical threshold. You must use the pi-dcp compress tool now. Finish only the current atomic operation first, then select as much older resolved conversation as can be safely summarized. ${definition}`
+    : normalizedType === "soft"
+      ? `When convenient, consider faithful pi-dcp compression using the latest snapshot. ${definition}`
+      : normalizedType === "imperative"
+        ? `You must consider faithful pi-dcp compression using the latest snapshot before continuing, if a safe range exists. ${definition}`
+        : `CRITICAL WARNING: context recovery is required. Finish only the current atomic operation, then use the latest snapshot to compress a safe range. ${definition}`;
+  return { role: "custom", customType: "pi-dcp.nudge", content: text, display: false, timestamp: 0, details: { kind, tokens, type: normalizedType, force: normalizedType === "soft" ? "soft" : "strong" } };
+}
+
+export function insertMetadata(messages: readonly AgentMessage[], snapshot: ContextSnapshot, nudge?: AgentMessage): AgentMessage[] { const metadata = metadataMessage(snapshot); const latestUser = snapshot.units.map((unit, index) => unit.role === "user" ? index : -1).filter((index) => index >= 0).at(-1); let insertAt = 0; if (latestUser === undefined) insertAt = messages.length; else { let unitIndex = 0; while (unitIndex < latestUser) { const range = [...(snapshot.blockRanges?.entries() || [])].find(([, value]) => value.start === unitIndex); if (range) { insertAt++; unitIndex = range[1].end + 1; } else { const unit = snapshot.units[unitIndex]; insertAt += unit.endProjectedIndex - unit.startProjectedIndex + 1; unitIndex++; } } } insertAt = Math.max(0, Math.min(messages.length, insertAt)); const additions = nudge ? [nudge, metadata] : [metadata]; return [...messages.slice(0, insertAt), ...additions, ...messages.slice(insertAt)]; }
+export function resolveLimit(limit: number | string, contextWindow: number): number { return typeof limit === "number" ? limit : Math.max(1, Math.floor(contextWindow * Number(limit.slice(0, -1)) / 100)); }
+export function evaluateNudge(tokens: number | null | undefined, config: EffectiveConfig, contextWindow: number, turnsSinceNudge = Number.POSITIVE_INFINITY, alreadyNudgedThisTurn = false, modelId?: string): NudgeEvaluation { const maxSetting = modelId && config.compress.modelMaxLimits[modelId] !== undefined ? config.compress.modelMaxLimits[modelId] : `${config.nudge.maxContextPercent}%`; const minSetting = modelId && config.compress.modelMinLimits[modelId] !== undefined ? config.compress.modelMinLimits[modelId] : `${config.nudge.minContextPercent}%`; const max = resolveLimit(maxSetting, contextWindow); const min = resolveLimit(minSetting, contextWindow); const critical = resolveLimit(`${config.nudge.criticalContextPercent}%`, contextWindow); const base = { tokens, contextWindow, min, max, critical, turnsSinceNudge, alreadyNudgedThisTurn, modelId }; if (tokens == null) return { ...base, reason: "usage_unavailable" }; if (alreadyNudgedThisTurn) return { ...base, reason: "already_nudged_this_turn" }; if (tokens >= critical) return { ...base, reason: "ready", decision: { kind: "context", type: "critical", force: "strong" } }; if (tokens >= max) return { ...base, reason: "ready", decision: { kind: "context", type: "imperative", force: "strong" } }; if (tokens < min) return { ...base, reason: "below_minimum" }; if (turnsSinceNudge < config.nudge.turnsBetweenNudges) return { ...base, reason: "interval_not_elapsed" }; return { ...base, reason: "ready", decision: { kind: "context", type: "soft", force: "soft" } }; }
+export function shouldNudge(tokens: number | null | undefined, config: EffectiveConfig, contextWindow: number, turnsSinceNudge = Number.POSITIVE_INFINITY, alreadyNudgedThisTurn = false, modelId?: string): NudgeDecision | undefined { return evaluateNudge(tokens, config, contextWindow, turnsSinceNudge, alreadyNudgedThisTurn, modelId).decision; }

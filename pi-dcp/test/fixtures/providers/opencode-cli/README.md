@@ -1,0 +1,1 @@
+Vendored credential-free bridge fixtures for the four certified model IDs: deepseek-v4-flash-free, mimo-v2.5-free, nemotron-3-super-free, and big-pickle. A refresh is manual and reviewable; tests never read the sibling bridge repository.

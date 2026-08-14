@@ -1,0 +1,1 @@
+{"provider":"openai","api":"openai-completions","credentialFree":true,"cases":["text","parallel-tools","tool-result","custom-summary","pending"]}

@@ -1,0 +1,6 @@
+import type { ExtensionCommandContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { DcpRuntime } from "../runtime.ts";
+import { createEnvelope } from "../state/operations.ts";
+import { reduceEnvelope } from "../state/reducer.ts";
+import { hashJson } from "../util/hash.ts";
+export async function manualCommand(args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI, runtime: DcpRuntime): Promise<void> { const value = args.trim(); let enabled: boolean; if (!value) enabled = !runtime.reduced.manualMode; else if (value === "on") enabled = true; else if (value === "off") enabled = false; else { ctx.ui.notify("Usage: /dcp manual [on|off]", "error"); return; } if (enabled === runtime.reduced.manualMode) { ctx.ui.notify(`pi-dcp manual mode is already ${enabled ? "on" : "off"}.`, "info"); return; } await runtime.mutex.runExclusive(() => { const envelope = createEnvelope({ type: "manual.changed", enabled }, runtime.sessionId, "0.1.0", hashJson([runtime.sessionId, "manual", enabled])); pi.appendEntry("pi-dcp.operation", envelope); runtime.reduced = reduceEnvelope(runtime.reduced, envelope); runtime.generation++; runtime.snapshot = undefined; }); ctx.ui.notify(`pi-dcp manual mode ${enabled ? "enabled" : "disabled"}.`, "info"); }
