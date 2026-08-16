@@ -1,0 +1,33 @@
+{
+  "name": "tool-expansion-vflo",
+  "version": "0.1.0",
+  "description": "Per-tool mouse expansion for Pi's fullscreen TUI",
+  "private": true,
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "tool-expansion"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.1 <0.85.0",
+    "@earendil-works/pi-tui": ">=0.84.1 <0.85.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.1",
+    "@earendil-works/pi-tui": "0.84.1",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}
