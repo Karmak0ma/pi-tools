@@ -12,6 +12,7 @@ A pi extension that enables delegating tasks to specialized subagents running in
 - **Live usage header** — Track input, output, cached tokens, and context-window utilization while each subagent works
 - **Context-aware abort** — Graceful SIGTERM → SIGKILL escalation with timer cleanup
 - **Agent discovery** — Built-in, user, and project agents with clear override precedence
+- **Child extension UI bridge** — Blocking RPC dialogs are presented as parent-side modals with FIFO ownership and fail-closed cancellation
 
 ## Installation
 
@@ -67,6 +68,23 @@ Child subagents can only use built-in tools:
 - `ls` — List directory contents
 
 Extension tools (including `subagent` itself) are **never** forwarded to children.
+
+## Child extension dialogs
+
+Children run in Pi RPC mode. When a configured child extension requests `select`,
+`confirm`, `input`, or `editor`, the request is bridged to an immediate parent
+modal. Requests from concurrent children are serialized globally in FIFO order;
+the modal identifies the agent, task, working directory, and active child tool
+calls (including the full `bash` command when available).
+
+Responses stay bound to the originating child and are sent exactly once. Escape,
+abort, child exit, session shutdown, malformed known requests, and conservative
+local timeout handling all fail closed; the bridge never infers approval or
+reorders select options. Pi remains authoritative for the child RPC timeout.
+
+The bridge is independent of the subagent inspector, so dialogs appear whether
+the inspector is open or closed. A waiting child is marked `waiting for input`
+in the inspector, but the inspector is not a second response path.
 
 ## Built-in Agents
 
@@ -145,6 +163,7 @@ Inside the inspector:
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+↑` | Exit inspector mode |
+| `Ctrl+O` | Expand/collapse tool output |
 | `←` / `→` | Cycle between subagent tabs (wraps around) |
 | `↑` / `↓` | Scroll conversation body |
 | `PgUp` / `PgDn` | Scroll by page |

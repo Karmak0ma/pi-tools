@@ -14,7 +14,9 @@ import { resolveChildExtensions } from "./child-extensions.js";
 import { renderCall, renderResult } from "./render.js";
 import { type ModelRegistry, resolveCwd, resolveModel, resolveTools } from "./resolver.js";
 import { mapWithConcurrencyLimit, runChild } from "./runner.js";
-import { SubagentTracker, createInstance } from "./tracker.js";
+import { ChildExtensionUIBroker } from "./extension-ui-broker.js";
+import { ExtensionUIDialogPresenter } from "./extension-ui-presenter.js";
+import { SubagentTracker, createInstance, type RuntimeSubagentInstance } from "./tracker.js";
 import {
   type LiveSubagentToolDetails,
   type LiveTaskSummary,
@@ -29,6 +31,7 @@ import {
   emptyUsage,
 } from "./types.js";
 import { SubagentTuiManager } from "./tui.js";
+import type { ActiveChildToolCall } from "./rpc-extension-ui.js";
 export { INSPECTOR_VISIBILITY_CHANNEL } from "./tui.js";
 export type { InspectorVisibilityEvent } from "./tui.js";
 
@@ -67,7 +70,43 @@ const SubagentParams = Type.Object({
 
 export default function (pi: ExtensionAPI) {
   const tracker = new SubagentTracker();
-  const tuiManager = new SubagentTuiManager(tracker);
+  let broker: ChildExtensionUIBroker;
+  let tuiManager: SubagentTuiManager;
+  let abortInstanceForManager: (instance: RuntimeSubagentInstance) => void = () => {};
+
+  const reportBrokerDiagnostic = (message: string, owner?: { instanceId: string }): void => {
+    const instance = owner ? tracker.get(owner.instanceId) : undefined;
+    if (instance) {
+      // Diagnostics are deliberately concise and contain no request text or
+      // tool arguments, so they are safe to retain with normal runtime warnings.
+      instance.warnings.push(message);
+      instance.summary.warnings = [...instance.warnings];
+    }
+    if (tuiManager.isActive) tuiManager.requestRender();
+  };
+
+  const createBroker = (): ChildExtensionUIBroker => new ChildExtensionUIBroker({
+    onDiagnostic: reportBrokerDiagnostic,
+    onPendingCountChange(instanceId, count) {
+      const instance = tracker.get(instanceId);
+      if (!instance) return;
+      instance.pendingUIRequestCount = count;
+      if (tuiManager.isActive) tuiManager.requestRender();
+    },
+  });
+
+  broker = createBroker();
+  tuiManager = new SubagentTuiManager(tracker, (instance) => abortInstanceForManager(instance));
+
+  abortInstanceForManager = (instance) => {
+    if (instance.status !== "running") return;
+    broker.cancelOwner(instance.id, "abort");
+    instance.control?.abort();
+    instance.status = "aborted";
+    instance.summary.status = "aborted";
+    instance.summary.isPartial = false;
+    tuiManager.requestRender();
+  };
 
   // Mark final tool results as real tool failures when execute recorded an overall failure.
   // Pi runtime only treats thrown errors or tool_result patches as actual isError results.
@@ -80,16 +119,23 @@ export default function (pi: ExtensionAPI) {
 
   // ─── Session Lifecycle ───────────────────────────────────────────────────
 
-  pi.on("session_shutdown", async (_event, _ctx) => {
+  const disposeSessionRuntime = async () => {
+    const oldBroker = broker;
+    await oldBroker.dispose();
     if (tuiManager.isActive) tuiManager.exit();
     await tracker.killAll();
     tracker.clear();
+    // A session replacement must not inherit callbacks closed over the old
+    // broker. New executions use this fresh session-scoped broker.
+    broker = createBroker();
+  };
+
+  pi.on("session_shutdown", async (_event, _ctx) => {
+    await disposeSessionRuntime();
   });
 
   pi.on("session_before_switch", async (_event, _ctx) => {
-    if (tuiManager.isActive) tuiManager.exit();
-    await tracker.killAll();
-    tracker.clear();
+    await disposeSessionRuntime();
   });
 
   // ─── TUI Shortcuts / Commands (Phase 3) ──────────────────────────────────
@@ -151,6 +197,10 @@ export default function (pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const tasks = params.tasks as TaskItem[];
+      // Capture the broker for this invocation. A session switch can replace
+      // the extension-level broker while stale child callbacks are still
+      // unwinding; those callbacks must never reach the fresh broker.
+      const executionBroker = broker;
 
       // Validate task count
       if (tasks.length > MAX_TOTAL_TASKS) {
@@ -282,11 +332,22 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      // Execute tasks with concurrency control
-      const results = await mapWithConcurrencyLimit(
-        taskInstances,
-        MAX_CONCURRENT,
-        async ({ id, task, instance }, index) => {
+      // Execute tasks with concurrency control. One listener covers the whole
+      // batch because the tool signal can abort several child processes at
+      // once; register it before runChild adds its own listener.
+      const cancelInvocation = () => {
+        for (const { instance } of taskInstances) {
+          executionBroker.cancelOwner(instance.id, "abort");
+        }
+      };
+      if (signal) signal.addEventListener("abort", cancelInvocation, { once: true });
+
+      let results: PersistedTaskSummary[];
+      try {
+        results = await mapWithConcurrencyLimit(
+          taskInstances,
+          MAX_CONCURRENT,
+          async ({ id, task, instance }, index) => {
           // Check if abort was signaled before starting this queued task
           if (signal?.aborted) {
             tracker.updateStatus(id, "aborted", { errorMessage: "Aborted before start" });
@@ -377,6 +438,31 @@ export default function (pi: ExtensionAPI) {
               onEvent(event) {
                 instance.events.push(event);
 
+                // The RPC request has no toolCallId. Keep a runtime snapshot
+                // of every active call so the broker can show all available
+                // context without claiming a false correlation.
+                if (event.type === "tool_execution_start" && event.toolCallId) {
+                  const activeToolCall: ActiveChildToolCall = {
+                    toolCallId: String(event.toolCallId),
+                    toolName: String(event.toolName || "unknown"),
+                    args: event.args ?? event.arguments,
+                    startedAt: Date.now(),
+                  };
+                  instance.activeToolCalls.set(activeToolCall.toolCallId, activeToolCall);
+                  updater.immediate();
+                }
+                if (event.type === "tool_execution_end" && event.toolCallId) {
+                  instance.activeToolCalls.delete(String(event.toolCallId));
+                  updater.immediate();
+                }
+                if (event.type === "tool_result_end") {
+                  const fallbackToolCallId = event.toolCallId || event.message?.toolCallId;
+                  if (fallbackToolCallId && instance.activeToolCalls.has(String(fallbackToolCallId))) {
+                    instance.activeToolCalls.delete(String(fallbackToolCallId));
+                    updater.immediate();
+                  }
+                }
+
                 if (event.type === "agent_start") {
                   tracker.updateStatus(id, "running", { isPartial: true, errorMessage: undefined });
                   updater.immediate();
@@ -418,6 +504,28 @@ export default function (pi: ExtensionAPI) {
                   updater.immediate();
                 }
               },
+              onExtensionUIRequest(request, channel) {
+                const owner = {
+                  instanceId: instance.id,
+                  agent: instance.agent,
+                  task: instance.task,
+                  cwd: instance.cwd,
+                };
+                const presenter = new ExtensionUIDialogPresenter(ctx, {
+                  isInspectorActive: () => tuiManager.isActive,
+                  isInspectorOverlayFocused: () => tuiManager.isOverlayFocusedVisible,
+                  onDiagnostic: (message) => reportBrokerDiagnostic(message, owner),
+                });
+                executionBroker.enqueue({
+                  owner,
+                  request,
+                  channel,
+                  presenter,
+                  activeToolCalls: Array.from(instance.activeToolCalls.values()),
+                });
+                instance.pendingUIRequestCount = executionBroker.getOwnerPendingCount(instance.id);
+                updater.immediate();
+              },
               onStderr(data) {
                 instance.stderr += data;
                 instance.summary.stderrPreview = instance.stderr.slice(0, 500);
@@ -428,6 +536,9 @@ export default function (pi: ExtensionAPI) {
                 instance.control = control;
               },
               onProcessExit(code) {
+                executionBroker.cancelOwner(instance.id, "exit");
+                instance.activeToolCalls.clear();
+                instance.pendingUIRequestCount = 0;
                 instance.process = undefined;
                 instance.control = undefined;
                 if (instance.status === "running") {
@@ -473,8 +584,11 @@ export default function (pi: ExtensionAPI) {
             // runChild closes the RPC child after the agent settles; the
             // process/control references are cleared by onProcessExit.
           }
-        },
-      );
+          },
+        );
+      } finally {
+        signal?.removeEventListener("abort", cancelInvocation);
+      }
 
       // Flush any pending throttled updates before building final result
       updater.flush();

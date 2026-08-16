@@ -54,6 +54,7 @@ export class TaskHeaderComponent implements Component {
   private lastCwd: string = "";
   private lastWarningsKey: string = "";
   private lastUsageKey: string = "";
+  private lastPendingUIRequestCount = 0;
 
   constructor(theme: TuiTheme) {
     this.theme = theme;
@@ -70,6 +71,7 @@ export class TaskHeaderComponent implements Component {
       this.lastCwd = "";
       this.lastWarningsKey = "";
       this.lastUsageKey = "";
+      this.lastPendingUIRequestCount = 0;
       return;
     }
 
@@ -93,6 +95,7 @@ export class TaskHeaderComponent implements Component {
       this.lastCwd = instance.cwd;
       this.lastWarningsKey = warningsKey;
       this.lastUsageKey = usageKey;
+      this.lastPendingUIRequestCount = instance.pendingUIRequestCount;
       this.taskComponent = new UserMessageComponent(instance.task, getMarkdownTheme());
       this.cachedLines = null;
     } else if (
@@ -100,7 +103,8 @@ export class TaskHeaderComponent implements Component {
       instance.model !== this.lastModel ||
       instance.cwd !== this.lastCwd ||
       warningsKey !== this.lastWarningsKey ||
-      usageKey !== this.lastUsageKey
+      usageKey !== this.lastUsageKey ||
+      instance.pendingUIRequestCount !== this.lastPendingUIRequestCount
     ) {
       // Same instance, but rendered fields changed
       this.instance = instance;
@@ -109,6 +113,7 @@ export class TaskHeaderComponent implements Component {
       this.lastCwd = instance.cwd;
       this.lastWarningsKey = warningsKey;
       this.lastUsageKey = usageKey;
+      this.lastPendingUIRequestCount = instance.pendingUIRequestCount;
       this.cachedLines = null;
     }
   }
@@ -136,6 +141,12 @@ export class TaskHeaderComponent implements Component {
       this.theme.fg("accent", this.theme.bold(` ${inst.agent}`)) + " " + statusIcon(inst.status, this.theme),
       width,
     ));
+    if (inst.pendingUIRequestCount > 0) {
+      lines.push(truncateToWidth(
+        this.theme.fg("warning", `  ⏸ waiting for input (${inst.pendingUIRequestCount})`),
+        width,
+      ));
+    }
 
     // Metadata
     if (inst.model) {

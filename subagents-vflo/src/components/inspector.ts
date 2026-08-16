@@ -27,6 +27,7 @@ import { StatusFooterComponent } from "./status-footer.js";
 import { TranscriptViewport } from "./transcript-viewport.js";
 import { FallbackTextComponent } from "./fallback-text.js";
 import { formatUsageStats } from "../render.js";
+import { sanitizeTerminalText } from "../rpc-extension-ui.js";
 
 // ─── Per-Tab State ───────────────────────────────────────────────────────────
 
@@ -36,6 +37,8 @@ interface TabState {
   activeAssistantMessage: AssistantMessageComponent | null;
   activeAssistantText: string;
   activeToolExecutions: Map<string, ToolExecutionComponent>;
+  /** All tool components, including completed calls no longer in the active map. */
+  toolExecutions: Set<ToolExecutionComponent>;
   dirty: boolean;
 }
 
@@ -46,8 +49,22 @@ function createTabState(): TabState {
     activeAssistantMessage: null,
     activeAssistantText: "",
     activeToolExecutions: new Map(),
+    toolExecutions: new Set(),
     dirty: true,
   };
+}
+
+function registerToolExecution(
+  tab: TabState,
+  component: ToolExecutionComponent,
+  expanded: boolean | undefined,
+): void {
+  // Inspector components are created outside Pi's main transcript tree, so
+  // Pi's global expansion setter cannot discover them. Apply the current
+  // global state at creation time and retain completed components for later
+  // Ctrl+O toggles as well.
+  if (expanded !== undefined) component.setExpanded(expanded);
+  tab.toolExecutions.add(component);
 }
 
 // ─── Event Processing ────────────────────────────────────────────────────────
@@ -58,6 +75,7 @@ function processNewEvents(
   tui: TUI,
   cwd: string,
   theme: TuiTheme,
+  toolsExpanded: boolean | undefined,
 ): void {
   const events = instance.events;
   for (let i = tab.lastProcessedEventIndex; i < events.length; i++) {
@@ -156,6 +174,7 @@ function processNewEvents(
                       cwd,
                     );
                     toolComp.setArgsComplete();
+                    registerToolExecution(tab, toolComp, toolsExpanded);
                     tab.activeToolExecutions.set(toolCallId, toolComp);
                     tab.components.push(toolComp);
                   } catch (err) {
@@ -189,6 +208,7 @@ function processNewEvents(
                 cwd,
               );
               toolComp.setArgsComplete();
+              registerToolExecution(tab, toolComp, toolsExpanded);
               toolComp.markExecutionStarted();
               tab.activeToolExecutions.set(toolCallId, toolComp);
               tab.components.push(toolComp);
@@ -224,6 +244,7 @@ function processNewEvents(
                 cwd,
               );
               toolComp.setArgsComplete();
+              registerToolExecution(tab, toolComp, toolsExpanded);
               toolComp.markExecutionStarted();
               toolComp.updateResult(event.partialResult, true);
               tab.activeToolExecutions.set(toolCallId, toolComp);
@@ -258,6 +279,7 @@ function processNewEvents(
                 cwd,
               );
               toolComp.setArgsComplete();
+              registerToolExecution(tab, toolComp, toolsExpanded);
               toolComp.markExecutionStarted();
               toolComp.updateResult(event.result, false);
               tab.components.push(toolComp);
@@ -343,7 +365,7 @@ class StderrComponent implements Component {
     lines.push(this.theme.fg("error", "  ⚠ stderr:"));
     const stderrLines = this.stderr.split("\n").slice(0, 5);
     for (const sl of stderrLines) {
-      lines.push("    " + this.theme.fg("error", truncateToWidth(sl, Math.max(1, width - 8))));
+      lines.push("    " + this.theme.fg("error", truncateToWidth(sanitizeTerminalText(sl), Math.max(1, width - 8))));
     }
     const totalLines = this.stderr.split("\n").length;
     if (totalLines > 5) {
@@ -385,12 +407,19 @@ export interface InspectorCallbacks {
   ) => Promise<void>;
 }
 
+export interface InspectorToolExpansion {
+  getToolsExpanded: () => boolean;
+  setToolsExpanded: (expanded: boolean) => void;
+}
+
 export class InspectorComponent {
   private tracker: SubagentTracker;
   private tui: TUI;
   private theme: TuiTheme;
   private callbacks: InspectorCallbacks;
   private keybindings: any;
+  private toolExpansion?: InspectorToolExpansion;
+  private lastToolsExpanded: boolean | undefined;
   private messageInput: Input | null = null;
 
   // Sub-components
@@ -411,12 +440,14 @@ export class InspectorComponent {
     theme: TuiTheme,
     callbacks: InspectorCallbacks,
     keybindings?: any,
+    toolExpansion?: InspectorToolExpansion,
   ) {
     this.tracker = tracker;
     this.tui = tui;
     this.theme = theme;
     this.callbacks = callbacks;
     this.keybindings = keybindings;
+    this.toolExpansion = toolExpansion;
 
     this.tabBar = new TabBarComponent(theme);
     this.taskHeader = new TaskHeaderComponent(theme);
@@ -454,6 +485,10 @@ export class InspectorComponent {
     const lines: string[] = [];
 
     const instances = this.tracker.getOrdered();
+    const toolsExpanded = this.readToolsExpanded();
+    if (toolsExpanded !== undefined && toolsExpanded !== this.lastToolsExpanded) {
+      this.applyToolsExpanded(toolsExpanded);
+    }
 
     // Clamp selected index
     if (instances.length > 0) {
@@ -487,7 +522,7 @@ export class InspectorComponent {
     // Process events and build transcript for selected instance
     let selectedTab: TabState | null = null;
     if (selectedInstance) {
-      const tab = this.getTabState(selectedInstance);
+      const tab = this.getTabState(selectedInstance, toolsExpanded);
       selectedTab = tab;
 
       // Only rebuild the component list if tab state changed
@@ -597,6 +632,14 @@ export class InspectorComponent {
     if (matchesKey(data, "ctrl+up")) {
       this.cancelMessageInput();
       this.callbacks.onClose();
+      return;
+    }
+
+    // The inspector is a focused overlay, so the host editor never receives
+    // Ctrl+O. Reproduce Pi's app.tools.expand action here and explicitly apply
+    // the resulting global state to tool components owned by each tab.
+    if (this.matchesBinding(data, "app.tools.expand", "ctrl+o")) {
+      this.toggleToolsExpanded();
       return;
     }
 
@@ -766,13 +809,55 @@ export class InspectorComponent {
     this.tui.requestRender(true);
   }
 
-  private getTabState(instance: RuntimeSubagentInstance): TabState {
+  private readToolsExpanded(): boolean | undefined {
+    if (!this.toolExpansion) return undefined;
+    try {
+      return this.toolExpansion.getToolsExpanded();
+    } catch {
+      // The inspector should remain usable if a host UI implementation does
+      // not expose the expansion state (for example, a non-TUI test double).
+      return undefined;
+    }
+  }
+
+  private applyToolsExpanded(expanded: boolean): void {
+    for (const tab of this.tabStates.values()) {
+      for (const component of tab.toolExecutions) {
+        component.setExpanded(expanded);
+      }
+    }
+    // The viewport caches rendered lines independently of the child
+    // components. Invalidate it or a completed tool would change state but
+    // remain visually collapsed until another transcript event arrives.
+    this.viewport.markDirty();
+    this.lastToolsExpanded = expanded;
+  }
+
+  private toggleToolsExpanded(): void {
+    const current = this.readToolsExpanded();
+    if (current === undefined || !this.toolExpansion) return;
+
+    const expanded = !current;
+    try {
+      // Keep Pi's own transcript in sync too. This is separate from the
+      // explicit application below because Pi cannot discover overlay-owned
+      // ToolExecutionComponents.
+      this.toolExpansion.setToolsExpanded(expanded);
+    } catch {
+      return;
+    }
+
+    this.applyToolsExpanded(expanded);
+    this.tui.requestRender(true);
+  }
+
+  private getTabState(instance: RuntimeSubagentInstance, toolsExpanded: boolean | undefined): TabState {
     let tab = this.tabStates.get(instance.id);
     if (!tab) {
       tab = createTabState();
       this.tabStates.set(instance.id, tab);
     }
-    processNewEvents(instance, tab, this.tui, instance.cwd, this.theme);
+    processNewEvents(instance, tab, this.tui, instance.cwd, this.theme, toolsExpanded);
     return tab;
   }
 }

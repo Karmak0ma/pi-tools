@@ -89,6 +89,10 @@ export class StatusFooterComponent implements Component {
 
     // Line 3: Keyboard hints
     const hints: string[] = [];
+    // Keep the inspector's global exit shortcut first so it remains visible
+    // when the footer is truncated on narrower terminals.
+    hints.push("Ctrl+↑ exit");
+    hints.push("Ctrl+O expand");
     hints.push("←/→ switch");
     if (this.metrics.messageMode) {
       hints.push("Enter steer");

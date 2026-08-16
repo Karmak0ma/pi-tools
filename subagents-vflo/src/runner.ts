@@ -12,6 +12,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import type { ChildMessageDelivery, SubagentProcessControl } from "./tracker.js";
+import {
+  cancelledResponse,
+  localDeadline,
+  parseExtensionUIRequest,
+  sanitizeTerminalText,
+  type ChildExtensionUIDialogRequest,
+  type ChildExtensionUIResponse,
+} from "./rpc-extension-ui.js";
 import { contextTokensFromUsage, emptyUsage, type TaskUsage, type ThinkingLevel } from "./types.js";
 
 // ─── Pi Invocation ───────────────────────────────────────────────────────────
@@ -68,11 +76,29 @@ export interface RunChildOptions {
   taskText: string;
   thinking?: ThinkingLevel;
   childExtensionPaths?: string[];
+  /** Test seam for deterministic JSONL transport tests; production uses spawn. */
+  spawnProcess?: typeof spawn;
   signal?: AbortSignal;
   onEvent?: (event: any) => void;
+  onExtensionUIRequest?: (
+    request: ChildExtensionUIDialogRequest,
+    channel: ChildExtensionUIChannel,
+  ) => void;
   onStderr?: (data: string) => void;
   onProcessReady?: (proc: ChildProcess, control: SubagentProcessControl) => void;
   onProcessExit?: (code: number | null) => void;
+}
+
+/**
+ * A response channel is created per child, never shared between instances.
+ * The optional deadline accessor lets the session broker use the exact same
+ * conservative deadline that guards the wire write in the runner.
+ */
+export interface ChildExtensionUIChannel {
+  respond(response: ChildExtensionUIResponse): boolean;
+  forget(requestId: string): void;
+  isOpen(): boolean;
+  getDeadline?(requestId: string): number | undefined;
 }
 
 type PendingResponse = {
@@ -100,8 +126,10 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
     taskText,
     thinking,
     childExtensionPaths,
+    spawnProcess,
     signal,
     onEvent,
+    onExtensionUIRequest,
     onStderr,
     onProcessReady,
     onProcessExit,
@@ -136,7 +164,7 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
   }
 
   const invocation = getPiInvocation(args);
-  const proc = spawn(invocation.command, invocation.args, {
+  const proc = (spawnProcess || spawn)(invocation.command, invocation.args, {
     cwd: resolvedCwd,
     shell: false,
     stdio: ["pipe", "pipe", "pipe"],
@@ -155,6 +183,90 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
     resolveInitial = resolve;
   });
   const pendingResponses = new Map<string, PendingResponse>();
+  type ObservedUIRequest = {
+    method?: ChildExtensionUIDialogRequest["method"];
+    options?: string[];
+    deadline?: number;
+  };
+  const pendingUIRequests = new Map<string, ObservedUIRequest>();
+  let uiChannelClosed = false;
+
+  const observeUIRequest = (
+    request: ChildExtensionUIDialogRequest,
+    receivedAt: number,
+  ): boolean => {
+    if (pendingUIRequests.has(request.id)) return false;
+    pendingUIRequests.set(request.id, {
+      method: request.method,
+      options: request.method === "select" ? [...request.options] : undefined,
+      deadline: localDeadline(receivedAt, request.timeout),
+    });
+    return true;
+  };
+
+  const observeMalformedUIRequest = (requestId: string, method: string, receivedAt: number, timeout?: number): boolean => {
+    if (pendingUIRequests.has(requestId)) return false;
+    pendingUIRequests.set(requestId, {
+      method: method as ChildExtensionUIDialogRequest["method"],
+      deadline: localDeadline(receivedAt, timeout),
+    });
+    return true;
+  };
+
+  const extensionUIChannel: ChildExtensionUIChannel = {
+    respond(response) {
+      if (response.type !== "extension_ui_response") return false;
+      if (uiChannelClosed || processExited || !proc.stdin || proc.stdin.destroyed || !proc.stdin.writable) {
+        return false;
+      }
+
+      const observed = pendingUIRequests.get(response.id);
+      if (!observed) return false;
+      if (observed.deadline !== undefined && Date.now() >= observed.deadline) {
+        pendingUIRequests.delete(response.id);
+        return false;
+      }
+
+      // Validate the response against the request before taking the exactly
+      // once gate. A select value from a different request must never cross a
+      // child boundary, even if a caller accidentally reuses an id.
+      if (observed.method === "select") {
+        if (!("cancelled" in response) && (!("value" in response) || !observed.options?.includes(response.value))) {
+          return false;
+        }
+      } else if (observed.method === "confirm") {
+        if (!("cancelled" in response) && !("confirmed" in response)) return false;
+      } else if (observed.method === "input" || observed.method === "editor") {
+        if (!("cancelled" in response) && (!("value" in response) || typeof response.value !== "string")) {
+          return false;
+        }
+      }
+
+      // Mark answered before writing. This synchronous check-and-set is the
+      // authoritative wire-level exactly-once gate for presenter/abort races.
+      pendingUIRequests.delete(response.id);
+      try {
+        proc.stdin.write(`${JSON.stringify(response)}\n`);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    forget(requestId) {
+      pendingUIRequests.delete(requestId);
+    },
+    isOpen() {
+      return !uiChannelClosed && !processExited && !!proc.stdin && !proc.stdin.destroyed && !!proc.stdin.writable;
+    },
+    getDeadline(requestId) {
+      return pendingUIRequests.get(requestId)?.deadline;
+    },
+  };
+
+  const closeExtensionUIChannel = () => {
+    uiChannelClosed = true;
+    pendingUIRequests.clear();
+  };
 
   const settleInitial = () => {
     if (initialSettled) return;
@@ -220,6 +332,48 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
       pendingResponses.delete(event.id);
       if (event.success) pending.resolve();
       else pending.reject(new Error(event.error || `RPC ${event.command || "command"} failed`));
+      return;
+    }
+
+    if (event.type === "extension_ui_request") {
+      const receivedAt = Date.now();
+      const parsed = parseExtensionUIRequest(event);
+
+      if (parsed.kind === "dialog") {
+        // Register before exposing the event so a synchronous parent callback
+        // can answer it without racing a second stdout event.
+        const firstObservation = observeUIRequest(parsed.request, receivedAt);
+        onEvent?.(event);
+        if (!firstObservation) {
+          onStderr?.(`Duplicate extension UI request ignored: ${sanitizeTerminalText(parsed.request.id)}\n`);
+          return;
+        }
+        try {
+          if (onExtensionUIRequest) onExtensionUIRequest(parsed.request, extensionUIChannel);
+          else extensionUIChannel.respond(cancelledResponse(parsed.request.id));
+        } catch (error) {
+          onStderr?.(`Extension UI broker callback failed: ${sanitizeTerminalText(error instanceof Error ? error.message : String(error))}\n`);
+          extensionUIChannel.respond(cancelledResponse(parsed.request.id));
+        }
+        return;
+      }
+
+      onEvent?.(event);
+      if (parsed.kind === "invalid") {
+        const usableId = typeof parsed.requestId === "string" && parsed.requestId.length > 0;
+        if (parsed.blocking && usableId) {
+          const firstObservation = observeMalformedUIRequest(
+            parsed.requestId!,
+            parsed.method || "unknown",
+            receivedAt,
+            parsed.timeout,
+          );
+          if (firstObservation) extensionUIChannel.respond(cancelledResponse(parsed.requestId!));
+        }
+        onStderr?.(`Invalid extension UI request: ${parsed.reason}\n`);
+      } else if (!parsed.known) {
+        onStderr?.(`Unhandled extension UI method left untouched: ${sanitizeTerminalText(parsed.method)}\n`);
+      }
       return;
     }
 
@@ -291,6 +445,7 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
 
   proc.on("close", (code) => {
     processExited = true;
+    closeExtensionUIChannel();
     if (buffer.trim()) processLine(buffer);
     result.exitCode = code ?? 0;
     if (wasAborted) {
@@ -311,6 +466,7 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
     if (!result.errorMessage) result.errorMessage = `Spawn error: ${err.message}`;
     if (!processExited) {
       processExited = true;
+      closeExtensionUIChannel();
       rejectPending(err);
       onProcessExit?.(1);
       resolveClosed();

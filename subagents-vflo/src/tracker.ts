@@ -6,6 +6,7 @@
  */
 
 import type { ChildProcess } from "node:child_process";
+import type { ActiveChildToolCall } from "./rpc-extension-ui.js";
 import {
   type AgentSource,
   type LiveTaskSummary,
@@ -43,6 +44,10 @@ export interface RuntimeSubagentInstance {
   summary: LiveTaskSummary;
   process?: ChildProcess;
   control?: SubagentProcessControl;
+  /** Runtime-only context for the child dialog broker; never persisted. */
+  activeToolCalls: Map<string, ActiveChildToolCall>;
+  /** Number of blocking extension dialogs queued or being presented. */
+  pendingUIRequestCount: number;
 }
 
 // ─── Subagent Tracker ────────────────────────────────────────────────────────
@@ -189,5 +194,7 @@ export function createInstance(opts: {
     stderr: "",
     status: "queued",
     summary,
+    activeToolCalls: new Map(),
+    pendingUIRequestCount: 0,
   };
 }

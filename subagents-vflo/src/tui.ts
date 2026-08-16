@@ -8,6 +8,7 @@
  * Keyboard behavior:
  * - Ctrl+down: enter subagent inspector mode
  * - Ctrl+up: return to main view
+ * - Ctrl+O: toggle tool output expansion
  * - Left/Right: cycle between tabs
  * - Up/Down/PgUp/PgDn/Home/End: scroll transcript
  * - t: enter message mode; Enter steers the active subagent
@@ -74,9 +75,14 @@ export class SubagentTuiManager {
   private overlayHandle: any = null;
   private inspectorComponent: InstanceType<typeof import("./components/inspector.js").InspectorComponent> | null = null;
   private removePageNavigationListener: (() => void) | null = null;
+  private readonly abortHandler?: (instance: RuntimeSubagentInstance) => void;
 
-  constructor(tracker: SubagentTracker) {
+  constructor(
+    tracker: SubagentTracker,
+    abortHandler?: (instance: RuntimeSubagentInstance) => void,
+  ) {
     this.tracker = tracker;
+    this.abortHandler = abortHandler;
   }
 
   get isActive(): boolean {
@@ -85,6 +91,21 @@ export class SubagentTuiManager {
 
   get isAvailable(): boolean {
     return this._available;
+  }
+
+  /** Whether a temporary parent dialog may safely return focus to the inspector. */
+  get isOverlayFocusedVisible(): boolean {
+    if (!this._active || !this.overlayHandle) return false;
+    if (typeof this.overlayHandle.isFocused !== "function") return false;
+    return !!this.overlayHandle.isFocused();
+  }
+
+  /**
+   * Route abort through the extension-level helper so a waiting child dialog
+   * is cancelled before the child process receives SIGTERM.
+   */
+  abort(instance: RuntimeSubagentInstance): void {
+    this.abortInstance(instance);
   }
 
   /**
@@ -142,6 +163,10 @@ export class SubagentTuiManager {
             onMessage: (instance, text) => this.sendMessage(instance, text),
           },
           _keybindings,
+          {
+            getToolsExpanded: () => ctx.ui.getToolsExpanded(),
+            setToolsExpanded: (expanded) => ctx.ui.setToolsExpanded(expanded),
+          },
         );
         inspector.setSelectedIndex(initialIndex);
         this.inspectorComponent = inspector;
@@ -278,6 +303,10 @@ export class SubagentTuiManager {
   /** Abort a specific subagent instance. */
   private abortInstance(instance: RuntimeSubagentInstance): void {
     if (instance.status !== "running" || !instance.control) return;
+    if (this.abortHandler) {
+      this.abortHandler(instance);
+      return;
+    }
     instance.control.abort();
     instance.status = "aborted";
     instance.summary.status = "aborted";

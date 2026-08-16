@@ -75,7 +75,9 @@ export class TabBarComponent implements Component {
     const tabs: Array<{ label: string; width: number }> = [];
     for (let i = 0; i < this.instances.length; i++) {
       const inst = this.instances[i];
-      const icon = statusIcon(inst.status, this.theme);
+      const icon = inst.pendingUIRequestCount > 0
+        ? this.theme.fg("warning", "⌁")
+        : statusIcon(inst.status, this.theme);
       const name = inst.agent;
       const isSelected = i === this.selectedIndex;
 
