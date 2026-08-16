@@ -34,22 +34,52 @@ export interface CanonicalIndex {
   messageToUnit: Map<string, number>;
 }
 
-export interface ModelKey { provider: string; id: string; api: string; contextWindow: number; }
-export interface SnapshotBlockAlias { alias: string; blockId: BlockId; topic: string; estimatedSummaryTokens: number; }
-export interface ContextSnapshot {
-  snapshotId: string;
+export interface ModelKey {
+  provider: string;
+  id: string;
+  api: string;
+  contextWindow: number;
+}
+
+export interface BaselineKey {
+  /** The selected branch lineage. Session IDs are deliberately not used here. */
+  branchIdentity: string;
+  leafId: string | null;
+  provider: string;
+  modelId: string;
+  api: string;
+  contextWindow: number;
+  thinkingLevel: string;
+  generation: number;
+  configSafetyHash: string;
+  projectionHash: string;
+  dcpTransformHash: string;
+}
+
+export interface SnapshotBlockAlias {
+  alias: string;
+  blockId: BlockId;
+  topic: string;
+  estimatedSummaryTokens: number;
+}
+
+/** An immutable, internal authorization baseline. */
+export interface BaselineSnapshot {
+  key: BaselineKey;
   sessionId: string;
   leafId: string | null;
   model: ModelKey;
   generation: number;
-  createdAt: number;
-  expiresAt: number;
   hash: string;
   units: ProtocolUnit[];
   unitAliases: Map<string, number>;
   blockAliases: Map<string, SnapshotBlockAlias>;
   activeBlockIds: BlockId[];
   blockRanges?: Map<BlockId, { start: number; end: number }>;
+  index?: CanonicalIndex;
+  createdMonotonicMs: number;
 }
 
-export type JoinResult = { ok: true; incomingByExpected: number[] } | { ok: false; reason: "join_ambiguous" | "protocol_invalid" }; 
+export type JoinResult =
+  | { ok: true; incomingByExpected: number[] }
+  | { ok: false; reason: "join_ambiguous" | "protocol_invalid" };

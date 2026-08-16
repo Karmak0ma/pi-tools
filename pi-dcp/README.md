@@ -26,37 +26,27 @@ The certified runtime is Pi `0.84.1`. The package requires Pi `>=0.84.1`; later 
 
 Use `/dcp` (or `/dcp menu`) to open the interactive settings menu. If the extension was already running when it was updated, run `/reload` once before testing the command. In print/JSON mode there is no interactive menu; edit the settings file directly or use `/dcp status`. The menu edits and saves `~/.pi/agent/dcp_settings.json` (or the directory selected by `PI_CODING_AGENT_DIR`). Use `/dcp status` for status and help, `/dcp context` for compact context and nudge status, `/dcp debug` for nudge troubleshooting details, `/dcp stats`, `/dcp sweep [N]`, `/dcp manual [on|off]`, `/dcp compress [focus]`, `/dcp decompress [N|bNNNN]`, `/dcp recompress [N|bNNNN]`, or `/dcp reload`.
 
+`/dcp stats` opens a two-tab savings table in TUI mode. The **Session** tab shows cumulative estimated savings for the current branch/session; the **Total** tab aggregates the append-only `~/.pi/agent/dcp_stats.jsonl` ledger across sessions (or the directory selected by `PI_CODING_AGENT_DIR`). Press Tab or Shift+Tab to switch tabs and Escape to close. Sources are reported separately for range compression, duplicate-output pruning, sweep-output pruning, old-error-input pruning, and question-input pruning. These are operation-level estimates: a saved block or pruned item is counted once, not once per provider request. Decompression does not erase historical savings.
+
 Defaults follow the proven OpenCode DCP baseline where it maps cleanly: enabled compression, `allow` permission, detailed chat notifications, automatic deduplication and error-input purging, soft nudges beginning at 35% context, an imperative nudge at 70% context, a critical recovery nudge at 90% context, and a five-turn reminder interval. Pi 0.84.1 provides the built-in tools `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls`. The default protected tool set is Pi-native: `compress`, `write`, `edit`, and the configured `@juicesharp/rpiv-todo` extension's `todo` tool. The `todo` tool is protected both from ordinary pruning and from compression ranges. Read-only tools and `bash` remain eligible for pruning/compression by default; add any tool to the protected list when its output must remain intact. Recent-turn protection and complete-user-message protection remain opt-in.
 
 The menu exposes minimum, maximum, and critical context percentages, turns between nudges, extension enablement, compression permission, automatic pruning, recent-turn and complete-user-message protection, notification settings, and protected tools/path patterns. Nudge severity is automatic: below the minimum threshold no context nudges are sent; from 35% to below 70%, pi-dcp sends soft reminders at the configured interval; at or above 70%, it sends an imperative nudge every turn; and at or above 90%, it sends a critical recovery nudge that instructs the model to compress immediately, finishing only the current atomic operation first.
 
 ### Nudge severity and provider-facing roles
 
-Nudges are created as Pi `custom` messages with `display: false`. This means they are transient outgoing-context instructions: they are included in the provider request but are not intended to appear as visible chat output or alter the persisted conversation history. Pi's `custom` message type is an extension/session representation, not a standard role understood by language-model APIs. Before sending, Pi converts a custom message to a provider-facing `user` message containing the nudge text. The `customType` and `details` metadata are for Pi and extensions; the model does not receive them as separate authority or role signals.
-
-Consequently, pi-dcp's current soft, imperative, and critical nudges all reach the model as user-role content. Their severity is selected automatically from context usage:
-
-- `soft` — optional reminder from the minimum threshold until the normal maximum threshold, subject to the configured interval.
-- `imperative` — mandatory-sounding request at the normal maximum threshold, sent every turn.
-- `critical` — emergency recovery wording at the critical threshold, sent every turn; it tells the model to finish only the current atomic operation before compressing.
-
-There is no user-configurable nudge severity setting. This avoids conflicting controls: percentages determine severity, while the interval only controls normal soft reminders.
-
-This differs from OpenCode DCP, where soft turn/iteration nudges are injected into an assistant-role message and strong nudges into a user-role message. OpenCode uses that distinction because its context path does not expose Pi's extension-defined custom-message representation. pi-dcp deliberately leaves all nudges as transient Pi custom messages for now, which preserves one implementation path and avoids changing the apparent speaker in persisted history. A future experiment may map soft nudges to assistant-role content to make them less authoritative, but that could also make them easier for the model to ignore and may require provider-specific ordering and compatibility tests. System-role injection is intentionally not used: it could give a runtime reminder higher authority than intended and blur the boundary with Pi's actual system instructions.
-
-The role described here is the role the provider receives, not the internal Pi message shape. `display: false` does not make a nudge invisible to the model; it only suppresses normal UI display.
+Threshold decisions are persisted as `nudge.requested` v2 operations. The next `before_agent_start` materializes one stable `pi-dcp.v2.nudge` custom message, which Pi persists in the session as an append-only suffix. Nudge text uses only the `soft`, `imperative`, or `critical` band; exact token counts, timestamps, IDs, and expirations stay in diagnostics. This prevents a threshold crossing from rewriting earlier provider history.
 
 ### Nudge troubleshooting
 
 `/dcp context` reports the last nudge evaluation and the turn on which a nudge was last inserted. `/dcp debug` adds the non-sensitive inputs used for that decision: reported token usage, context window, resolved minimum/maximum/critical token thresholds, turns since the last nudge, whether the current turn was already nudged, the selected severity, and the last transform result. Reasons include `usage_unavailable`, `below_minimum`, `interval_not_elapsed`, `already_nudged_this_turn`, and `ready`. No nudge text, summaries, tool arguments, paths, or provider credentials are logged.
 
-Nudges are evaluated during the outgoing context hook. A debug command run before any context transformation reports that no context transform has been recorded; run it after an agent request when diagnosing a missing nudge.
+Nudges are scheduled after an agent settles and delivered at the next agent start. A debug command run before any context transformation reports that no context transform has been recorded; run it after an agent request when diagnosing a missing nudge.
 
 ### Notification channels
 
 Notification level controls how much detail is shown (`off`, `minimal`, `summary`, or `detailed`). The notification channel is independent and can be `chat`, `toast`, or `both`:
 
-- `chat` adds a visible `pi-dcp.notification` message to the transcript without triggering an agent turn.
+- `chat` adds a visible `pi-dcp.v2.notification` message to the transcript without triggering an agent turn.
 - `toast` uses Pi's transient UI notification.
 - `both` does both.
 
@@ -81,7 +71,7 @@ The editable file uses the same shape as the menu. For example:
 }
 ```
 
-Compression summaries are authored by the model through the `compress` tool. References such as `m0001` and `b0001` are ephemeral snapshot aliases and are never persisted as state. A stale or ambiguous snapshot fails closed and sends the untouched context.
+Compression summaries are authored by the model through the v2 `compress` tool. The schema contains no model-supplied snapshot ID. Deterministic `m0001` and `b0001` aliases are attached locally to protocol units and active summaries; they are resolved against the producing assistant response's retained internal baseline. A missing or changed baseline fails closed and writes no operation. Version-1 operation entries remain in raw history but are ignored by v2 so raw context can be restored safely.
 
 ## Configuration
 
@@ -89,7 +79,7 @@ Configuration is read from trusted global and project `dcp.jsonc`/`dcp.json` lay
 
 ## Privacy and rollback
 
-Logs, notifications, and statistics contain metadata and reason codes only; they never include summaries, paths, arguments, results, images, or credentials. Removing or disabling pi-dcp immediately restores ordinary Pi context. Existing journal entries are inert without the extension and are not repaired.
+Logs, notifications, and statistics contain metadata and reason codes only; they never include summaries, paths, arguments, results, images, or credentials. The cross-session statistics ledger stores only operation IDs, session IDs, timestamps, source categories, event counts, and estimated token totals. Removing or disabling pi-dcp immediately restores ordinary Pi context. Existing journal entries are inert without the extension and are not repaired.
 
 ## License
 

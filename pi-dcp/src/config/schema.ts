@@ -30,7 +30,7 @@ export function mergeConfig(base: EffectiveConfig, patch: Record<string, unknown
     if (key === "nudge") { mergeNudge(result.nudge, raw, warnings); continue; }
     if (key === "pruneNotification") { result.pruneNotification = enumValue(raw, ["off", "minimal", "summary", "detailed"], key); continue; }
     if (key === "pruneNotificationType") { result.pruneNotificationType = enumValue(raw, ["chat", "toast", "both"], key); continue; }
-    const target = result[key as "commands" | "manualMode" | "turnProtection" | "compress" | "strategies" | "snapshot" | "summary"] as unknown as Record<string, unknown>;
+    const target = result[key as "commands" | "manualMode" | "turnProtection" | "compress" | "strategies" | "summary"] as unknown as Record<string, unknown>;
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${key} must be an object`);
     for (const [child, childValue] of Object.entries(raw as Record<string, unknown>)) {
       if (!(child in target)) { warnings.push(`unknown configuration key: ${key}.${child}`); continue; }

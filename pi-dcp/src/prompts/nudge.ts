@@ -1,2 +1,9 @@
 export type NudgeKind = "context" | "turn" | "iteration";
-export function nudgeText(kind: NudgeKind, force: "soft" | "strong", estimate: number): string { const prefix = force === "strong" ? "Important:" : "Reminder:"; if (kind === "turn") return `${prefix} context is approximately ${estimate} tokens; preserve the newest user intent and compress only a complete closed range if useful.`; if (kind === "iteration") return `${prefix} after several iterations, consider a faithful model-authored compression using current aliases.`; return `${prefix} context estimates are heuristic (${estimate} tokens); use current pi-dcp metadata and do not infer stale aliases.`; }
+
+/** Stable prompt text; usage measurements stay in diagnostics. */
+export function nudgeText(kind: NudgeKind, force: "soft" | "strong", _estimate?: number): string {
+  const prefix = force === "strong" ? "Important:" : "Reminder:";
+  if (kind === "iteration") return `${prefix} consider faithful pi-dcp compression for an older resolved range when useful.`;
+  if (kind === "turn") return `${prefix} preserve the newest user intent and compress only a complete, resolved range if useful.`;
+  return `${prefix} use pi-dcp compress for an older resolved range when useful; keep active work and unresolved questions intact.`;
+}

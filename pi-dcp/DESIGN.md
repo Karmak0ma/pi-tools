@@ -5,6 +5,11 @@
 **Target host:** `@earendil-works/pi-coding-agent` extension API  
 **Audience:** an implementer who has never used DCP
 
+> **Protocol note:** This v1 design is retained as historical background. The
+> implemented clean-break protocol is specified by
+> `CACHE_SNAPSHOT_REDESIGN.md` (v2): implicit baseline authorization,
+> deterministic local aliases, v2 operation entries, and persisted nudges.
+
 ## Table of contents
 
 1. [Document conventions](#1-document-conventions)

@@ -25,7 +25,6 @@ export const defaults = {
     deduplication: { enabled: true, protectedTools: [] as string[] },
     purgeErrors: { enabled: true, turns: 4, protectedTools: [] as string[] },
   },
-  snapshot: { ttlMs: 600000 },
   summary: { maxChars: 100000, maxExpandedChars: 200000, maxNestedDepth: 8 },
 } as const;
 
@@ -56,6 +55,5 @@ export type EffectiveConfig = {
     deduplication: { enabled: boolean; protectedTools: string[] };
     purgeErrors: { enabled: boolean; turns: number; protectedTools: string[] };
   };
-  snapshot: { ttlMs: number };
   summary: { maxChars: number; maxExpandedChars: number; maxNestedDepth: number };
 };

@@ -1,8 +1,7 @@
 import type { ExtensionCommandContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { DcpRuntime } from "../runtime.ts";
+import { clearBaselines, setDcpToolActive, type DcpRuntime } from "../runtime.ts";
 import { defaults, type EffectiveConfig } from "../config/defaults.ts";
 import { settingsPath, writeSettings } from "../config/settings.ts";
-import { setDcpToolActive } from "../runtime.ts";
 
 const CANCEL = "Cancel without saving";
 const SAVE = "Save and close";
@@ -63,4 +62,4 @@ async function chooseTurns(ctx: ExtensionCommandContext, current: number): Promi
 async function numberInput(ctx: ExtensionCommandContext, title: string, current: string, minimum: number, maximum: number): Promise<number | undefined> { while (true) { const raw = await ctx.ui.input(title, current); if (raw === undefined) return undefined; const value = Number(raw.trim().replace(/%$/, "")); if (Number.isInteger(value) && value >= minimum && value <= maximum) return value; ctx.ui.notify(`Enter a whole number from ${minimum} to ${maximum}.`, "error"); } }
 async function listInput(ctx: ExtensionCommandContext, title: string, current: string[]): Promise<string[] | undefined> { const raw = await ctx.ui.input(`${title} (comma-separated; blank clears)`, current.join(", ")); if (raw === undefined) return undefined; return [...new Set(raw.split(",").map((item) => item.trim()).filter(Boolean))]; }
 function visibleDefaults(): EffectiveConfig { const config = structuredClone(defaults) as unknown as EffectiveConfig; return config; }
-function applyConfig(runtime: DcpRuntime, pi: ExtensionAPI, config: EffectiveConfig): void { runtime.config = config; runtime.configPaths = [...new Set([...runtime.configPaths, settingsPath()])]; runtime.generation++; runtime.snapshot = undefined; runtime.lastNudgeTurn = undefined; const blocked = runtime.warnedReasonCodes.has("capability_missing") || runtime.warnedReasonCodes.has("tool_collision") || runtime.warnedReasonCodes.has("startup_error"); runtime.valid = !blocked && !runtime.reduced.corruptReason && config.enabled; try { setDcpToolActive(pi, runtime.valid && config.compress.permission !== "deny"); } catch { /* best effort */ } }
+function applyConfig(runtime: DcpRuntime, pi: ExtensionAPI, config: EffectiveConfig): void { runtime.config = config; runtime.configPaths = [...new Set([...runtime.configPaths, settingsPath()])]; runtime.generation++; clearBaselines(runtime); runtime.lastNudgeTurn = undefined; const blocked = runtime.warnedReasonCodes.has("capability_missing") || runtime.warnedReasonCodes.has("tool_collision") || runtime.warnedReasonCodes.has("startup_error"); runtime.valid = !blocked && !runtime.reduced.corruptReason && config.enabled; try { setDcpToolActive(pi, runtime.valid && config.compress.permission !== "deny"); } catch { /* best effort */ } }

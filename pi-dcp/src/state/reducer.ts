@@ -1,14 +1,225 @@
 import type { BlockId, RunId } from "../identity/types.ts";
-import { canonicalJson } from "../util/canonical-json.ts";
 import { hashJson } from "../util/hash.ts";
-import { isOperationEnvelope, type DcpOperation, type CreatedBlock, type OpEnvelope } from "./operations.ts";
-export interface ReducedBlock extends CreatedBlock { runId: RunId; createdByOpId: string; active: boolean; available: boolean; userDecompressed: boolean; parentBlockIds: BlockId[]; }
-export interface ReducedToolPrune { output?: { kind: "dedup-output" | "sweep-output"; opId: string; operationIndex: number }; oldErrorInput?: { opId: string; operationIndex: number }; questionInput?: { opId: string; operationIndex: number }; }
-export interface ReducedState { schema: 1; blocks: Map<BlockId, ReducedBlock>; runs: Map<RunId, BlockId[]>; toolPrunes: Map<string, ReducedToolPrune>; manualMode: boolean; appliedOpIds: Set<string>; requestKeys: Map<string, string>; operationCount: number; corruptReason?: "state_schema_unknown" | "state_conflict"; opPayloads?: Map<string, string>; }
-export function emptyState(): ReducedState { return { schema: 1, blocks: new Map(), runs: new Map(), toolPrunes: new Map(), manualMode: false, appliedOpIds: new Set(), requestKeys: new Map(), operationCount: 0, opPayloads: new Map() }; }
-export function cloneState(state: ReducedState): ReducedState { return { schema: 1, blocks: new Map([...state.blocks].map(([id, block]) => [id, { ...block, coverage: { ...block.coverage, directEntryIds: [...block.coverage.directEntryIds], effectiveEntryIds: [...block.coverage.effectiveEntryIds], directToolCallIds: [...block.coverage.directToolCallIds], effectiveToolCallIds: [...block.coverage.effectiveToolCallIds] }, anchor: { ...block.anchor }, consumedBlockIds: [...block.consumedBlockIds], parentBlockIds: [...block.parentBlockIds] }])), runs: new Map([...state.runs].map(([id, blocks]) => [id, [...blocks]])), toolPrunes: new Map([...state.toolPrunes].map(([id, prune]) => [id, { ...prune }])), manualMode: state.manualMode, appliedOpIds: new Set(state.appliedOpIds), requestKeys: new Map(state.requestKeys), operationCount: state.operationCount, corruptReason: state.corruptReason, opPayloads: new Map(state.opPayloads || []) }; }
-export function reduceEnvelope(state: ReducedState, envelope: unknown): ReducedState { if (state.corruptReason) return state; if (!isOperationEnvelope(envelope)) return { ...state, corruptReason: "state_schema_unknown" }; const next = cloneState(state); const payloadHash = hashJson(envelope.operation); const priorOp = next.opPayloads?.get(envelope.opId); if (priorOp && priorOp !== payloadHash) { next.corruptReason = "state_conflict"; return next; } if (priorOp) return next; const prior = next.requestKeys.get(envelope.requestKey); if (prior && prior !== payloadHash) { next.corruptReason = "state_conflict"; return next; } if (next.appliedOpIds.has(envelope.opId)) return next; if (prior) { next.appliedOpIds.add(envelope.opId); next.opPayloads?.set(envelope.opId, payloadHash); return next; } const applied = applyOperation(next, envelope.operation, envelope.opId, next.operationCount); if (!applied) { next.corruptReason = "state_conflict"; return next; } next.requestKeys.set(envelope.requestKey, payloadHash); next.opPayloads?.set(envelope.opId, payloadHash); next.appliedOpIds.add(envelope.opId); next.operationCount++; return next; }
-function applyOperation(state: ReducedState, operation: DcpOperation, opId: string, operationIndex: number): boolean { if (operation.type === "compression.created") { if (state.runs.has(operation.runId) || operation.blocks.length < 1 || operation.blocks.length > 16) return false; const ids: string[] = []; const covered = new Set<string>(); const coveredTools = new Set<string>(); for (const block of operation.blocks) { if ((block.anchor.beforeEntryId && block.coverage.effectiveEntryIds.includes(block.anchor.beforeEntryId)) || (block.anchor.afterEntryId && block.coverage.effectiveEntryIds.includes(block.anchor.afterEntryId)) || (block.anchor.beforeEntryId && block.anchor.beforeEntryId === block.anchor.afterEntryId)) return false; if (new Set(block.coverage.directEntryIds).size !== block.coverage.directEntryIds.length || new Set(block.coverage.effectiveEntryIds).size !== block.coverage.effectiveEntryIds.length || new Set(block.coverage.directToolCallIds).size !== block.coverage.directToolCallIds.length || new Set(block.coverage.effectiveToolCallIds).size !== block.coverage.effectiveToolCallIds.length || new Set(block.consumedBlockIds).size !== block.consumedBlockIds.length) return false; if (!block.coverage.directEntryIds.every((id) => block.coverage.effectiveEntryIds.includes(id)) || !block.coverage.directToolCallIds.every((id) => block.coverage.effectiveToolCallIds.includes(id))) return false; if (block.coverage.effectiveEntryIds.some((id) => covered.has(id)) || block.coverage.effectiveToolCallIds.some((id) => coveredTools.has(id))) return false; for (const id of block.coverage.effectiveToolCallIds) coveredTools.add(id); if (block.coverage.effectiveEntryIds.some((entryId) => covered.has(entryId))) return false; for (const entryId of block.coverage.effectiveEntryIds) covered.add(entryId); if (state.blocks.has(block.blockId) || block.ordinal !== ids.length || block.nestedDepth < 0 || block.consumedBlockIds.some((id) => !state.blocks.has(id))) return false; if (block.consumedBlockIds.some((id) => !state.blocks.get(id)?.active)) return false; for (const childId of block.consumedBlockIds) { const child = state.blocks.get(childId)!; if (!child.coverage.effectiveEntryIds.every((entryId) => block.coverage.effectiveEntryIds.includes(entryId)) || block.nestedDepth < child.nestedDepth + 1 || child.userDecompressed) return false; } for (const [existingId, existing] of state.blocks) if (existing.active && block.coverage.effectiveEntryIds.some((entryId) => existing.coverage.effectiveEntryIds.includes(entryId)) && !block.consumedBlockIds.includes(existingId)) return false; state.blocks.set(block.blockId, { ...block, runId: operation.runId, createdByOpId: opId, active: true, available: true, userDecompressed: false, parentBlockIds: [] }); ids.push(block.blockId); } for (const id of ids) for (const childId of state.blocks.get(id)!.consumedBlockIds) { const child = state.blocks.get(childId)!; child.active = false; child.parentBlockIds = [...new Set([...child.parentBlockIds, id])]; } state.runs.set(operation.runId, ids); return true; } if (operation.type === "blocks.activation.changed") { for (const id of operation.blockIds) { const block = state.blocks.get(id); if (!block || !block.available) return false; if (operation.active && (operation.cause !== "user-recompress" || !block.userDecompressed)) return false; if (!operation.active && (operation.cause !== "user-decompress" || !block.active)) return false; } for (const id of operation.blockIds) { const block = state.blocks.get(id)!; block.active = operation.active; block.userDecompressed = !operation.active && operation.cause === "user-decompress"; if (operation.active) deactivateDescendants(state, block.blockId); else if (operation.cause === "user-decompress") activateEligibleDescendants(state, block.blockId); } return true; } if (operation.type === "tools.pruned") { const seen = new Set<string>(); if (operation.decisions.some((decision) => { const key = `${decision.toolCallId}\0${decision.kind}`; if (seen.has(key)) return true; seen.add(key); return false; })) return false; for (const decision of operation.decisions) { const current = state.toolPrunes.get(decision.toolCallId) || {}; if (decision.kind === "dedup-output" || decision.kind === "sweep-output") { if (!current.output) current.output = { kind: decision.kind, opId, operationIndex }; } else if (decision.kind === "old-error-input") current.oldErrorInput ||= { opId, operationIndex }; else current.questionInput ||= { opId, operationIndex }; state.toolPrunes.set(decision.toolCallId, current); } return true; } if (operation.type === "manual.changed") { state.manualMode = operation.enabled; return true; } return false; }
-function deactivateDescendants(state: ReducedState, blockId: string): void { const block = state.blocks.get(blockId); if (!block) return; for (const childId of block.consumedBlockIds) { const child = state.blocks.get(childId); if (child) { child.active = false; deactivateDescendants(state, childId); } } }
-function activateEligibleDescendants(state: ReducedState, blockId: string): void { const block = state.blocks.get(blockId); if (!block) return; for (const childId of block.consumedBlockIds) { const child = state.blocks.get(childId); if (child?.available && !child.userDecompressed) { child.active = true; activateEligibleDescendants(state, childId); } } }
-export function markAvailability(state: ReducedState, availableEntryIds: ReadonlySet<string>, validAnchors: ReadonlySet<string>): ReducedState { const next = cloneState(state); for (const block of next.blocks.values()) { const coverageAvailable = block.coverage.effectiveEntryIds.every((id) => availableEntryIds.has(id)); const before = block.anchor.beforeEntryId ? availableEntryIds.has(block.anchor.beforeEntryId) : true; const after = block.anchor.afterEntryId ? availableEntryIds.has(block.anchor.afterEntryId) : true; const anchorKey = `${block.anchor.beforeEntryId || ""}|${block.anchor.afterEntryId || ""}`; block.available = coverageAvailable && before && after && (validAnchors.size === 0 || validAnchors.has(anchorKey)); if (!block.available) block.active = false; } return next; }
+import { isOperationEnvelope, type DcpOperation, type CreatedBlock, type OpEnvelope, type NudgeRequested } from "./operations.ts";
+import { addSavingsTotals, cloneSavingsTotals, emptySavingsTotals, savingsFromOperation, type SavingsTotals } from "../stats.ts";
+
+export interface ReducedBlock extends CreatedBlock {
+  runId: RunId;
+  createdByOpId: string;
+  active: boolean;
+  available: boolean;
+  userDecompressed: boolean;
+  parentBlockIds: BlockId[];
+}
+export interface ReducedToolPrune {
+  output?: { kind: "dedup-output" | "sweep-output"; opId: string; operationIndex: number };
+  oldErrorInput?: { opId: string; operationIndex: number };
+  questionInput?: { opId: string; operationIndex: number };
+}
+/** Delivery is derived from branch custom_message entries, not mutable reducer state. */
+export interface ReducedNudge extends NudgeRequested { requestedByOpId: string; }
+export interface ReducedState {
+  schema: 2;
+  blocks: Map<BlockId, ReducedBlock>;
+  runs: Map<RunId, BlockId[]>;
+  toolPrunes: Map<string, ReducedToolPrune>;
+  nudges: Map<string, ReducedNudge>;
+  manualMode: boolean;
+  savings: SavingsTotals;
+  appliedOpIds: Set<string>;
+  requestKeys: Map<string, string>;
+  operationCount: number;
+  corruptReason?: "state_schema_unknown" | "state_conflict";
+  opPayloads?: Map<string, string>;
+}
+
+export function emptyState(): ReducedState {
+  return {
+    schema: 2,
+    blocks: new Map(),
+    runs: new Map(),
+    toolPrunes: new Map(),
+    nudges: new Map(),
+    manualMode: false,
+    savings: emptySavingsTotals(),
+    appliedOpIds: new Set(),
+    requestKeys: new Map(),
+    operationCount: 0,
+    opPayloads: new Map(),
+  };
+}
+
+export function cloneState(state: ReducedState): ReducedState {
+  return {
+    schema: 2,
+    blocks: new Map([...state.blocks].map(([id, block]) => [id, {
+      ...block,
+      coverage: {
+        ...block.coverage,
+        directEntryIds: [...block.coverage.directEntryIds],
+        effectiveEntryIds: [...block.coverage.effectiveEntryIds],
+        directToolCallIds: [...block.coverage.directToolCallIds],
+        effectiveToolCallIds: [...block.coverage.effectiveToolCallIds],
+      },
+      anchor: { ...block.anchor },
+      consumedBlockIds: [...block.consumedBlockIds],
+      parentBlockIds: [...block.parentBlockIds],
+    }])),
+    runs: new Map([...state.runs].map(([id, blocks]) => [id, [...blocks]])),
+    toolPrunes: new Map([...state.toolPrunes].map(([id, prune]) => [id, { ...prune }])),
+    nudges: new Map([...state.nudges].map(([key, nudge]) => [key, { ...nudge }])),
+    manualMode: state.manualMode,
+    savings: cloneSavingsTotals(state.savings || emptySavingsTotals()),
+    appliedOpIds: new Set(state.appliedOpIds),
+    requestKeys: new Map(state.requestKeys),
+    operationCount: state.operationCount,
+    corruptReason: state.corruptReason,
+    opPayloads: new Map(state.opPayloads || []),
+  };
+}
+
+export function reduceEnvelope(state: ReducedState, envelope: unknown): ReducedState {
+  if (state.corruptReason) return state;
+  if (!isOperationEnvelope(envelope)) return { ...state, corruptReason: "state_schema_unknown" };
+  const next = cloneState(state);
+  const payloadHash = hashJson(envelope.operation);
+  const priorOp = next.opPayloads?.get(envelope.opId);
+  if (priorOp && priorOp !== payloadHash) { next.corruptReason = "state_conflict"; return next; }
+  if (priorOp) return next;
+  const prior = next.requestKeys.get(envelope.requestKey);
+  if (prior && prior !== payloadHash) { next.corruptReason = "state_conflict"; return next; }
+  if (next.appliedOpIds.has(envelope.opId)) return next;
+  if (prior) {
+    next.appliedOpIds.add(envelope.opId);
+    next.opPayloads?.set(envelope.opId, payloadHash);
+    return next;
+  }
+  if (!applyOperation(next, envelope.operation, envelope.opId, next.operationCount)) {
+    next.corruptReason = "state_conflict";
+    return next;
+  }
+  next.requestKeys.set(envelope.requestKey, payloadHash);
+  next.opPayloads?.set(envelope.opId, payloadHash);
+  next.appliedOpIds.add(envelope.opId);
+  next.operationCount++;
+  return next;
+}
+
+function applyOperation(state: ReducedState, operation: DcpOperation, opId: string, operationIndex: number): boolean {
+  if (operation.type === "compression.created") {
+    if (state.runs.has(operation.runId) || operation.blocks.length < 1 || operation.blocks.length > 16) return false;
+    const ids: string[] = [];
+    const covered = new Set<string>();
+    const coveredTools = new Set<string>();
+    for (const block of operation.blocks) {
+      if ((block.anchor.beforeEntryId && block.coverage.effectiveEntryIds.includes(block.anchor.beforeEntryId))
+        || (block.anchor.afterEntryId && block.coverage.effectiveEntryIds.includes(block.anchor.afterEntryId))
+        || (block.anchor.beforeEntryId && block.anchor.beforeEntryId === block.anchor.afterEntryId)) return false;
+      if (new Set(block.coverage.directEntryIds).size !== block.coverage.directEntryIds.length
+        || new Set(block.coverage.effectiveEntryIds).size !== block.coverage.effectiveEntryIds.length
+        || new Set(block.coverage.directToolCallIds).size !== block.coverage.directToolCallIds.length
+        || new Set(block.coverage.effectiveToolCallIds).size !== block.coverage.effectiveToolCallIds.length
+        || new Set(block.consumedBlockIds).size !== block.consumedBlockIds.length) return false;
+      if (!block.coverage.directEntryIds.every((id) => block.coverage.effectiveEntryIds.includes(id))
+        || !block.coverage.directToolCallIds.every((id) => block.coverage.effectiveToolCallIds.includes(id))) return false;
+      if (block.coverage.effectiveEntryIds.some((id) => covered.has(id))
+        || block.coverage.effectiveToolCallIds.some((id) => coveredTools.has(id))) return false;
+      for (const id of block.coverage.effectiveToolCallIds) coveredTools.add(id);
+      for (const entryId of block.coverage.effectiveEntryIds) covered.add(entryId);
+      if (state.blocks.has(block.blockId) || block.ordinal !== ids.length || block.nestedDepth < 0 || block.consumedBlockIds.some((id) => !state.blocks.has(id))) return false;
+      if (block.consumedBlockIds.some((id) => !state.blocks.get(id)?.active)) return false;
+      for (const childId of block.consumedBlockIds) {
+        const child = state.blocks.get(childId)!;
+        if (!child.coverage.effectiveEntryIds.every((entryId) => block.coverage.effectiveEntryIds.includes(entryId))
+          || block.nestedDepth < child.nestedDepth + 1 || child.userDecompressed) return false;
+      }
+      for (const [existingId, existing] of state.blocks) {
+        if (existing.active && block.coverage.effectiveEntryIds.some((entryId) => existing.coverage.effectiveEntryIds.includes(entryId)) && !block.consumedBlockIds.includes(existingId)) return false;
+      }
+      state.blocks.set(block.blockId, { ...block, runId: operation.runId, createdByOpId: opId, active: true, available: true, userDecompressed: false, parentBlockIds: [] });
+      ids.push(block.blockId);
+    }
+    for (const id of ids) {
+      for (const childId of state.blocks.get(id)!.consumedBlockIds) {
+        const child = state.blocks.get(childId)!;
+        child.active = false;
+        child.parentBlockIds = [...new Set([...child.parentBlockIds, id])];
+      }
+    }
+    state.runs.set(operation.runId, ids);
+    addSavingsTotals(state.savings, savingsFromOperation(operation));
+    return true;
+  }
+  if (operation.type === "blocks.activation.changed") {
+    for (const id of operation.blockIds) {
+      const block = state.blocks.get(id);
+      if (!block || !block.available) return false;
+      if (operation.active && (operation.cause !== "user-recompress" || !block.userDecompressed)) return false;
+      if (!operation.active && (operation.cause !== "user-decompress" || !block.active)) return false;
+    }
+    for (const id of operation.blockIds) {
+      const block = state.blocks.get(id)!;
+      block.active = operation.active;
+      block.userDecompressed = !operation.active && operation.cause === "user-decompress";
+      if (operation.active) deactivateDescendants(state, block.blockId);
+      else if (operation.cause === "user-decompress") activateEligibleDescendants(state, block.blockId);
+    }
+    return true;
+  }
+  if (operation.type === "tools.pruned") {
+    const seen = new Set<string>();
+    if (operation.decisions.some((decision) => {
+      const key = `${decision.toolCallId}\0${decision.kind}`;
+      if (seen.has(key)) return true;
+      seen.add(key);
+      return false;
+    })) return false;
+    for (const decision of operation.decisions) {
+      const current = state.toolPrunes.get(decision.toolCallId) || {};
+      if (decision.kind === "dedup-output" || decision.kind === "sweep-output") {
+        if (!current.output) current.output = { kind: decision.kind, opId, operationIndex };
+      } else if (decision.kind === "old-error-input") current.oldErrorInput ||= { opId, operationIndex };
+      else current.questionInput ||= { opId, operationIndex };
+      state.toolPrunes.set(decision.toolCallId, current);
+    }
+    addSavingsTotals(state.savings, savingsFromOperation(operation));
+    return true;
+  }
+  if (operation.type === "manual.changed") { state.manualMode = operation.enabled; return true; }
+  if (operation.type === "nudge.requested") {
+    const existing = state.nudges.get(operation.nudgeKey);
+    if (!existing) state.nudges.set(operation.nudgeKey, { ...operation, requestedByOpId: opId });
+    return true;
+  }
+  return false;
+}
+
+function deactivateDescendants(state: ReducedState, blockId: string): void {
+  const block = state.blocks.get(blockId);
+  if (!block) return;
+  for (const childId of block.consumedBlockIds) {
+    const child = state.blocks.get(childId);
+    if (child) { child.active = false; deactivateDescendants(state, childId); }
+  }
+}
+function activateEligibleDescendants(state: ReducedState, blockId: string): void {
+  const block = state.blocks.get(blockId);
+  if (!block) return;
+  for (const childId of block.consumedBlockIds) {
+    const child = state.blocks.get(childId);
+    if (child?.available && !child.userDecompressed) { child.active = true; activateEligibleDescendants(state, childId); }
+  }
+}
+
+export function markAvailability(state: ReducedState, availableEntryIds: ReadonlySet<string>, validAnchors: ReadonlySet<string>): ReducedState {
+  const next = cloneState(state);
+  for (const block of next.blocks.values()) {
+    const coverageAvailable = block.coverage.effectiveEntryIds.every((id) => availableEntryIds.has(id));
+    const before = block.anchor.beforeEntryId ? availableEntryIds.has(block.anchor.beforeEntryId) : true;
+    const after = block.anchor.afterEntryId ? availableEntryIds.has(block.anchor.afterEntryId) : true;
+    const anchorKey = `${block.anchor.beforeEntryId || ""}|${block.anchor.afterEntryId || ""}`;
+    block.available = coverageAvailable && before && after && (validAnchors.size === 0 || validAnchors.has(anchorKey));
+    if (!block.available) block.active = false;
+  }
+  return next;
+}

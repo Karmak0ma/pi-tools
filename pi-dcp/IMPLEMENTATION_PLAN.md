@@ -462,7 +462,7 @@ A pre-existing tool named `compress` is a collision: disable pi-dcp mutation and
 - required lifecycle event registration is accepted;
 - `appendEntry`, `registerTool`, `registerCommand`, `getActiveTools`, `setActiveTools`, and `sendUserMessage` exist;
 - context objects expose `sessionManager.getLeafId`, `getBranch`, `buildContextEntries`, and session identity;
-- `ctx.getContextUsage`, `ctx.isProjectTrusted`, `ctx.hasUI`, `ctx.ui.confirm`, `ctx.reload`, and `ctx.isIdle` exist where used;
+- `ctx.getContextUsage`, `ctx.isProjectTrusted`, `ctx.reload`, and `ctx.isIdle` exist for lifecycle processing; `ctx.hasUI` and `ctx.ui.confirm` are checked at execution time for `ask` permission;
 - sequential tool definitions are supported by the installed types/runtime contract.
 
 Factory-time checks cover `pi`; context-dependent checks finish at `session_start`. Failure sets `runtime.valid=false`, removes pi-dcp's active tool if safe, skips config project reads and operations, and emits one `capability_missing` diagnostic.
