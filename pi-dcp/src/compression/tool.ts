@@ -46,12 +46,14 @@ export async function bindCompressionProvenance(toolCallId: string, ctx: Extensi
   await runtime.mutex.runExclusive(() => {
     if (!runtime.valid || runtime.mutationBlocked) return;
     const currentModel = modelKey(ctx.model, ctx.getContextUsage()?.contextWindow || 0);
-    const configHash = hashJson(runtime.config);
+    const current = { model: currentModel, generation: runtime.generation, configHash: hashJson(runtime.config) };
     const persisted = findAssistantToolEntry(ctx, toolCallId);
     const baseline = persisted
-      ? findBaselineForParent(runtime, persisted.parentId, { model: currentModel, generation: runtime.generation, configHash })
-      : findBaselineForParent(runtime, ctx.sessionManager.getLeafId(), { model: currentModel, generation: runtime.generation, configHash }) || latestBaseline(runtime);
-    if (baseline && baselineIdentityMatches(baseline, runtime, currentModel)) runtime.compressionProvenance.set(toolCallId, baseline);
+      ? findBaselineForParent(runtime, persisted.parentId, current)
+      : findBaselineForParent(runtime, ctx.sessionManager.getLeafId(), current) || latestBaseline(runtime);
+    if (baseline && baselineIdentityMatches(baseline, runtime, currentModel)) {
+      runtime.compressionProvenance.set(toolCallId, baseline);
+    }
   });
 }
 
@@ -146,12 +148,49 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
   }
 }
 
-function producingBaseline(toolCallId: string, _ctx: ExtensionContext, runtime: DcpRuntime): BaselineSnapshot | undefined {
-  // Persisted assistant history is validation evidence, not an execution grant.
-  // Every live execution must first pass through Pi's authoritative `tool_call`
-  // event, which creates this single-use binding. Otherwise replaying an old
-  // assistant entry could append the same logical compression more than once.
-  return runtime.compressionProvenance.get(toolCallId);
+function producingBaseline(toolCallId: string, ctx: ExtensionContext, runtime: DcpRuntime): BaselineSnapshot | undefined {
+  const currentModel = modelKey(ctx.model, ctx.getContextUsage()?.contextWindow || 0);
+  return recoverProducingBaseline(toolCallId, ctx, runtime, currentModel);
+}
+
+/**
+ * Resolve the immutable request baseline from the live tool execution.
+ *
+ * `tool_call` is a useful early binding point, but it must not be a second,
+ * hidden prerequisite for a registered tool's own `execute` callback. Pi has
+ * already authorized and dispatched the exact tool-call ID by the time this
+ * callback runs. Requiring an ephemeral map entry as additional proof made a
+ * valid, uniquely persisted call fail whenever the lifecycle hook was missed
+ * during reload/event draining—the production failure this fallback fixes.
+ *
+ * Recovery still cannot invent a baseline. Without an early host binding, it
+ * requires exactly one persisted assistant call and selects only the retained
+ * snapshot for that call's exact parent. Pi's older pre-persistence ordering
+ * remains supported only when `tool_call` created the binding first. This also
+ * makes duplicate persisted IDs fail closed instead of accidentally resembling
+ * the pre-persistence case. `validateBaselineHistory` then recomputes the
+ * canonical history hash and rejects changed descendants before append.
+ * Storing the recovered value in the single-use map keeps confirmation
+ * revalidation on the identical object.
+ */
+function recoverProducingBaseline(
+  toolCallId: string,
+  ctx: ExtensionContext,
+  runtime: DcpRuntime,
+  currentModel: ReturnType<typeof modelKey>,
+): BaselineSnapshot | undefined {
+  const bound = runtime.compressionProvenance.get(toolCallId);
+  if (bound) return bound;
+
+  const producing = findAssistantToolEntry(ctx, toolCallId);
+  if (!producing) return undefined;
+
+  const current = { model: currentModel, generation: runtime.generation, configHash: hashJson(runtime.config) };
+  const baseline = findBaselineForParent(runtime, producing.parentId, current);
+  if (!baseline || !baselineIdentityMatches(baseline, runtime, currentModel)) return undefined;
+
+  runtime.compressionProvenance.set(toolCallId, baseline);
+  return baseline;
 }
 
 function findAssistantToolEntry(ctx: ExtensionContext, toolCallId: string): { id: string; parentId: string | null; entryIndex: number; callNames: Map<string, string> } | undefined {
