@@ -1,0 +1,15 @@
+{
+  "provider": "openai-codex",
+  "model": "gpt-5.6-luna",
+  "api": "openai-codex-responses",
+  "entries": [
+    { "type": "message", "id": "entry-1", "parentId": null, "timestamp": "2026-08-16T11:00:00.000Z", "message": { "role": "user", "content": "Review the completed investigation.", "timestamp": 1 } },
+    { "type": "message", "id": "entry-2", "parentId": "entry-1", "timestamp": "2026-08-16T11:00:01.000Z", "message": { "role": "assistant", "content": [{ "type": "text", "text": "The investigation is complete and the findings are recorded." }], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "stopReason": "stop", "timestamp": 2 } },
+    { "type": "message", "id": "entry-3", "parentId": "entry-2", "timestamp": "2026-08-16T11:00:02.000Z", "message": { "role": "user", "content": "Check the implementation evidence.", "timestamp": 3 } },
+    { "type": "message", "id": "entry-4", "parentId": "entry-3", "timestamp": "2026-08-16T11:00:03.000Z", "message": { "role": "assistant", "content": [{ "type": "toolCall", "id": "read-1", "name": "read", "arguments": { "path": "src/example.ts" } }], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "stopReason": "toolUse", "timestamp": 4 } },
+    { "type": "message", "id": "entry-5", "parentId": "entry-4", "timestamp": "2026-08-16T11:00:04.000Z", "message": { "role": "toolResult", "toolCallId": "read-1", "toolName": "read", "content": [{ "type": "text", "text": "Redacted implementation evidence." }], "isError": false, "timestamp": 5 } },
+    { "type": "message", "id": "entry-6", "parentId": "entry-5", "timestamp": "2026-08-16T11:00:05.000Z", "message": { "role": "user", "content": "Compress the older completed work.", "timestamp": 6 } },
+    { "type": "message", "id": "entry-7", "parentId": "entry-6", "timestamp": "2026-08-16T11:00:06.000Z", "message": { "role": "assistant", "content": [{ "type": "toolCall", "id": "compress-1", "name": "compress", "arguments": { "topic": "completed work", "content": [{ "startId": "m0227", "endId": "m2109", "summary": "The completed work was verified." }] } }], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "stopReason": "toolUse", "timestamp": 7 } },
+    { "type": "message", "id": "entry-8", "parentId": "entry-7", "timestamp": "2026-08-16T11:00:07.000Z", "message": { "role": "toolResult", "toolCallId": "compress-1", "toolName": "compress", "content": [{ "type": "text", "text": "Redacted historical rejection." }], "isError": true, "timestamp": 8 } }
+  ]
+}

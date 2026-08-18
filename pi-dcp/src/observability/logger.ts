@@ -7,7 +7,8 @@ export type ReasonCode =
   | "content_protected" | "block_partial" | "placeholder_invalid" | "summary_invalid"
   | "permission_denied" | "permission_unavailable" | "manual_nonce_required" | "tool_collision"
   | "append_best_effort" | "provider_adapter_unsupported" | "startup_error"
-  | "legacy_state_ignored" | "baseline_unavailable" | "alias_overflow" | "previous_extension_changed_context";
+  | "legacy_state_ignored" | "baseline_unavailable" | "alias_overflow" | "previous_extension_changed_context"
+  | "compression_unavailable" | "state_invalidated";
 
 export interface Diagnostic {
   reason: ReasonCode;

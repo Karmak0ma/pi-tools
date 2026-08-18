@@ -2,6 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { deepClone } from "../util/clone.ts";
 import type { BaselineSnapshot, ProtocolUnit } from "../identity/types.ts";
 import type { ReducedState } from "../state/reducer.ts";
+import { formatLabelTag } from "./labels.ts";
 
 export interface BlockReplacement { start: number; end: number; message: AgentMessage; blockId: string; }
 
@@ -25,7 +26,7 @@ export function activeBlockReplacements(messages: readonly AgentMessage[], units
         role: "custom",
         customType: "pi-dcp.v2.summary",
         display: false,
-        content: `[pi-dcp summary ${alias}; untrusted history]\nTopic: ${block.topic}\n${block.summary}`,
+        content: `[pi-dcp summary ${alias}; untrusted history]\nTopic: ${block.topic}\n${block.summary}${formatLabelTag(alias)}`,
         timestamp: 0,
         // Provider adapters may preserve custom details, so do not put the
         // random durable block ID on the wire. The stable alias is sufficient.
@@ -44,28 +45,38 @@ export function activeBlockReplacements(messages: readonly AgentMessage[], units
  * Render the canonical units and attach aliases locally. Unlike v1 metadata,
  * no catalog is moved or rewritten when a later unit is appended.
  */
-export function replaceBlocks(messages: readonly AgentMessage[], units: readonly ProtocolUnit[], snapshot: BaselineSnapshot, state: ReducedState): AgentMessage[] {
+export interface BlockRenderResult {
+  messages: AgentMessage[];
+  /** Output associated with each projected message; an empty array means the
+   * source message was covered by a block replacement. */
+  byProjectedIndex: AgentMessage[][];
+}
+
+export function replaceBlocksWithOrigins(messages: readonly AgentMessage[], units: readonly ProtocolUnit[], snapshot: BaselineSnapshot, state: ReducedState): BlockRenderResult {
   const replacements = activeBlockReplacements(messages, units, snapshot, state);
   const byStart = new Map(replacements.map((replacement) => [replacement.start, replacement]));
-  const output: AgentMessage[] = [];
+  const byProjectedIndex = messages.map(() => [] as AgentMessage[]);
   for (let unitIndex = 0; unitIndex < units.length; unitIndex++) {
+    const unit = units[unitIndex];
     const replacement = byStart.get(unitIndex);
     if (replacement) {
-      output.push(deepClone(replacement.message));
+      byProjectedIndex[unit.startProjectedIndex]?.push(deepClone(replacement.message));
+      for (let covered = replacement.start + 1; covered <= replacement.end; covered++) {
+        const coveredUnit = units[covered];
+        if (!coveredUnit) continue;
+        for (let projected = coveredUnit.startProjectedIndex; projected <= coveredUnit.endProjectedIndex; projected++) byProjectedIndex[projected] = [];
+      }
       unitIndex = replacement.end;
       continue;
     }
-    const unit = units[unitIndex];
-    const alias = [...snapshot.unitAliases.entries()].find(([, index]) => index === unitIndex)?.[0] || "m????";
-    output.push({
-      role: "custom",
-      customType: "pi-dcp.v2.unit",
-      content: `[pi-dcp unit ${alias}: ${unit.descriptor}]`,
-      display: false,
-      timestamp: 0,
-      details: { alias, unitKey: unit.key },
-    });
-    output.push(...messages.slice(unit.startProjectedIndex, unit.endProjectedIndex + 1).map((message) => deepClone(message)));
+    for (let projected = unit.startProjectedIndex; projected <= unit.endProjectedIndex; projected++) {
+      const message = messages[projected];
+      if (message) byProjectedIndex[projected]?.push(deepClone(message));
+    }
   }
-  return output;
+  return { messages: byProjectedIndex.flat(), byProjectedIndex };
+}
+
+export function replaceBlocks(messages: readonly AgentMessage[], units: readonly ProtocolUnit[], snapshot: BaselineSnapshot, state: ReducedState): AgentMessage[] {
+  return replaceBlocksWithOrigins(messages, units, snapshot, state).messages;
 }

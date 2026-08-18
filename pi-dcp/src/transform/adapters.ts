@@ -2,9 +2,10 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ModelKey, ProtocolUnit } from "../identity/types.ts";
 
 /**
- * pi-dcp is intentionally adapter-scoped. A provider conversion can merge
- * adjacent roles or discard custom-message metadata, so an extension-wide
- * cache claim would be unsound without a named certification boundary.
+ * Provider conversion is deliberately represented by one conservative generic
+ * adapter. pi-dcp validates the canonical wire shape after every transform;
+ * an allow-list would make otherwise valid pi-ai APIs fail before that safety
+ * net can run.
  */
 export interface AliasTransportAdapter {
   id: string;
@@ -14,19 +15,24 @@ export interface AliasTransportAdapter {
   validateWire(wire: unknown): { ok: true } | { ok: false; reason: string };
 }
 
-const certified = new Map<string, AliasTransportAdapter>([
-  ["openai-completions", makeAdapter("openai-chat-completions")],
-  ["openai-responses", makeAdapter("openai-responses")],
-  ["opencode-cli-runner", makeAdapter("opencode-cli-runner")],
-  // A deliberately explicit fixture adapter used by deterministic unit tests.
-  ["test", makeAdapter("test-fixture")],
-]);
+const KNOWN_ADAPTER_IDS = [
+  "openai-completions",
+  "openai-responses",
+  "anthropic-messages",
+  "azure-openai-responses",
+  "google-generative-ai",
+  "openai-codex-responses",
+] as const;
 
-export function adapterForModel(model: Pick<ModelKey, "api">): AliasTransportAdapter | undefined { return certified.get(model.api); }
-export function isCertifiedAdapter(model: Pick<ModelKey, "api">): boolean { return adapterForModel(model) !== undefined; }
-export function certifiedAdapterIds(): string[] { return [...certified.keys()]; }
+/** Every API receives the same conservative transport representation. */
+export function adapterForModel(model: Pick<ModelKey, "api">): AliasTransportAdapter {
+  return makeAdapter(model.api || "unknown");
+}
 
-function makeAdapter(id: string): AliasTransportAdapter {
+/** Diagnostics-only inventory; this list never gates a transform. */
+export function knownAdapterIds(): string[] { return [...KNOWN_ADAPTER_IDS]; }
+
+export function makeAdapter(id: string): AliasTransportAdapter {
   return {
     id,
     // Annotation is performed by transform/blocks.ts so replacements and

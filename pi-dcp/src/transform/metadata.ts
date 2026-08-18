@@ -1,6 +1,4 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { EffectiveConfig } from "../config/defaults.ts";
-import type { BaselineSnapshot } from "../identity/types.ts";
 
 export type NudgeType = "soft" | "imperative" | "critical";
 export type NudgeReason = "ready" | "usage_unavailable" | "already_nudged_this_turn" | "below_minimum" | "interval_not_elapsed";
@@ -28,33 +26,6 @@ export function stableNudgeText(type: NudgeType): string {
   if (type === "imperative") return `Use pi-dcp compress now if a safe closed range is available. ${definition}`;
   return `When convenient, use pi-dcp compress for an older closed range. ${definition}`;
 }
-
-/** @deprecated Use stableNudgeText and persisted v2 nudge entries. */
-export function nudgeMessage(kind: "context" | "turn" | "iteration", _tokens: number, type: NudgeType | "strong"): AgentMessage {
-  const normalizedType: NudgeType = type === "strong" ? "imperative" : type;
-  return {
-    role: "custom",
-    customType: "pi-dcp.v2.nudge",
-    content: stableNudgeText(normalizedType),
-    display: false,
-    timestamp: 0,
-    details: { kind, type: normalizedType, force: normalizedType === "soft" ? "soft" : "strong" },
-  };
-}
-
-/** @deprecated v1 catalog function; v2 uses local unit annotations. */
-export function metadataMessage(_snapshot: BaselineSnapshot): AgentMessage {
-  return {
-    role: "custom",
-    customType: "pi-dcp.v2.guidance",
-    content: "Use local mNNNN unit labels and bNNNN summary labels. Select contiguous complete units.",
-    display: false,
-    timestamp: 0,
-  };
-}
-
-/** v2 deliberately never inserts a moving historical catalog. */
-export function insertMetadata(messages: readonly AgentMessage[]): AgentMessage[] { return [...messages]; }
 
 export function resolveLimit(limit: number | string, contextWindow: number): number {
   return typeof limit === "number" ? limit : Math.max(1, Math.floor(contextWindow * Number(limit.slice(0, -1)) / 100));

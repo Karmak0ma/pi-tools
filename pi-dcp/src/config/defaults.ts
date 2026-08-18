@@ -18,7 +18,13 @@ export const defaults = {
     modelMinLimits: {} as Record<string, number | string>,
     nudgeFrequency: 5,
     iterationNudgeThreshold: 15,
-    protectedTools: ["todo", "write", "edit"] as string[],
+    // No hardcoded floor here (unlike commands.protectedTools): a match
+    // absorbs the tool's output into the summary verbatim rather than
+    // blocking the range, so "write"/"edit" are deliberately left out by
+    // default. The model's own authored summary is trusted to describe what
+    // an edit did; only "todo" defaults to verbatim preservation, matching
+    // opencode-dynamic-context-pruning's compress-side default.
+    protectedTools: ["todo"] as string[],
     protectUserMessages: false,
   },
   strategies: {

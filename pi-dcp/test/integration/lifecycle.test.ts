@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { checkContextCapabilities, checkFactoryCapabilities } from "../../src/capabilities.ts";
 import { bindCompressionProvenance, registerCompressionTool } from "../../src/compression/tool.ts";
-import { createRuntime, publishBaseline, setDcpToolActive } from "../../src/runtime.ts";
+import { clearBaselines, createRuntime, publishBaseline, setDcpToolActive } from "../../src/runtime.ts";
 import { defaults } from "../../src/config/defaults.ts";
 import { emptyState } from "../../src/state/reducer.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
@@ -57,6 +57,43 @@ describe("extension capability gate", () => {
     // Repeated session starts must not duplicate the schema name.
     setDcpToolActive(pi, true);
     expect(active).toEqual(["read", "todo", "compress"]);
+  });
+
+  it("reactivates compress on session_start even if the host previously dropped it from the active set", async () => {
+    // Regression: the host only auto-activates a genuinely new tool name when
+    // rebuilding its tool registry (e.g. on /reload); a name it has already
+    // seen once is not re-added on its own. If a prior process ever excluded
+    // "compress" from the active set (a denied/invalid session, a stale
+    // capability failure, ...), it must come back on the next session_start,
+    // not stay silently unexposed to the model.
+    const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+    let active = ["read", "todo"];
+    const pi = {
+      on: (name: string, handler: (event: any, ctx: any) => unknown) => { handlers.set(name, handler); },
+      getActiveTools: () => [...active],
+      setActiveTools: (names: string[]) => { active = names; },
+    } as any;
+    const runtime = createRuntime(pi);
+    registerLifecycle(pi, runtime);
+    const ctx = {
+      cwd: "/tmp",
+      isProjectTrusted: () => true,
+      isIdle: () => true,
+      getContextUsage: () => undefined,
+      ui: { notify: () => undefined },
+      sessionManager: {
+        getSessionId: () => "session-1",
+        getSessionFile: () => undefined,
+        getLeafId: () => null,
+        getBranch: () => [],
+        buildContextEntries: () => [],
+      },
+    } as any;
+
+    await handlers.get("session_start")?.({}, ctx);
+
+    expect(runtime.valid).toBe(true);
+    expect(active).toContain("compress");
   });
 
   it.each([
@@ -122,8 +159,9 @@ describe("extension capability gate", () => {
         expect(result.content[0].text).toContain("pi-dcp compressed 1 range(s)");
         expect(result.details.reason).toBeUndefined();
       } else {
-        expect(result.content[0].text).toContain("baseline_unavailable (assistant_provenance_missing)");
-        expect(result.details).toMatchObject({ reason: "baseline_unavailable", stage: "assistant_provenance_missing" });
+        expect(result.content[0].text).toContain("compression_unavailable (extension_disabled)");
+        expect(result.content[0].text).toContain("No aliases were published");
+        expect(result.details).toMatchObject({ reason: "compression_unavailable", stage: "extension_disabled" });
       }
     } finally {
       if (previousStatsDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -152,12 +190,8 @@ describe("extension capability gate", () => {
       sessionManager: { getBranch: () => [] },
     }) as any;
 
-    expect(result.message).toMatchObject({
-      customType: "pi-dcp.v2.nudge",
-      display: false,
-      details: { nudgeKey: "nudge-1", band: "imperative", configGeneration: 7 },
-    });
-    expect(result.message.content).toContain("compress");
+    expect(result.message).toBeUndefined();
+    expect(result.systemPrompt).toContain("Never invent labels");
   });
 
   it("delivers a nudge after settled pruning advances the runtime generation", async () => {
@@ -194,6 +228,7 @@ describe("extension capability gate", () => {
         },
       } as any;
       registerLifecycle(pi, runtime);
+      runtime.lastReadiness = { ready: true, generation: runtime.generation };
 
       await handlers.get("agent_settled")?.({}, ctx);
 
@@ -203,16 +238,107 @@ describe("extension capability gate", () => {
       expect(nudge?.configGeneration).toBe(runtime.generation);
 
       const result = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as any;
-      expect(result.message).toMatchObject({
-        customType: "pi-dcp.v2.nudge",
-        display: false,
-        details: { nudgeKey: nudge?.nudgeKey, band: "soft", configGeneration: 2 },
-      });
+      expect(result.message).toBeUndefined();
+      expect(runtime.pendingNudge?.nudgeKey).toBe(nudge?.nudgeKey);
     } finally {
       if (previousStatsDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousStatsDir;
       await rm(statsDir, { recursive: true, force: true });
     }
+  });
+
+  it("reports compression_unavailable, not baseline_unavailable, when readiness is stale for the current generation", async () => {
+    // onSettled deliberately leaves lastReadiness.ready untouched when a
+    // settled pruning mutation bumps runtime.generation (nudge delivery in
+    // that same cycle relies on the pre-bump ready flag). The compress tool
+    // must still detect that staleness itself by comparing generations,
+    // rather than trusting a "ready: true" that no longer matches reality.
+    const messages = [
+      { role: "user", content: "old completed work", timestamp: 1 },
+      { role: "assistant", content: [{ type: "text", text: "the old work is complete" }], api: "openai-completions", provider: "openai", model: "model", stopReason: "stop", timestamp: 2 },
+      { role: "user", content: "current request", timestamp: 3 },
+    ] as any[];
+    const entries = messages.map((message, index) => ({ type: "message", id: `entry-${index + 1}`, parentId: index ? `entry-${index}` : null, timestamp: new Date(index + 1).toISOString(), message }));
+    let registered: any;
+    const statsDir = await mkdtemp(join(tmpdir(), "pi-dcp-stale-readiness-test-"));
+    const previousStatsDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = statsDir;
+    try {
+      const pi = {
+        registerTool: (tool: any) => { registered = tool; },
+        appendEntry: () => undefined,
+      } as any;
+      const runtime = createRuntime(pi);
+      runtime.sessionId = "session-1";
+      runtime.generation = 1;
+      const ctx = {
+        cwd: "/tmp",
+        hasUI: false,
+        model: { provider: "openai", id: "model", api: "openai-completions", contextWindow: 128_000 },
+        getContextUsage: () => ({ tokens: null, contextWindow: 128_000 }),
+        ui: { notify: () => undefined, confirm: async () => true },
+        sessionManager: {
+          buildContextEntries: () => entries,
+          getLeafId: () => "entry-3",
+        },
+      } as any;
+      registerCompressionTool(pi, runtime);
+      const transformed = transformOutgoingContext(messages, { ctx, sessionId: runtime.sessionId, generation: runtime.generation, state: emptyState(), config: structuredClone(defaults) as any });
+      expect(transformed.snapshot).toBeDefined();
+      publishBaseline(runtime, transformed.snapshot!);
+      runtime.index = transformed.index;
+      runtime.reduced = transformed.state;
+      runtime.lastReadiness = { ready: true, adapterId: "openai-completions", generation: runtime.generation };
+
+      // Simulate the settled-time pruning mutation: generation advances and
+      // baselines are cleared, but lastReadiness is left as-is (still true,
+      // still tagged with the old generation).
+      runtime.generation++;
+      clearBaselines(runtime);
+
+      const toolCallId = "compress-call";
+      const result = await registered.execute(toolCallId, { topic: "old work", content: [{ startId: "m0001", endId: "m0002", summary: "old work was completed and verified" }] }, undefined, undefined, ctx);
+
+      expect(result.content[0].text).toContain("compression_unavailable (state_invalidated)");
+      expect(result.details).toMatchObject({ reason: "compression_unavailable", stage: "state_invalidated" });
+    } finally {
+      if (previousStatsDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousStatsDir;
+      await rm(statsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("still injects a status message when the runtime is invalid", async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => Promise<any>>();
+    const runtime = createRuntime();
+    const pi = { on: (name: string, handler: (event: any, ctx: any) => Promise<any>) => { handlers.set(name, handler); } } as any;
+    registerLifecycle(pi, runtime);
+    runtime.valid = false;
+    runtime.lastReadiness = { ready: false, reason: "capability_missing", generation: runtime.generation };
+    const ctx = { model: { provider: "test", id: "model", api: "test", contextWindow: 1000 }, getContextUsage: () => ({ tokens: null, contextWindow: 1000 }), sessionManager: { buildContextEntries: () => [], getLeafId: () => null } } as any;
+
+    const result = await handlers.get("context")?.({ messages: [{ role: "user", content: "hi", timestamp: 1 } as any] }, ctx) as any;
+
+    const status = result.messages.find((message: any) => message.role === "custom" && message.customType === "pi-dcp.v2.status");
+    expect(status).toBeDefined();
+    expect(status.content).toContain("capability_missing");
+  });
+
+  it("records and deduplicates loud transform failures", async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => Promise<any>>();
+    const notices: string[] = [];
+    const diagnostics: any[] = [];
+    const runtime = createRuntime();
+    runtime.logger = { diagnostic: (diagnostic: any) => diagnostics.push(diagnostic) };
+    const pi = { on: (name: string, handler: (event: any, ctx: any) => Promise<any>) => { handlers.set(name, handler); } } as any;
+    registerLifecycle(pi, runtime);
+    const ctx = { ui: { notify: (text: string) => notices.push(text) }, model: { provider: "test", id: "model", api: "test", contextWindow: 1000 }, getContextUsage: () => ({ tokens: null, contextWindow: 1000 }), sessionManager: { buildContextEntries: () => [{ type: "unknown", id: "bad", parentId: null, timestamp: new Date(1).toISOString() }], getLeafId: () => null } } as any;
+    await handlers.get("context")?.({ messages: [] }, ctx);
+    await handlers.get("context")?.({ messages: [] }, ctx);
+    expect(runtime.lastReadiness).toMatchObject({ ready: false, reason: "projection_unsupported" });
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics[0]).toMatchObject({ reason: "projection_unsupported" });
+    expect(notices).toEqual(["pi-dcp: context transform disabled: projection_unsupported"]);
   });
 
   it("does not inject transient nudges during context transformation", () => {
@@ -240,6 +366,7 @@ describe("extension capability gate", () => {
     expect(result.nudged).toBeUndefined();
     expect(result.messages.some((item) => item.role === "custom" && item.customType === "pi-dcp.nudge")).toBe(false);
     expect(result.messages.some((item) => item.role === "custom" && item.customType === "pi-dcp.metadata")).toBe(false);
-    expect(result.messages.some((item) => item.role === "custom" && item.customType === "pi-dcp.v2.unit")).toBe(true);
+    expect(result.messages.some((item) => item.role === "custom" && item.customType === "pi-dcp.v2.unit")).toBe(false);
+    expect(result.messages.some((item) => item.role === "user" && String(item.content).includes("pi-dcp-message-id"))).toBe(true);
   });
 });

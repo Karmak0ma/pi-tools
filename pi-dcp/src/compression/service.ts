@@ -8,36 +8,60 @@ import { resolveCompressionRanges } from "./range.ts";
 import { validateSummary, type SummaryValidation } from "./validate.ts";
 import type { CompressionParams } from "./schema.ts";
 import type { CanonicalIndex } from "../identity/types.ts";
-import { protectUnit, type ProtectionOptions } from "./protected.ts";
+import { appendProtectedToolContent, type ProtectionOptions } from "./protected.ts";
+import { buildEligibility, unitBlockReason, type UnitBlockReason } from "./eligibility.ts";
+import { unitAlias } from "../identity/snapshot.ts";
 import { estimateTokens } from "../tokens/estimate.ts";
 
 export interface CompressionBuildOptions { sessionId: string; extensionVersion: string; snapshot: BaselineSnapshot; state: ReducedState; params: CompressionParams; model: Model<any> | undefined; toolCallId?: string; maxSummaryChars?: number; maxExpandedChars?: number; maxNestedDepth?: number; index?: CanonicalIndex; protection?: ProtectionOptions; turnProtection?: { enabled: boolean; turns: number }; protectUserMessages?: boolean; }
-export type CompressionBuildResult = { ok: true; envelope: ReturnType<typeof createEnvelope>; blocks: CreatedBlock[]; } | { ok: false; reason: string };
+export type CompressionBuildFailure = {
+  ok: false;
+  reason: string;
+  rangeIndex?: number;
+  id?: string;
+  byTool?: string;
+  byPattern?: string;
+  hint?: string;
+  cause?: UnitBlockReason;
+};
+export type CompressionBuildResult = { ok: true; envelope: ReturnType<typeof createEnvelope>; blocks: CreatedBlock[]; } | CompressionBuildFailure;
 export function buildCompressionEnvelope(options: CompressionBuildOptions): CompressionBuildResult {
   const ranges = resolveCompressionRanges(options.snapshot, options.state, options.params.content.map(({ startId, endId }) => ({ startId, endId })));
   if (!ranges.ok) return ranges;
-  const lastUser = Math.max(-1, ...options.snapshot.units.map((unit, index) => unit.role === "user" ? index : -1));
-  const protectedUserStart = options.turnProtection?.enabled ? Math.max(0, lastUser - options.turnProtection.turns + 1) : Number.POSITIVE_INFINITY;
+  // Tool-output protection (compress.protectedTools / protectedFilePatterns)
+  // is deliberately absent from this eligibility check: a protected tool
+  // call no longer blocks the range, its output is folded into the summary
+  // verbatim below instead (appendProtectedToolContent). The only remaining
+  // hard blockers are settledness and the user-turn protection rules.
+  const eligibility = buildEligibility(options.snapshot.units, { turnProtection: options.turnProtection, protectUserMessages: options.protectUserMessages });
   for (const range of ranges.ranges) {
     const selectedUnits = options.snapshot.units.slice(range.start, range.end + 1);
-    if (selectedUnits.some((unit, offset) => !unit.compressible || (options.protectUserMessages && unit.role === "user") || (unit.role === "user" && range.start + offset === lastUser) || (options.turnProtection?.enabled && unit.role === "user" && range.start + offset >= protectedUserStart))) return { ok: false, reason: "content_protected" };
-    if (options.index && options.protection) for (let unitIndex = range.start; unitIndex <= range.end; unitIndex++) { const unit = options.snapshot.units[unitIndex]; const messages = options.index.entries.filter((item) => unit.messageKeys.some((key) => key.entryId === item.key.entryId && key.projection === item.key.projection)).map((item) => item.message); if (protectUnit(messages, options.protection)) return { ok: false, reason: "content_protected" }; }
+    for (let offset = 0; offset < selectedUnits.length; offset++) {
+      const unitIndex = range.start + offset;
+      const cause = unitBlockReason(selectedUnits[offset], unitIndex, eligibility);
+      if (cause) return { ok: false, reason: "content_protected", rangeIndex: range.rangeIndex, id: unitAlias(unitIndex), cause };
+    }
   }
   const blocks: CreatedBlock[] = [];
   for (let index = 0; index < ranges.ranges.length; index++) {
     const range = ranges.ranges[index]; const authored = options.params.content[index].summary;
-    const valid: SummaryValidation = validateSummary(authored, options.maxSummaryChars || 100000); if (!valid.ok) return valid;
+    const valid: SummaryValidation = validateSummary(authored, options.maxSummaryChars || 100000); if (!valid.ok) return { ok: false, reason: valid.reason, rangeIndex: range.rangeIndex, hint: authored.length > (options.maxSummaryChars || 100000) ? "exceeds maxChars" : "summary contains invalid content" };
     const aliases = new Map([...options.snapshot.blockAliases.entries()].map(([alias, block]) => [alias, block.blockId]));
-    const expanded = expandNestedSummary(authored, range.consumedBlockIds, options.state, options.maxNestedDepth || 8, options.maxExpandedChars || 200000, aliases); if (!expanded.ok) return expanded;
+    const expanded = expandNestedSummary(authored, range.consumedBlockIds, options.state, options.maxNestedDepth || 8, options.maxExpandedChars || 200000, aliases); if (!expanded.ok) return { ok: false, reason: expanded.reason, rangeIndex: range.rangeIndex, hint: expanded.reason === "placeholder_invalid" ? "missing or repeated (bNNNN) placeholder" : "expanded summary exceeds maxChars" };
     const units = options.snapshot.units.slice(range.start, range.end + 1);
+    // Fold any protected tool output that fell inside this range into the
+    // summary verbatim rather than rejecting the range for containing it.
+    const finalSummary = options.index && options.protection
+      ? appendProtectedToolContent(expanded.summary, units, options.index, options.protection)
+      : expanded.summary;
     const directEntryIds = [...new Set(units.flatMap((unit) => unit.entryIds))];
     const directToolCallIds = [...new Set(units.flatMap((unit) => unit.toolCallIds))];
     const nested = range.consumedBlockIds.flatMap((id) => options.state.blocks.get(id)?.coverage || []).filter(Boolean);
     const effectiveEntryIds = [...new Set([...directEntryIds, ...nested.flatMap((coverage) => coverage.effectiveEntryIds)])];
     const effectiveToolCallIds = [...new Set([...directToolCallIds, ...nested.flatMap((coverage) => coverage.effectiveToolCallIds)])];
-    const estimatedSummaryTokens = Math.max(1, Math.ceil(expanded.summary.length / 4));
+    const estimatedSummaryTokens = Math.max(1, Math.ceil(finalSummary.length / 4));
     const estimatedSourceTokens = estimateCompressionSourceTokens(options, units, range.consumedBlockIds);
-    const block: CreatedBlock = { blockId: randomId(), ordinal: index, topic: options.params.topic, summary: expanded.summary, authoredSummary: authored, estimatedSummaryTokens, estimatedSourceTokens, estimatedSavingsTokens: Math.max(0, estimatedSourceTokens - estimatedSummaryTokens), coverage: { directEntryIds, effectiveEntryIds, directToolCallIds, effectiveToolCallIds }, anchor: { beforeEntryId: options.snapshot.units[range.start - 1]?.entryIds.at(-1), afterEntryId: options.snapshot.units[range.end + 1]?.entryIds[0] }, consumedBlockIds: expanded.consumedBlockIds, nestedDepth: expanded.depth };
+    const block: CreatedBlock = { blockId: randomId(), ordinal: index, topic: options.params.topic, summary: finalSummary, authoredSummary: authored, estimatedSummaryTokens, estimatedSourceTokens, estimatedSavingsTokens: Math.max(0, estimatedSourceTokens - estimatedSummaryTokens), coverage: { directEntryIds, effectiveEntryIds, directToolCallIds, effectiveToolCallIds }, anchor: { beforeEntryId: options.snapshot.units[range.start - 1]?.entryIds.at(-1), afterEntryId: options.snapshot.units[range.end + 1]?.entryIds[0] }, consumedBlockIds: expanded.consumedBlockIds, nestedDepth: expanded.depth };
     blocks.push(block);
   }
   const operation: CompressionCreated = { type: "compression.created", runId: randomId(), mode: "range", toolCallId: options.toolCallId || `legacy-${options.snapshot.hash.slice(0, 16)}`, snapshotHash: options.snapshot.hash, model: { provider: options.model?.provider || "unknown", id: options.model?.id || "unknown", api: options.model?.api || "unknown" }, blocks };

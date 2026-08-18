@@ -8,16 +8,19 @@ import { buildProtocolUnits } from "./identity/protocol.ts";
 import { hashJson } from "./util/hash.ts";
 import { deepClone } from "./util/clone.ts";
 import { transformOutgoingContext } from "./transform/pipeline.ts";
-import { evaluateNudge, stableNudgeText } from "./transform/metadata.ts";
+import { evaluateNudge } from "./transform/metadata.ts";
+import { buildStatusMessage } from "./prompts/status.ts";
+import { relocateCacheBreakpoint } from "./transform/cache-breakpoint.ts";
 import { evaluateSettledStrategies } from "./strategies/settle.ts";
 import { createEnvelope, isOperationEnvelope, OPERATION_CUSTOM_TYPE, type OpEnvelope } from "./state/operations.ts";
 import { reduceEnvelope, markAvailability, type ReducedState } from "./state/reducer.ts";
 import { clearBaselines, disableRuntime, invalidateSnapshot, publishBaseline, runtimeSessionIdentity, setDcpToolActive, type DcpRuntime } from "./runtime.ts";
+import { modelKey } from "./identity/snapshot.ts";
 import { SYSTEM_GUIDANCE } from "./prompts/defaults.ts";
 import { persistMissingSavingsBestEffort, persistSavingsBestEffort } from "./stats.ts";
 import { bindCompressionProvenance } from "./compression/tool.ts";
 
-const VERSION = "0.2.0";
+export const VERSION = "0.2.0";
 
 export function registerLifecycle(pi: ExtensionAPI, runtime: DcpRuntime): void {
   runtime.pi = pi;
@@ -32,9 +35,15 @@ export function registerLifecycle(pi: ExtensionAPI, runtime: DcpRuntime): void {
   pi.on("model_select", () => { invalidateSnapshot(runtime); });
   // Ordinary turns append a new baseline leaf; they do not invalidate the
   // retained baseline for a tool call already in flight.
-  pi.on("turn_start", () => { runtime.turnCount++; runtime.nudgeInFlightKey = undefined; });
+  pi.on("turn_start", (_event, ctx) => {
+    runtime.turnCount++;
+    if (lastAssistantContainsCompress(ctx)) runtime.pendingNudge = undefined;
+  });
   pi.on("before_agent_start", async (event, ctx) => beforeAgentStart(event, ctx, runtime));
   pi.on("context", async (event: ContextEvent, ctx) => transformContext(event, ctx, runtime));
+  // The status suffix would otherwise carry the provider's rolling prompt-cache
+  // breakpoint, which no later request can ever read back.
+  pi.on("before_provider_request", (event) => relocateCacheBreakpoint(event.payload));
   // Capture the host's direct tool-call event because Pi 0.84.1 may invoke it
   // before the producing assistant entry becomes visible in SessionManager.
   pi.on("tool_call", async (event, ctx) => {
@@ -46,10 +55,8 @@ export function registerLifecycle(pi: ExtensionAPI, runtime: DcpRuntime): void {
 async function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionAPI): Promise<void> {
   const capability = checkContextCapabilities(ctx);
   if (!capability.ok) {
-    const alreadyWarned = runtime.warnedReasonCodes.has("capability_missing");
     disableRuntime(runtime, "capability_missing");
     try { setDcpToolActive(pi, false); } catch { /* capability failure can include active-tool APIs */ }
-    if (!alreadyWarned) runtime.logger.diagnostic({ reason: "capability_missing", counts: { missing: capability.missing.length } });
     return;
   }
   const loaded = await loadConfig(ctx.cwd, ctx.isProjectTrusted());
@@ -74,9 +81,16 @@ async function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext, r
   runtime.lastNudgeTurn = undefined;
   runtime.lastNudgeEvaluation = undefined;
   runtime.pendingManual = undefined;
-  runtime.nudgeInFlightKey = undefined;
+  runtime.pendingNudge = undefined;
   runtime.mutationBlocked = false;
   runtime.valid = !runtime.reduced.corruptReason && runtime.config.enabled && !runtime.warnedReasonCodes.has("tool_collision");
+  runtime.lastReadiness = runtime.valid
+    ? { ready: false, reason: "state_invalidated", generation: runtime.generation }
+    : { ready: false, reason: "extension_disabled", generation: runtime.generation };
+  // Registering the tool (index.ts) is necessary but not sufficient: the host
+  // only auto-activates a genuinely new tool name on its registry rebuild, so
+  // a name that was ever deactivated (e.g. a prior `deny`/invalid session)
+  // stays inactive across `/reload` unless explicitly re-added here.
   if (runtime.valid) setDcpToolActive(pi, runtime.config.compress.permission !== "deny");
   else setDcpToolActive(pi, false);
   if (loaded.error) runtime.logger.diagnostic({ reason: "config_layer_invalid" });
@@ -101,42 +115,31 @@ async function rebase(ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionA
     runtime.lastNudgeEvaluation = undefined;
     runtime.generation++;
     runtime.mutationBlocked = false;
-    if (runtime.reduced.corruptReason) { runtime.valid = false; setDcpToolActive(pi, false); }
+    if (runtime.reduced.corruptReason) {
+      runtime.valid = false;
+      runtime.lastReadiness = { ready: false, reason: "state_invalidated", generation: runtime.generation };
+      setDcpToolActive(pi, false);
+    }
   });
 }
 
-async function beforeAgentStart(event: BeforeAgentStartEvent, ctx: ExtensionContext, runtime: DcpRuntime): Promise<{ systemPrompt: string; message?: { customType: string; content: string; display: boolean; details?: unknown } }> {
-  const result: { systemPrompt: string; message?: { customType: string; content: string; display: boolean; details?: unknown } } = {
-    systemPrompt: `${event.systemPrompt}\n\n${SYSTEM_GUIDANCE}`,
-  };
-  if (!runtime.valid) return result;
-
-  const branch = ctx.sessionManager.getBranch();
-  const alreadyPersisted = new Set(branch.flatMap((entry) => {
-    if (entry.type !== "custom_message" || entry.customType !== "pi-dcp.v2.nudge") return [];
-    const details = entry.details;
-    return details && typeof details === "object" && typeof (details as { nudgeKey?: unknown }).nudgeKey === "string" ? [(details as { nudgeKey: string }).nudgeKey] : [];
-  }));
-  const pending = [...runtime.reduced.nudges.values()]
-    .sort((a, b) => a.requestedByOpId.localeCompare(b.requestedByOpId))
-    .find((nudge) => nudge.configGeneration === runtime.generation && !alreadyPersisted.has(nudge.nudgeKey) && runtime.nudgeInFlightKey !== nudge.nudgeKey);
-  if (!pending) return result;
-  runtime.nudgeInFlightKey = pending.nudgeKey;
-  runtime.lastNudgeTurn = runtime.turnCount;
-  return {
-    ...result,
-    message: {
-      customType: "pi-dcp.v2.nudge",
-      content: stableNudgeText(pending.band),
-      display: false,
-      details: { nudgeKey: pending.nudgeKey, band: pending.band, configGeneration: pending.configGeneration },
-    },
-  };
+async function beforeAgentStart(event: BeforeAgentStartEvent, _ctx: ExtensionContext, _runtime: DcpRuntime): Promise<{ systemPrompt: string }> {
+  // Nudges are operation-backed for replay/audit, but their model-visible
+  // delivery is transient and happens in the status suffix of context.
+  return { systemPrompt: `${event.systemPrompt}\n\n${SYSTEM_GUIDANCE}` };
 }
 
 async function transformContext(event: ContextEvent, ctx: ExtensionContext, runtime: DcpRuntime): Promise<{ messages: AgentMessage[] }> {
   const fallback = deepClone(event.messages);
-  if (!runtime.valid || runtime.mutationBlocked) return { messages: fallback };
+  if (!runtime.valid) {
+    const status = buildStatusMessage(runtime);
+    return { messages: status ? [...fallback, status] : fallback };
+  }
+  if (runtime.mutationBlocked) {
+    runtime.lastReadiness = { ready: false, reason: "state_invalidated", generation: runtime.generation };
+    const status = buildStatusMessage(runtime);
+    return { messages: status ? [...fallback, status] : fallback };
+  }
   return runtime.mutex.runExclusive(() => {
     const result = transformOutgoingContext(event.messages, {
       ctx,
@@ -152,9 +155,17 @@ async function transformContext(event: ContextEvent, ctx: ExtensionContext, runt
       runtime.index = baseline.index || result.index;
       runtime.reduced = result.state;
       runtime.branchLeafId = ctx.sessionManager.getLeafId();
+      runtime.lastModel = modelKey(ctx.model, ctx.getContextUsage()?.contextWindow || 0);
+      runtime.lastReadiness = { ready: true, adapterId: ctx.model?.api || "unknown", generation: runtime.generation };
     } else {
       // A failed publication must not leave an unrelated authorization slot.
       clearBaselines(runtime);
+      runtime.lastReadiness = { ready: false, reason: result.reason || "unknown", generation: runtime.generation };
+      runtime.logger.diagnostic({ reason: result.reason || "unknown", confidence: result.confidence } as any);
+      if (result.reason && !runtime.warnedReasonCodes.has(result.reason)) {
+        runtime.warnedReasonCodes.add(result.reason);
+        ctx.ui?.notify?.(`pi-dcp: context transform disabled: ${result.reason}`);
+      }
     }
     runtime.lastTransform = {
       changed: result.changed,
@@ -164,7 +175,8 @@ async function transformContext(event: ContextEvent, ctx: ExtensionContext, runt
       confidence: result.confidence,
       reason: result.reason,
     };
-    return { messages: result.messages };
+    const status = buildStatusMessage(runtime);
+    return { messages: status ? [...result.messages, status] : result.messages };
   });
 }
 
@@ -191,6 +203,13 @@ async function persistBranchSavings(entries: readonly SessionEntry[], runtime: D
     if (isOperationEnvelope(entry.data)) envelopes.push(entry.data);
   }
   await persistMissingSavingsBestEffort(envelopes, runtime.logger);
+}
+
+function lastAssistantContainsCompress(ctx: ExtensionContext | undefined): boolean {
+  if (!ctx) return false;
+  const last = [...ctx.sessionManager.getBranch()].reverse().find((entry) => entry.type === "message" && entry.message.role === "assistant");
+  if (!last || last.type !== "message" || last.message.role !== "assistant") return false;
+  return last.message.content.some((part) => part.type === "toolCall" && part.name === "compress");
 }
 
 async function onSettled(ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionAPI): Promise<void> {
@@ -244,13 +263,14 @@ async function onSettled(ctx: ExtensionContext, runtime: DcpRuntime, pi: Extensi
       const usage = ctx.getContextUsage();
       const evaluation = evaluateNudge(usage?.tokens, runtime.config, usage?.contextWindow || ctx.model?.contextWindow || 0, runtime.lastNudgeTurn === undefined ? Number.POSITIVE_INFINITY : runtime.turnCount - runtime.lastNudgeTurn, runtime.lastNudgeTurn === runtime.turnCount, ctx.model?.id);
       runtime.lastNudgeEvaluation = evaluation;
-      if (evaluation.decision) {
+      if (evaluation.decision && runtime.lastReadiness?.ready) {
         const branchAnchor = ctx.sessionManager.getLeafId();
         const nudgeKey = hashJson([branchAnchor, evaluation.decision.type, runtime.generation]);
         if (!runtime.reduced.nudges.has(nudgeKey)) {
           const envelope = createEnvelope({ type: "nudge.requested", nudgeKey, band: evaluation.decision.type, branchAnchor, configGeneration: runtime.generation }, runtime.sessionId, VERSION, hashJson(["nudge", nudgeKey]));
           pi.appendEntry(OPERATION_CUSTOM_TYPE, envelope);
           runtime.reduced = reduceEnvelope(runtime.reduced, envelope);
+          runtime.pendingNudge = { band: evaluation.decision.type, nudgeKey };
           runtime.lastNudgeTurn = runtime.turnCount;
           await persistSavingsBestEffort(envelope, runtime.logger);
         }

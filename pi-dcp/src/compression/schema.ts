@@ -4,8 +4,8 @@ import { Type, type Static } from "typebox";
 export const CompressionParametersV2 = Type.Object({
   topic: Type.String({ minLength: 1, maxLength: 120 }),
   content: Type.Array(Type.Object({
-    startId: Type.String({ pattern: "^(m\\d{4}|b\\d{4})$" }),
-    endId: Type.String({ pattern: "^(m\\d{4}|b\\d{4})$" }),
+    startId: Type.String({ pattern: "^(m|b)[0-9]{4}$" }),
+    endId: Type.String({ pattern: "^(m|b)[0-9]{4}$" }),
     summary: Type.String({ minLength: 1, maxLength: 100000 }),
   }, { additionalProperties: false }), { minItems: 1, maxItems: 16 }),
 }, { additionalProperties: false });
@@ -22,8 +22,8 @@ export function isCompressionParams(value: unknown): value is CompressionParams 
   return input.content.every((range) => {
     if (!range || typeof range !== "object" || Array.isArray(range)) return false;
     const item = range as Record<string, unknown>;
-    return typeof item.startId === "string" && /^(m\d{4}|b\d{4})$/.test(item.startId)
-      && typeof item.endId === "string" && /^(m\d{4}|b\d{4})$/.test(item.endId)
+    return typeof item.startId === "string" && /^(m|b)[0-9]{4}$/.test(item.startId)
+      && typeof item.endId === "string" && /^(m|b)[0-9]{4}$/.test(item.endId)
       && typeof item.summary === "string" && item.summary.length >= 1 && item.summary.length <= 100000
       && Object.keys(item).every((key) => ["startId", "endId", "summary"].includes(key));
   });

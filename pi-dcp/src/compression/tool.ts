@@ -11,16 +11,43 @@ import { notify } from "../ui/notify.ts";
 import { hashJson } from "../util/hash.ts";
 import { clearBaselines, findBaselineForParent, latestBaseline, pinBaseline, unpinBaseline, type DcpRuntime } from "../runtime.ts";
 import { persistSavingsBestEffort } from "../stats.ts";
+import { buildErrorText } from "./errors.ts";
 
 export function registerCompressionTool(pi: ExtensionAPI, runtime: DcpRuntime): void {
   const tool: ToolDefinition<typeof CompressionParameters> = {
     name: "compress",
     label: "Compress context",
-    description: "Create faithful, contiguous, model-authored summaries for older resolved context. Select complete protocol units using local mNNNN and bNNNN labels; do not include active work, unresolved questions, pending tool exchanges, or protected content.",
+    description: `Create faithful, contiguous, model-authored summaries for older resolved context.
+
+Selection
+- Choose complete protocol units (a user turn, or an assistant tool-call message together with ALL of its tool results) whose work is finished.
+- The range is inclusive: every unit between startId and endId is included.
+- startId must precede endId; ranges must not overlap.
+- Use only labels visible in the current context: <pi-dcp-message-id>mNNNN</pi-dcp-message-id> for units, <pi-dcp-message-id>bNNNN</pi-dcp-message-id> for active blocks. Units marked BLOCKED cannot be included.
+- Never invent labels; if no labels are visible, do not call this tool.
+- Do not include: active work, unresolved questions, pending tool exchanges, or details still needed for immediate edits.
+- Protected tool output (configured protected tools and file patterns) does not need to be described in your summary or avoided: pi-dcp automatically appends it to the block verbatim, so it survives compression even if your prose omits it.
+
+Summary quality
+- Write an exhaustive technical summary: decisions, constraints, exact paths, findings, verification evidence.
+- Preserve user intent; quote short user messages verbatim when they carry the intent.
+- Keep the summary lean: no preamble, no restating the obvious.
+
+Nested blocks
+- If your range includes a block (bNNNN), you MUST reference it in the summary as (bNNNN) exactly once per block.
+- (bNNNN) are reserved tokens; do not invent them and do not repeat one.
+- Preflight check before calling: every block inside your range appears exactly once in your summary.
+
+Batching
+- You may pass up to 16 ranges in one call; each range gets its own summary.
+
+Validation
+- The call is authorized from the assistant response that produced the tool call; ranges are validated against the current baseline. Failures return the reason and the currently valid labels so you can retry.`,
     promptSnippet: "compress older resolved context ranges",
     promptGuidelines: [
-      "Use compress for older resolved conversation whose work is finished or no longer needed immediately.",
-      "Use compress with contiguous complete protocol units using current local mNNNN and bNNNN labels.",
+      "Use compress only for older closed work and complete protocol units.",
+      "Use compress only with current visible mNNNN or bNNNN labels; never invent labels.",
+      "If no labels are visible, do not call compress.",
     ],
     parameters: CompressionParameters,
     executionMode: "sequential",
@@ -61,42 +88,48 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
   try {
     // A v1 call is rejected before any state lookup. In particular, the model
     // cannot revive a deprecated singleton snapshot by echoing snapshotId.
-    if (!isCompressionParams(rawParams)) return failure("protocol_version", { stage: "v1_schema_rejected" });
+    if (!isCompressionParams(rawParams)) return failure("protocol_version", { stage: "v1_schema_rejected" }, runtime);
     const params = rawParams;
-    if (!runtime.valid || runtime.mutationBlocked) return failure("permission_denied");
-    if (runtime.config.compress.permission === "deny") return failure("permission_denied");
+    if (!runtime.valid || runtime.mutationBlocked) return failure("compression_unavailable", { stage: runtime.lastReadiness?.reason || (runtime.valid ? "state_invalidated" : "extension_disabled") }, runtime);
+    if (runtime.config.compress.permission === "deny") return failure("permission_denied", {}, runtime);
 
   let ask = false;
   const first = await runtime.mutex.runExclusive(() => {
     const baseline = producingBaseline(toolCallId, ctx, runtime);
-    if (!baseline) return { error: "baseline_unavailable", stage: "assistant_provenance_missing" } as const;
+    if (!baseline) {
+      if (runtime.lastReadiness && !readinessCurrent(runtime)) return { error: "compression_unavailable", stage: runtime.lastReadiness.reason || "state_invalidated" } as const;
+      return { error: "baseline_unavailable", stage: "assistant_provenance_missing" } as const;
+    }
     const currentModel = modelKey(ctx.model, ctx.getContextUsage()?.contextWindow || 0);
-    if (!baselineIdentityMatches(baseline, runtime, currentModel)) return { error: "baseline_unavailable", stage: "baseline_identity_mismatch" } as const;
+    if (!baselineIdentityMatches(baseline, runtime, currentModel)) return { error: "baseline_unavailable", stage: "baseline_identity_mismatch", baseline } as const;
     const validation = validateBaselineHistory(baseline, ctx, toolCallId, runtime, currentModel);
-    if (!validation.ok) return { error: "baseline_unavailable", stage: validation.stage } as const;
+    if (!validation.ok) return { error: "baseline_unavailable", stage: validation.stage, baseline } as const;
     ask = runtime.config.compress.permission === "ask";
     return { baseline } as const;
   });
-  if ("error" in first) return failure(first.error || "baseline_unavailable", { stage: first.stage });
+  if ("error" in first) return failure(first.error || "baseline_unavailable", { stage: first.stage }, runtime, first.baseline);
   pinBaseline(runtime, first.baseline);
 
   if (ask) {
-    if (!ctx.hasUI) { unpinBaseline(runtime, first.baseline); return failure("permission_unavailable"); }
+    if (!ctx.hasUI) { unpinBaseline(runtime, first.baseline); return failure("permission_unavailable", {}, runtime); }
     let confirmed = false;
     try {
       confirmed = await ctx.ui.confirm("Allow pi-dcp compression?", "The model-selected ranges and summaries will be persisted as one pi-dcp operation. Raw history is not modified.", { timeout: 30_000 });
     } catch { confirmed = false; }
-    if (!confirmed) { unpinBaseline(runtime, first.baseline); return failure("permission_denied"); }
+    if (!confirmed) { unpinBaseline(runtime, first.baseline); return failure("permission_denied", {}, runtime); }
   }
 
     return await runtime.mutex.runExclusive(async () => {
       try {
         const baseline = producingBaseline(toolCallId, ctx, runtime);
     const currentModel = modelKey(ctx.model, ctx.getContextUsage()?.contextWindow || 0);
-    if (!baseline) return failure("baseline_unavailable", { stage: "assistant_provenance_missing" });
-    if (!baselineIdentityMatches(baseline, runtime, currentModel)) return failure("baseline_unavailable", { stage: "baseline_identity_mismatch" });
+    if (!baseline) {
+      if (runtime.lastReadiness && !readinessCurrent(runtime)) return failure("compression_unavailable", { stage: runtime.lastReadiness.reason || "state_invalidated" }, runtime);
+      return failure("baseline_unavailable", { stage: "assistant_provenance_missing" }, runtime);
+    }
+    if (!baselineIdentityMatches(baseline, runtime, currentModel)) return failure("baseline_unavailable", { stage: "baseline_identity_mismatch" }, runtime, baseline);
     const validation = validateBaselineHistory(baseline, ctx, toolCallId, runtime, currentModel);
-    if (!validation.ok) return failure("baseline_unavailable", { stage: validation.stage });
+    if (!validation.ok) return failure("baseline_unavailable", { stage: validation.stage }, runtime, baseline);
 
     const built = buildCompressionEnvelope({
       sessionId: runtime.sessionId,
@@ -114,14 +147,15 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
       turnProtection: runtime.config.turnProtection,
       protectUserMessages: runtime.config.compress.protectUserMessages,
     });
-    if (!built.ok) return failure(built.reason);
+    if (!built.ok) return failure(built.reason, built, runtime, baseline);
 
     pi.appendEntry(OPERATION_CUSTOM_TYPE, built.envelope);
     await persistSavingsBestEffort(built.envelope, runtime.logger);
     runtime.reduced = reduceEnvelope(runtime.reduced, built.envelope);
-    if (runtime.reduced.corruptReason) return failure("state_conflict");
+    if (runtime.reduced.corruptReason) return failure("state_conflict", {}, runtime);
     runtime.generation++;
     clearBaselines(runtime);
+    runtime.lastReadiness = { ready: false, reason: "state_invalidated", generation: runtime.generation };
     notify(ctx, runtime.config, {
       action: "compressed",
       topic: params.topic,
@@ -146,6 +180,19 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
     // retry receives a new tool-call ID and a new authoritative binding.
     runtime.compressionProvenance.delete(toolCallId);
   }
+}
+
+/**
+ * `lastReadiness.ready` can go stale-true: `onSettled` bumps `runtime.generation`
+ * and clears baselines after a settled pruning mutation without touching
+ * `lastReadiness` (nudge delivery in the same cycle depends on the pre-bump
+ * `ready` flag, so it is deliberately left alone there). Compare generations
+ * here, at the point where a missing baseline is actually reported, so a
+ * stale flag cannot make a genuinely invalidated state report the unhelpful
+ * `baseline_unavailable` instead of `compression_unavailable`.
+ */
+function readinessCurrent(runtime: DcpRuntime): boolean {
+  return !!runtime.lastReadiness?.ready && runtime.lastReadiness.generation === runtime.generation;
 }
 
 function producingBaseline(toolCallId: string, ctx: ExtensionContext, runtime: DcpRuntime): BaselineSnapshot | undefined {
@@ -276,7 +323,8 @@ function validateBaselineHistory(baseline: BaselineSnapshot, ctx: ExtensionConte
   return { ok: true };
 }
 
-function failure(reason: string, extra: Record<string, unknown> = {}): { content: [{ type: "text"; text: string }]; details: Record<string, unknown> } {
-  const suffix = typeof extra.stage === "string" ? ` (${extra.stage})` : "";
-  return { content: [{ type: "text", text: `pi-dcp: ${reason}${suffix}` }], details: { reason, ...extra } };
+function failure(reason: string, extra: Record<string, unknown> = {}, runtime: DcpRuntime, baseline?: BaselineSnapshot): { content: [{ type: "text"; text: string }]; details: Record<string, unknown> } {
+  const errorExtra = baseline ? { ...extra, baseline } : extra;
+  const details = Object.fromEntries(Object.entries(extra).filter(([key]) => key !== "ok" && key !== "baseline"));
+  return { content: [{ type: "text", text: buildErrorText(runtime, reason, errorExtra) }], details: { reason, ...details } };
 }

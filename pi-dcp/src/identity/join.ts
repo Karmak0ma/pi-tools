@@ -4,6 +4,12 @@ import type { ProjectedMessage, JoinResult } from "./types.ts";
 
 export function joinProjectedMessages(expected: readonly ProjectedMessage[], incoming: readonly AgentMessage[]): JoinResult {
   const incomingFingerprints = incoming.map(fingerprintMessage);
+  // Duplicate fingerprints among `expected` are not preemptively rejected:
+  // equal-fingerprint messages are content-identical by construction, so any
+  // order-preserving pairing between them produces the same labeled output.
+  // The search below still fails closed on genuine ambiguity (0 or >1
+  // strictly-increasing solutions) — e.g. an inserted extra that duplicates
+  // an expected fingerprint and creates a second valid mapping.
   const candidates = expected.map((item) => incomingFingerprints.map((fingerprint, index) => fingerprint === item.fingerprint ? index : -1).filter((index) => index >= 0));
   const solutions: number[][] = [];
   search(candidates, 0, -1, [], solutions, 2);

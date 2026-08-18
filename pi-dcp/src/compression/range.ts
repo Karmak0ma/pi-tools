@@ -1,22 +1,39 @@
 import type { BaselineSnapshot, ProtocolUnit } from "../identity/types.ts";
 import type { ReducedState } from "../state/reducer.ts";
 
-export interface ResolvedRange { start: number; end: number; directUnitIndexes: number[]; consumedBlockIds: string[]; }
-export type RangeResult = { ok: true; ranges: ResolvedRange[] } | { ok: false; reason: "range_invalid" | "range_overlap" | "block_partial" };
+export interface ResolvedRange {
+  start: number;
+  end: number;
+  rangeIndex: number;
+  directUnitIndexes: number[];
+  consumedBlockIds: string[];
+}
+export type RangeFailure = {
+  ok: false;
+  reason: "range_invalid" | "range_overlap" | "block_partial";
+  rangeIndex: number;
+  id?: string;
+};
+export type RangeResult = { ok: true; ranges: ResolvedRange[] } | RangeFailure;
 
 export function resolveCompressionRanges(snapshot: BaselineSnapshot, state: ReducedState, ranges: readonly { startId: string; endId: string }[]): RangeResult {
   const resolved: ResolvedRange[] = [];
-  for (const range of ranges) {
+  for (let rangeIndex = 0; rangeIndex < ranges.length; rangeIndex++) {
+    const range = ranges[rangeIndex];
     const start = aliasBoundary(snapshot, state, range.startId, false);
     const end = aliasBoundary(snapshot, state, range.endId, true);
-    if (start === undefined || end === undefined || start > end) return { ok: false, reason: "range_invalid" };
+    if (start === undefined) return { ok: false, reason: "range_invalid", rangeIndex, id: range.startId };
+    if (end === undefined) return { ok: false, reason: "range_invalid", rangeIndex, id: range.endId };
+    if (start > end) return { ok: false, reason: "range_invalid", rangeIndex, id: range.startId };
     const directUnitIndexes = [...Array(end - start + 1)].map((_, offset) => start + offset);
     const selected = activeBlocksInRange(snapshot, state, start, end);
-    if (selected.partial.length) return { ok: false, reason: "block_partial" };
-    resolved.push({ start, end, directUnitIndexes, consumedBlockIds: selected.whole });
+    if (selected.partial.length) return { ok: false, reason: "block_partial", rangeIndex, id: selected.partial[0] };
+    resolved.push({ start, end, rangeIndex, directUnitIndexes, consumedBlockIds: selected.whole });
   }
-  resolved.sort((a, b) => a.start - b.start);
-  for (let index = 1; index < resolved.length; index++) if (resolved[index].start <= resolved[index - 1].end) return { ok: false, reason: "range_overlap" };
+  const ordered = [...resolved].sort((a, b) => a.start - b.start);
+  for (let index = 1; index < ordered.length; index++) {
+    if (ordered[index].start <= ordered[index - 1].end) return { ok: false, reason: "range_overlap", rangeIndex: ordered[index].rangeIndex };
+  }
   return { ok: true, ranges: resolved };
 }
 

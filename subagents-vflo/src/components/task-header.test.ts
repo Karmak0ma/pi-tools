@@ -40,6 +40,22 @@ describe("TaskHeaderComponent usage display", () => {
     expect(initial).toContain("context: 12k / 128k (9.6%)");
   });
 
+  it("does not repeat the task prompt in the pinned header", () => {
+    initTheme();
+
+    const instance = createInstance({
+      id: "subagent-prompt",
+      agent: "worker",
+      source: "builtin",
+      task: "this very large task should remain in the transcript",
+      cwd: "/tmp",
+    });
+    const header = new TaskHeaderComponent(theme);
+    header.setInstance(instance);
+
+    expect(header.render(120).join("\n")).not.toContain("this very large task should remain in the transcript");
+  });
+
   it("invalidates the cached header when usage changes", () => {
     initTheme();
 

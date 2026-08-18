@@ -10,25 +10,23 @@ export default function piDcp(pi: ExtensionAPI): void {
   const commandCapability = checkCommandCapabilities(pi);
   if (!commandCapability.ok) {
     disableRuntime(runtime, "capability_missing");
-    runtime.logger.diagnostic({ reason: "capability_missing", counts: { missing: commandCapability.missing.length } });
     return;
   }
   try { registerCommands(pi, runtime); }
-  catch { disableRuntime(runtime, "startup_error"); runtime.logger.diagnostic({ reason: "startup_error", counts: { commands: 1 } }); return; }
+  catch { disableRuntime(runtime, "startup_error"); return; }
 
   // Tool definitions are registration-only APIs and are valid while the
   // extension factory is loading. Register compress before checking the
   // optional lifecycle/action surface so a missing runtime method cannot make
   // the model-facing tool disappear along with the unrelated DCP hooks.
   try { registerCompressionTool(pi, runtime); }
-  catch { disableRuntime(runtime, "startup_error"); runtime.logger.diagnostic({ reason: "startup_error", counts: { tool: 1 } }); return; }
+  catch { disableRuntime(runtime, "startup_error"); return; }
 
   const capability = checkFactoryCapabilities(pi);
   if (!capability.ok) {
     disableRuntime(runtime, "capability_missing");
-    runtime.logger.diagnostic({ reason: "capability_missing", counts: { missing: capability.missing.length } });
     return;
   }
   try { registerLifecycle(pi, runtime); }
-  catch { disableRuntime(runtime, "startup_error"); runtime.logger.diagnostic({ reason: "startup_error", counts: { lifecycle: 1 } }); }
+  catch { disableRuntime(runtime, "startup_error"); }
 }

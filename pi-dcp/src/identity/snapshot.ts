@@ -3,6 +3,16 @@ import { hashJson } from "../util/hash.ts";
 import type { ReducedState } from "../state/reducer.ts";
 import type { BaselineKey, BaselineSnapshot, CanonicalIndex, ModelKey, SnapshotBlockAlias } from "./types.ts";
 
+/**
+ * The single formula used to name every protocol-unit alias. Every consumer
+ * that needs "which mNNNN is unit index N" (label injection, compression
+ * validation, error/status reporting) calls this instead of re-deriving or
+ * scanning `unitAliases`, so they cannot drift out of sync with each other.
+ */
+export function unitAlias(index: number): string {
+  return `m${String(index + 1).padStart(4, "0")}`;
+}
+
 export function modelKey(model: Model<any> | undefined, contextWindow = 0): ModelKey {
   return {
     provider: model?.provider || "unknown",
@@ -41,9 +51,8 @@ export function createSnapshot(options: {
   // reject protected/non-compressible ranges.
   const unitAliases = new Map<string, number>();
   for (let index = 0; index < units.length; index++) {
-    const ordinal = index + 1;
-    if (ordinal > 9999) throw new Error("alias_overflow");
-    unitAliases.set(`m${String(ordinal).padStart(4, "0")}`, index);
+    if (index + 1 > 9999) throw new Error("alias_overflow");
+    unitAliases.set(unitAlias(index), index);
   }
 
   const blockAliases = new Map<string, SnapshotBlockAlias>();
@@ -80,7 +89,7 @@ export function createSnapshot(options: {
   const dcpTransformHash = hashJson({
     activeBlocks: [...blockAliases.values()].map((block) => ({ alias: block.alias, blockId: block.blockId })),
     prunedTools: [...options.state.toolPrunes.entries()].sort(([a], [b]) => a.localeCompare(b)),
-    aliasTransport: "local-unit-v2",
+    aliasTransport: "local-unit-inline-v1",
   });
   const branchIdentity = options.branchIdentity || options.sessionId;
   const key: BaselineKey = {

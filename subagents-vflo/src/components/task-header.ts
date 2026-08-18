@@ -1,13 +1,14 @@
 /**
  * TaskHeaderComponent — renders the pinned task metadata section.
  *
- * Shows: agent name + status, model, cwd, thinking effort, tools, live token/context usage, warnings, and task prompt.
- * Uses UserMessageComponent for the task prompt to achieve parity with main UI.
+ * Shows: agent name + status, model, cwd, thinking effort, tools, live token/context usage, and warnings.
+ * The initial task is intentionally not rendered here: it is already the first
+ * user message in the transcript, and repeating it in this pinned area would
+ * let a large prompt consume the entire activity viewport.
  * Variable height (parity-first) — renders at natural height, no artificial cap.
  */
 
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { UserMessageComponent, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import type { RuntimeSubagentInstance } from "../tracker.js";
 import type { TuiTheme } from "./types.js";
@@ -45,7 +46,6 @@ function statusIcon(status: TaskStatus, theme: TuiTheme): string {
 export class TaskHeaderComponent implements Component {
   private instance: RuntimeSubagentInstance | null = null;
   private theme: TuiTheme;
-  private taskComponent: UserMessageComponent | null = null;
   private cachedLines: string[] | null = null;
   private cachedWidth: number = -1;
   private lastInstanceId: string | null = null;
@@ -63,7 +63,6 @@ export class TaskHeaderComponent implements Component {
   setInstance(instance: RuntimeSubagentInstance | null): void {
     if (!instance) {
       this.instance = null;
-      this.taskComponent = null;
       this.cachedLines = null;
       this.lastInstanceId = null;
       this.lastStatus = null;
@@ -96,7 +95,6 @@ export class TaskHeaderComponent implements Component {
       this.lastWarningsKey = warningsKey;
       this.lastUsageKey = usageKey;
       this.lastPendingUIRequestCount = instance.pendingUIRequestCount;
-      this.taskComponent = new UserMessageComponent(instance.task, getMarkdownTheme());
       this.cachedLines = null;
     } else if (
       instance.status !== this.lastStatus ||
@@ -206,18 +204,6 @@ export class TaskHeaderComponent implements Component {
     for (const w of inst.warnings.slice(0, 3)) {
       lines.push(truncateToWidth(this.theme.fg("warning", ` ⚠ ${w}`), width));
     }
-
-    lines.push(""); // Spacer before task
-
-    // Task prompt — rendered via UserMessageComponent for parity
-    if (this.taskComponent) {
-      const taskLines = this.taskComponent.render(Math.max(1, width - 2));
-      for (const tl of taskLines) {
-        lines.push("  " + tl);
-      }
-    }
-
-    lines.push(""); // Spacer after task
 
     this.cachedLines = lines;
     return this.cachedLines;

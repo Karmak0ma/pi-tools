@@ -9,7 +9,8 @@ import { createBaselineSnapshot, modelKey } from "../identity/snapshot.ts";
 import type { BaselineSnapshot, CanonicalIndex } from "../identity/types.ts";
 import { markAvailability, type ReducedState } from "../state/reducer.ts";
 import type { EffectiveConfig } from "../config/defaults.ts";
-import { replaceBlocks } from "./blocks.ts";
+import { injectInlineLabels } from "./labels.ts";
+import { replaceBlocksWithOrigins } from "./blocks.ts";
 import { applyPersistedRedactions } from "./tools.ts";
 import { validateProtocol } from "./protocol-check.ts";
 import { estimateTokens } from "../tokens/estimate.ts";
@@ -42,23 +43,24 @@ export interface TransformResult {
 }
 
 /**
- * Transform only canonical history. Persistent nudges are already ordinary
- * custom_message entries by this point; the context hook never inserts them.
+ * Transform only canonical history. Transient status is appended by the
+ * lifecycle after this function so it never affects joining or baselines.
  */
 export function transformOutgoingContext(input: readonly AgentMessage[], options: TransformOptions): TransformResult {
   const fallback = deepClone([...input]);
   const state = options.state;
-  if (state.corruptReason) return { messages: fallback, state, changed: false, confidence: "heuristic", reason: state.corruptReason };
+  if (state.corruptReason) return failure(fallback, state, state.corruptReason);
   try {
+    // The generic adapter is intentionally never undefined. Protocol and wire
+    // validation below remain the fail-closed safety net for malformed output.
     const adapter = adapterForModel({ api: options.ctx.model?.api || "unknown" });
-    if (!adapter) return failure(fallback, state, "provider_adapter_unsupported");
     const entries = options.ctx.sessionManager.buildContextEntries();
     const projection = projectContextEntries(entries);
     if (!projection.ok) return failure(fallback, state, projection.reason);
     const indexResult = buildProtocolUnits(projection.messages);
     if (!("units" in indexResult)) return failure(fallback, state, indexResult.reason);
     const join = joinProjectedMessages(projection.messages, input);
-    if (!join.ok || input.length !== projection.messages.length) return failure(fallback, state, join.ok ? "join_ambiguous" : join.reason);
+    if (!join.ok) return failure(fallback, state, join.reason);
 
     const availableEntryIds = new Set(projection.messages.map((item) => item.key.entryId));
     const validAnchors = new Set<string>();
@@ -78,11 +80,23 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
       generation: options.generation,
       index: indexResult,
       state: availableState,
-      // This is a safety/config identity, not provider content.
       configHash: hashJson(options.config),
     });
+
     const canonicalMessages = projection.messages.map((_item, expectedIndex) => input[join.incomingByExpected[expectedIndex]]);
-    const transformed = applyPersistedRedactions(replaceBlocks(canonicalMessages, indexResult.units, snapshot, availableState), availableState);
+    // Redact and label source messages before block replacement. A replacement
+    // then receives its own bNNNN tag, while injected extras are merged later
+    // without ever being inspected or mutated by DCP. Labels only reflect
+    // settledness now - tool-output protection no longer blocks a unit (it
+    // is absorbed into the compressed summary instead, see
+    // appendProtectedToolContent in compression/protected.ts), and the
+    // turn-relative eligibility rules (live turn, turnProtection window,
+    // protectUserMessages) stay out of inline labels on purpose - see the
+    // comment in labels.ts on why baking them in would break prompt-cache
+    // prefix stability.
+    const labeled = injectInlineLabels(applyPersistedRedactions(canonicalMessages, availableState), indexResult.units, snapshot);
+    const rendered = replaceBlocksWithOrigins(labeled, indexResult.units, snapshot, availableState);
+    const transformed = mergeProjectedOutput(input, join.incomingByExpected, rendered.byProjectedIndex);
     if (!validateProtocol(transformed)) return failure(fallback, state, "protocol_invalid");
     const wire = adapter.canonicalWire(transformed);
     const wireValidation = adapter.validateWire(wire);
@@ -94,10 +108,12 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
       snapshot,
       index: indexResult,
       state: availableState,
-      // Local aliases are intentional DCP annotations, even with no active block.
       changed: true,
       estimatedTokens: afterEstimate,
       savingsTokens: beforeEstimate - afterEstimate,
+      // This is a confidence heuristic. Pass-through extras or block
+      // replacements can make the first changed array slot earlier than the
+      // true source message that changed; the value is diagnostic only.
       changedPrefix: firstChangedMessage(input, transformed),
       confidence: options.ctx.getContextUsage()?.tokens != null ? "reported" : "heuristic",
     };
@@ -105,6 +121,22 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
     const reason = error instanceof Error && error.message === "alias_overflow" ? "alias_overflow" : "projection_unsupported";
     return failure(fallback, state, reason);
   }
+}
+
+function mergeProjectedOutput(input: readonly AgentMessage[], incomingByExpected: readonly number[], byProjectedIndex: readonly AgentMessage[][]): AgentMessage[] {
+  const expectedAtIncoming = new Map(incomingByExpected.map((incomingIndex, expectedIndex) => [incomingIndex, expectedIndex]));
+  const output: AgentMessage[] = [];
+  for (let incomingIndex = 0; incomingIndex < input.length; incomingIndex++) {
+    const expectedIndex = expectedAtIncoming.get(incomingIndex);
+    if (expectedIndex === undefined) {
+      // Extras belong to other extensions. Preserve them byte-for-byte and do
+      // not attach aliases, redact fields, or replace their content.
+      output.push(deepClone(input[incomingIndex]));
+      continue;
+    }
+    output.push(...(byProjectedIndex[expectedIndex] || []).map((message) => deepClone(message)));
+  }
+  return output;
 }
 
 function reconcileAvailability(state: ReducedState, index: CanonicalIndex): ReducedState {

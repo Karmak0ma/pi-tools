@@ -8,7 +8,7 @@ export function checkFactoryCapabilities(pi: ExtensionAPI): CapabilityResult {
   const missing: string[] = [];
   for (const [name, value] of Object.entries({
     on: pi.on, appendEntry: pi.appendEntry, registerTool: pi.registerTool, registerCommand: pi.registerCommand,
-    getActiveTools: pi.getActiveTools, setActiveTools: pi.setActiveTools, sendUserMessage: pi.sendUserMessage,
+    sendUserMessage: pi.sendUserMessage,
   })) if (typeof value !== "function") missing.push(name);
   return { ok: missing.length === 0, missing };
 }

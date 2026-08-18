@@ -48,6 +48,13 @@ export interface DcpRuntime {
     confidence: "reported" | "heuristic";
     reason?: string;
   };
+  lastReadiness?: {
+    ready: boolean;
+    reason?: string;
+    adapterId?: string;
+    generation: number;
+  };
+  lastModel?: ModelKey;
   lastSettledSuffixHash?: string;
   turnCount: number;
   lastNudgeTurn?: number;
@@ -56,7 +63,7 @@ export interface DcpRuntime {
   mutationBlocked: boolean;
   logger: Logger;
   pi?: ExtensionAPI;
-  nudgeInFlightKey?: string;
+  pendingNudge?: { band: "soft" | "imperative" | "critical"; nudgeKey: string };
 }
 
 export function createRuntime(pi?: ExtensionAPI): DcpRuntime {
@@ -72,6 +79,7 @@ export function createRuntime(pi?: ExtensionAPI): DcpRuntime {
     compressionProvenance: new Map(),
     mutex: new AsyncMutex(),
     turnCount: 0,
+    lastReadiness: { ready: false, reason: "extension_disabled", generation: 0 },
     warnedReasonCodes: new Set(),
     mutationBlocked: false,
     logger: createLogger("0.2.0"),
@@ -146,12 +154,15 @@ export function clearBaselines(runtime: DcpRuntime): void {
 export function invalidateSnapshot(runtime: DcpRuntime, increment = true): void {
   clearBaselines(runtime);
   if (increment) runtime.generation++;
+  runtime.lastReadiness = { ready: false, reason: "state_invalidated", generation: runtime.generation };
 }
 
 export function disableRuntime(runtime: DcpRuntime, reason: string): void {
   runtime.valid = false;
   clearBaselines(runtime);
+  runtime.lastReadiness = { ready: false, reason, generation: runtime.generation };
   runtime.warnedReasonCodes.add(reason);
+  runtime.logger.diagnostic({ reason: reason as any });
 }
 
 export function currentToolNames(pi: ExtensionAPI): string[] { return [...new Set(pi.getActiveTools())]; }
