@@ -7,7 +7,7 @@ import {
 	queryProviderUsage,
 	resolveUsageAuth,
 	type UsageReport,
-} from "@narumitw/pi-usage/src/index.js";
+} from "pi-usage-vflo/src/index.js";
 import { matchesKey, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 import { renderSidebar, type SidebarTheme } from "./render.js";
 import {

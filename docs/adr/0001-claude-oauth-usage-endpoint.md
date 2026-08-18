@@ -1,0 +1,5 @@
+# 0001 — Claude subscription usage via the undocumented /api/oauth/usage endpoint
+
+The statusline shows the user's Claude subscription remaining percentage, which only exists behind the claude.ai OAuth token. We hit `GET https://api.anthropic.com/api/oauth/usage` (the same endpoint Claude Code's `/usage` command uses) with the `sk-ant-oat01-…` access token, instead of the officially sanctioned statusline `rate_limits` headers — those only exist inside a Claude Code session, which pi does not run.
+
+The endpoint is undocumented and Anthropic has warned against third-party scraping of the OAuth path (the OpenCode ban precedent). We accept that risk because there is no sanctioned route for a pi extension; the fail-closed checks (reject API keys, reject non-official origins, 5-minute cache, 15 s timeout) keep the surface as small and correct as possible. If the endpoint ever disappears, the extension degrades to an explicit error rather than guessing.
