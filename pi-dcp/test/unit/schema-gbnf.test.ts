@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CompressionParametersV2 } from "../../src/compression/schema.ts";
+import { CompressionParametersV2, isCompressionParams, normalizeCompressionParams } from "../../src/compression/schema.ts";
 
 describe("GBNF-safe compression schema", () => {
   it("contains no backslash-digit grammar escapes", () => {
@@ -10,5 +10,12 @@ describe("GBNF-safe compression schema", () => {
     const pattern = new RegExp((CompressionParametersV2 as any).properties.content.items.properties.startId.pattern);
     expect(["m0001", "b0001", "m9999"].every((id) => pattern.test(id))).toBe(true);
     expect(["m1", "b1", "m00001", "m000x", "m-001", ""].some((id) => pattern.test(id))).toBe(false);
+  });
+
+  it("allows the model to omit the display-only topic", () => {
+    const params = { content: [{ startId: "m0001", endId: "m0001", summary: "completed work" }] };
+
+    expect(isCompressionParams(params)).toBe(true);
+    expect(normalizeCompressionParams(params)).toMatchObject({ topic: "Compressed context", content: params.content });
   });
 });

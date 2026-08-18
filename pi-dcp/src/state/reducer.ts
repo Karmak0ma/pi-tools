@@ -211,15 +211,25 @@ function activateEligibleDescendants(state: ReducedState, blockId: string): void
   }
 }
 
-export function markAvailability(state: ReducedState, availableEntryIds: ReadonlySet<string>, validAnchors: ReadonlySet<string>): ReducedState {
+export function markAvailability(state: ReducedState, availableEntryIds: ReadonlySet<string>, validAnchors: ReadonlyMap<string, CreatedBlock["anchor"]>): ReducedState {
   const next = cloneState(state);
   for (const block of next.blocks.values()) {
     const coverageAvailable = block.coverage.effectiveEntryIds.every((id) => availableEntryIds.has(id));
     const before = block.anchor.beforeEntryId ? availableEntryIds.has(block.anchor.beforeEntryId) : true;
     const after = block.anchor.afterEntryId ? availableEntryIds.has(block.anchor.afterEntryId) : true;
-    const anchorKey = `${block.anchor.beforeEntryId || ""}|${block.anchor.afterEntryId || ""}`;
-    block.available = coverageAvailable && before && after && (validAnchors.size === 0 || validAnchors.has(anchorKey));
+    // A missing recorded side is an open boundary. A block created at the
+    // tail has no afterEntryId, so a later append must not make its anchor
+    // invalid merely because a new entry now exists after the block. Recorded
+    // boundaries still protect against a branch edit or deleted neighbour.
+    const currentAnchor = validAnchors.get(block.blockId);
+    const anchorValid = validAnchors.size === 0 || (currentAnchor !== undefined && anchorMatches(block.anchor, currentAnchor));
+    block.available = coverageAvailable && before && after && anchorValid;
     if (!block.available) block.active = false;
   }
   return next;
+}
+
+function anchorMatches(recorded: CreatedBlock["anchor"], current: CreatedBlock["anchor"]): boolean {
+  return (recorded.beforeEntryId === undefined || recorded.beforeEntryId === current.beforeEntryId)
+    && (recorded.afterEntryId === undefined || recorded.afterEntryId === current.afterEntryId);
 }

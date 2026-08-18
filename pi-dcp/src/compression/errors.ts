@@ -49,7 +49,7 @@ export function buildErrorText(runtime: DcpRuntime, reason: string, extra: Compr
     return lines.join("\n");
   }
   if (reason === "placeholder_invalid" || reason === "summary_invalid") {
-    lines.push("Fix the summary and retry; see the tool description for placeholder rules.");
+    lines.push(extra.hint || "Fix the summary and retry; see the tool description for placeholder rules.");
     appendInventory(lines, baseline, runtime);
     return lines.join("\n");
   }
@@ -73,8 +73,8 @@ function diagnosisFor(reason: string, extra: CompressionErrorExtra, runtime: Dcp
       const why = extra.cause ? blockReasonText(extra.cause) : "is protected";
       return `Unit ${unit} ${why}.`;
     }
-    case "placeholder_invalid": return extra.hint || "The summary has an invalid nested block placeholder.";
-    case "summary_invalid": return extra.hint || "The summary is invalid.";
+    case "placeholder_invalid": return "The summary has an invalid nested block placeholder.";
+    case "summary_invalid": return "The summary is invalid.";
     case "permission_denied": case "permission_unavailable": return "Compression permission is not available.";
     case "protocol_version": return "The compression parameters do not match the current tool schema.";
     default: return extra.stage ? `The operation failed at ${extra.stage}.` : "The operation could not be completed.";

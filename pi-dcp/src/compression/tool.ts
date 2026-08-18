@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { CompressionParameters, isCompressionParams } from "./schema.ts";
+import { CompressionParameters, isCompressionParams, normalizeCompressionParams } from "./schema.ts";
 import { buildCompressionEnvelope } from "./service.ts";
 import { modelKey, computeSnapshotHash } from "../identity/snapshot.ts";
 import type { BaselineSnapshot } from "../identity/types.ts";
@@ -32,6 +32,7 @@ Summary quality
 - Write an exhaustive technical summary: decisions, constraints, exact paths, findings, verification evidence.
 - Preserve user intent; quote short user messages verbatim when they carry the intent.
 - Keep the summary lean: no preamble, no restating the obvious.
+- topic is optional display metadata; if omitted, pi-dcp uses "Compressed context".
 
 Nested blocks
 - If your range includes a block (bNNNN), you MUST reference it in the summary as (bNNNN) exactly once per block.
@@ -89,7 +90,7 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
     // A v1 call is rejected before any state lookup. In particular, the model
     // cannot revive a deprecated singleton snapshot by echoing snapshotId.
     if (!isCompressionParams(rawParams)) return failure("protocol_version", { stage: "v1_schema_rejected" }, runtime);
-    const params = rawParams;
+    const params = normalizeCompressionParams(rawParams);
     if (!runtime.valid || runtime.mutationBlocked) return failure("compression_unavailable", { stage: runtime.lastReadiness?.reason || (runtime.valid ? "state_invalidated" : "extension_disabled") }, runtime);
     if (runtime.config.compress.permission === "deny") return failure("permission_denied", {}, runtime);
 

@@ -102,7 +102,8 @@ describe("extension capability gate", () => {
     { name: "execute-time persisted recovery", bindBeforeExecute: false, assistantCopies: 1, succeeds: true },
     { name: "missing provenance", bindBeforeExecute: false, assistantCopies: 0, succeeds: false },
     { name: "duplicate persisted provenance", bindBeforeExecute: false, assistantCopies: 2, succeeds: false },
-  ])("handles compression through $name", async ({ bindBeforeExecute, assistantCopies, succeeds }) => {
+    { name: "optional topic", bindBeforeExecute: true, assistantCopies: 0, succeeds: true, omitTopic: true },
+  ])("handles compression through $name", async ({ bindBeforeExecute, assistantCopies, succeeds, omitTopic = false }) => {
     const messages = [
       { role: "user", content: "old completed work", timestamp: 1 },
       { role: "assistant", content: [{ type: "text", text: "the old work is complete" }], api: "openai-completions", provider: "openai", model: "model", stopReason: "stop", timestamp: 2 },
@@ -141,6 +142,9 @@ describe("extension capability gate", () => {
       runtime.index = transformed.index;
       runtime.reduced = transformed.state;
       const toolCallId = "compress-call";
+      const compressionParams = omitTopic
+        ? { content: [{ startId: "m0001", endId: "m0002", summary: "old work was completed and verified" }] }
+        : { topic: "old work", content: [{ startId: "m0001", endId: "m0002", summary: "old work was completed and verified" }] };
       // Pi's direct tool hook can run while SessionManager still ends at the
       // request baseline. It remains required for that old ordering, while
       // execute can safely recover a uniquely persisted call if event delivery
@@ -151,10 +155,10 @@ describe("extension capability gate", () => {
       }
       for (let copy = 0; copy < assistantCopies; copy++) {
         const entryId = `entry-${4 + copy}`;
-        entries.push({ type: "message", id: entryId, parentId: leafId, timestamp: new Date(4 + copy).toISOString(), message: { role: "assistant", content: [{ type: "toolCall", id: toolCallId, name: "compress", arguments: { topic: "old work", content: [{ startId: "m0001", endId: "m0002", summary: "old work was completed and verified" }] } }], api: "openai-completions", provider: "openai", model: "model", stopReason: "toolUse", timestamp: 4 + copy } } as any);
+        entries.push({ type: "message", id: entryId, parentId: leafId, timestamp: new Date(4 + copy).toISOString(), message: { role: "assistant", content: [{ type: "toolCall", id: toolCallId, name: "compress", arguments: compressionParams }], api: "openai-completions", provider: "openai", model: "model", stopReason: "toolUse", timestamp: 4 + copy } } as any);
         leafId = entryId;
       }
-      const result = await registered.execute(toolCallId, { topic: "old work", content: [{ startId: "m0001", endId: "m0002", summary: "old work was completed and verified" }] }, undefined, undefined, ctx);
+      const result = await registered.execute(toolCallId, compressionParams, undefined, undefined, ctx);
       if (succeeds) {
         expect(result.content[0].text).toContain("pi-dcp compressed 1 range(s)");
         expect(result.details.reason).toBeUndefined();

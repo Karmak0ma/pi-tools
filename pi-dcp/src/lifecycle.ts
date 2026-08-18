@@ -182,10 +182,13 @@ async function transformContext(event: ContextEvent, ctx: ExtensionContext, runt
 
 function reconcileAvailability(state: ReducedState, index: { units: { entryIds: string[]; role: string; compressible: boolean }[] }): ReducedState {
   const available = new Set(index.units.flatMap((unit) => unit.entryIds));
-  const anchors = new Set<string>();
+  const anchors = new Map<string, { beforeEntryId?: string; afterEntryId?: string }>();
   for (const block of state.blocks.values()) {
     const indexes = index.units.map((unit, position) => block.coverage.effectiveEntryIds.some((id) => unit.entryIds.includes(id)) ? position : -1).filter((position) => position >= 0);
-    if (indexes.length) anchors.add(`${index.units[Math.min(...indexes) - 1]?.entryIds.at(-1) || ""}|${index.units[Math.max(...indexes) + 1]?.entryIds[0] || ""}`);
+    if (indexes.length) anchors.set(block.blockId, {
+      beforeEntryId: index.units[Math.min(...indexes) - 1]?.entryIds.at(-1),
+      afterEntryId: index.units[Math.max(...indexes) + 1]?.entryIds[0],
+    });
   }
   const next = markAvailability(state, available, anchors);
   const latestUser = Math.max(-1, ...index.units.map((unit, position) => unit.role === "user" ? position : -1));

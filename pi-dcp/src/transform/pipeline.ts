@@ -63,12 +63,15 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
     if (!join.ok) return failure(fallback, state, join.reason);
 
     const availableEntryIds = new Set(projection.messages.map((item) => item.key.entryId));
-    const validAnchors = new Set<string>();
+    const validAnchors = new Map<string, { beforeEntryId?: string; afterEntryId?: string }>();
     for (const block of state.blocks.values()) {
       const indexes = indexResult.units
         .map((unit, index) => block.coverage.effectiveEntryIds.some((entryId) => unit.entryIds.includes(entryId)) ? index : -1)
         .filter((index) => index >= 0);
-      if (indexes.length) validAnchors.add(`${indexResult.units[Math.min(...indexes) - 1]?.entryIds.at(-1) || ""}|${indexResult.units[Math.max(...indexes) + 1]?.entryIds[0] || ""}`);
+      if (indexes.length) validAnchors.set(block.blockId, {
+        beforeEntryId: indexResult.units[Math.min(...indexes) - 1]?.entryIds.at(-1),
+        afterEntryId: indexResult.units[Math.max(...indexes) + 1]?.entryIds[0],
+      });
     }
     const availableState = reconcileAvailability(markAvailability(state, availableEntryIds, validAnchors), indexResult);
     const model = modelKey(options.ctx.model, options.ctx.getContextUsage()?.contextWindow || 0);

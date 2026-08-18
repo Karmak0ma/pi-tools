@@ -26,6 +26,14 @@ describe("actionable compression errors", () => {
     expect(text).toContain("Re-issue compress");
   });
 
+  it("includes the specific nested-placeholder repair in the model-visible error", () => {
+    const text = buildErrorText(setup(), "placeholder_invalid", {
+      hint: "range 0 (m0001-m0002) includes (b0001); include it exactly once.",
+    });
+
+    expect(text).toContain("range 0 (m0001-m0002) includes (b0001)");
+  });
+
   it.each([
     ["compression_unavailable", "No aliases were published"],
     ["baseline_unavailable", "No baseline could be recovered"],
