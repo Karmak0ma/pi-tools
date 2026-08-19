@@ -1,6 +1,6 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ThemeColor } from "@earendil-works/pi-coding-agent";
-import type { SidebarConfig, SidebarPanelId, SidebarSnapshot, SubagentItem, TodoItem } from "./types.js";
+import type { LimitsState, SidebarConfig, SidebarPanelId, SidebarSnapshot, SubagentItem, TodoItem } from "./types.js";
 
 export interface SidebarTheme {
 	fg(color: ThemeColor, text: string): string;
@@ -97,10 +97,31 @@ function modelRows(snapshot: SidebarSnapshot, theme: SidebarTheme, width: number
 		paint(theme, "text", truncateToWidth(model, width, "")),
 		paint(theme, "muted", truncateToWidth(snapshot.model.provider || "unknown provider", width, "")),
 		pair(paint(theme, "muted", "Thinking"), paint(theme, "accent", safe(snapshot.thinkingLevel, "off")), width),
-		...(snapshot.model.subscriptionRemaining === undefined
-			? []
-			: [pair(paint(theme, "muted", "Subscription"), paint(theme, "accent", `${snapshot.model.subscriptionRemaining.toFixed(1)}% left`), width)]),
 	];
+}
+
+// Subscription rate-limit meters (e.g. Anthropic's 5-hour and weekly windows).
+// Each bucket gets its own label/percentage pair plus a bar that EMPTIES as
+// the remaining allowance shrinks — the opposite direction of the context
+// bar, which fills as usage grows. Low remaining is the "bad" end here, so
+// the color thresholds are inverted relative to contextRows().
+function limitsRows(limits: LimitsState, theme: SidebarTheme, width: number): string[] {
+	const { buckets, note } = limits;
+	// The note explains missing or stale data ("Waiting for usage data…",
+	// "refresh failed: …"). It is rendered even when bars exist, so the user can
+	// see that the numbers below are frozen.
+	const noteRows = note === undefined ? [] : [paint(theme, "dim", truncateToWidth(note, width, ""))];
+	if (buckets.length === 0) return noteRows.length > 0 ? noteRows : [paint(theme, "dim", "No subscription data")];
+	const meterWidth = Math.max(4, Math.min(18, width - 4));
+	return buckets.flatMap((bucket) => {
+		const remaining = Math.max(0, Math.min(100, bucket.remaining));
+		const role: Role = remaining < 20 ? "error" : remaining < 40 ? "warning" : "accent";
+		const filled = Math.round((remaining / 100) * meterWidth);
+		return [
+			pair(paint(theme, "muted", safe(bucket.label)), paint(theme, role, `${remaining.toFixed(1)}%`), width),
+			paint(theme, "dim", "[") + paint(theme, role, "■".repeat(filled)) + paint(theme, "dim", "·".repeat(meterWidth - filled) + "]"),
+		];
+	}).concat(noteRows);
 }
 
 function activityRows(snapshot: SidebarSnapshot, theme: SidebarTheme, width: number): string[] {
@@ -140,16 +161,22 @@ function usageRows(snapshot: SidebarSnapshot, theme: SidebarTheme, width: number
 	];
 }
 
-function todoRows(todos: readonly TodoItem[], theme: SidebarTheme, width: number): string[] {
+// `expanded` is driven by the mouse click / alt+t toggle in index.ts. When
+// false, the list caps at 8 items (existing compact behavior) so the panel
+// does not dominate a short terminal. When true, every todo is emitted; the
+// final safeHeight-based clipping in renderSidebar() still protects against
+// overflowing a short terminal, so no extra bookkeeping is needed here.
+function todoRows(todos: readonly TodoItem[], theme: SidebarTheme, width: number, expanded: boolean): string[] {
 	if (todos.length === 0) return [paint(theme, "dim", "No tasks")];
 	const done = todos.filter((todo) => todo.status === "completed").length;
 	const rows = [paint(theme, "muted", `${done}/${todos.length} done`)];
-	for (const todo of todos.slice(0, 8)) {
+	const visible = expanded ? todos : todos.slice(0, 8);
+	for (const todo of visible) {
 		const role: Role = todo.status === "completed" ? "dim" : todo.status === "in_progress" ? "warning" : "text";
 		const marker = todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "◐" : "○";
 		rows.push(truncateToWidth(`${paint(theme, role, marker)} ${paint(theme, "accent", `#${todo.id}`)} ${paint(theme, role, safe(todo.subject))}`, width, ""));
 	}
-	if (todos.length > 8) rows.push(paint(theme, "dim", `… ${todos.length - 8} more`));
+	if (!expanded && todos.length > 8) rows.push(paint(theme, "dim", `… ${todos.length - 8} more (click or alt+t)`));
 	return rows;
 }
 
@@ -180,24 +207,39 @@ interface PanelDefinition {
 	required: boolean;
 }
 
+export interface RenderedSidebar {
+	lines: string[];
+	// [startLine, endLine) within `lines`, 0-based, spanning the rendered Todos
+	// panel. Used by index.ts to hit-test mouse clicks against the panel.
+	// Undefined when the Todos panel is disabled or dropped by height-truncation.
+	todosRange?: [number, number];
+}
+
 export function renderSidebar(
 	snapshot: SidebarSnapshot,
 	config: SidebarConfig,
 	theme: SidebarTheme,
 	width: number,
 	height: number,
-): string[] {
+	todosExpanded = false,
+): RenderedSidebar {
 	const safeWidth = Math.max(4, Math.trunc(width));
 	const safeHeight = Math.max(0, Math.trunc(height));
-	if (safeHeight === 0) return [];
+	if (safeHeight === 0) return { lines: [] };
 	const contentWidth = Math.max(2, safeWidth - 2);
 	const panelContentWidth = Math.max(1, contentWidth - 4);
 	const definitions: PanelDefinition[] = [
 		{ id: "model" as const, title: "Model", rows: modelRows(snapshot, theme, panelContentWidth), required: true },
 		{ id: "activity" as const, title: "Activity", rows: activityRows(snapshot, theme, panelContentWidth), required: true },
 		{ id: "context" as const, title: "Context", rows: contextRows(snapshot, theme, panelContentWidth), required: true },
+		// The panel is dropped only for providers without subscription windows
+		// (no buckets and nothing to say). Otherwise it stays visible and states
+		// why data is missing.
+		...(snapshot.limits.buckets.length > 0 || snapshot.limits.note !== undefined
+			? [{ id: "limits" as const, title: "Limits", rows: limitsRows(snapshot.limits, theme, panelContentWidth), required: false }]
+			: []),
 		{ id: "usage" as const, title: "Session usage", rows: usageRows(snapshot, theme, panelContentWidth), required: false },
-		{ id: "todos" as const, title: "Todos", rows: todoRows(snapshot.todos, theme, panelContentWidth), required: false },
+		{ id: "todos" as const, title: "Todos", rows: todoRows(snapshot.todos, theme, panelContentWidth, todosExpanded), required: false },
 		{ id: "subagents" as const, title: "Subagents", rows: subagentRows(snapshot.subagents, theme, panelContentWidth), required: false },
 	].filter((definition) => config.panels[definition.id]);
 
@@ -208,9 +250,20 @@ export function renderSidebar(
 		if (index < 0) break;
 		selected.splice(selected.length - 1 - index, 1);
 	}
-	const lines = selected.flatMap((item) => panel(item.title, item.rows, contentWidth, theme));
-	return Array.from({ length: safeHeight }, (_, index) => {
+	let todosRange: [number, number] | undefined;
+	let cursor = 0;
+	const lines = selected.flatMap((item) => {
+		const rendered = panel(item.title, item.rows, contentWidth, theme);
+		if (item.id === "todos") todosRange = [cursor, cursor + rendered.length];
+		cursor += rendered.length;
+		return rendered;
+	});
+	const padded = Array.from({ length: safeHeight }, (_, index) => {
 		const line = truncateToWidth(lines[index] ?? "", contentWidth, "");
 		return `${paint(theme, "dim", "│")} ${pad(line, contentWidth)}`;
 	});
+	// Clip the range to what's actually visible after the final safeHeight cut.
+	if (todosRange && todosRange[0] >= safeHeight) todosRange = undefined;
+	else if (todosRange) todosRange = [todosRange[0], Math.min(todosRange[1], safeHeight)];
+	return { lines: padded, todosRange };
 }

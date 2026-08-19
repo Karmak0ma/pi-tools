@@ -2,13 +2,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import {
-	adapterForProvider,
-	queryProviderUsage,
-	resolveUsageAuth,
-	type UsageReport,
-} from "pi-usage-vflo/src/index.js";
+import { adapterForProvider, readSharedProviderEntry } from "pi-usage-vflo/src/index.js";
 import { matchesKey, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
+import { limitsFromEntry } from "./limits.js";
 import { renderSidebar, type SidebarTheme } from "./render.js";
 import {
 	applySubagentDetails,
@@ -20,15 +16,24 @@ import {
 	sumBranchUsage,
 } from "./state.js";
 import { createSplitPaneController, type SplitPaneController } from "./split-pane.js";
+import { prioritizeInputListener } from "./input-priority.js";
+import { isUnmodifiedPrimaryPress, parseSgrMouseEvent } from "./mouse.js";
 import {
 	DEFAULT_CONFIG,
 	type ActivityState,
 	type SidebarConfig,
 	type SidebarPanelId,
+	type LimitsState,
 	type SidebarSnapshot,
 	type SubagentItem,
 	type TodoItem,
 } from "./types.js";
+
+// How often the sidebar re-reads pi-usage-vflo's published cache file. This is
+// a local file read, not a provider request, so it can be frequent and cheap:
+// it only decides how fast the panel picks up numbers that the usage extension
+// has already fetched (that extension refreshes every 5 minutes).
+const SUBSCRIPTION_POLL_MS = 30_000;
 
 const CONFIG_PATH = join(homedir(), ".pi", "agent", "sidebar-vflo.json");
 
@@ -41,14 +46,28 @@ interface Runtime {
 	subagents: SubagentItem[];
 	activeToolCalls: Map<string, string>;
 	subagentBatches: Map<string, SubagentItem[]>;
-	subscriptionRemaining?: number;
-	usageRefresh?: AbortController;
+	limits: LimitsState;
+	subscriptionPollTimer?: NodeJS.Timeout;
 	overlayGeneration: number;
 	overlayStarting: boolean;
 	tui?: TUI;
 	split?: SplitPaneController;
 	overlayHandle?: OverlayHandle;
 	closeOverlay?: () => void;
+	// Todos panel expand/collapse state, toggled by clicking the panel
+	// (fullscreen mode only) or the alt+t shortcut (both modes).
+	todosExpanded: boolean;
+	// [startLine, endLine) of the last-rendered Todos panel within the
+	// sidebar's output, used to hit-test mouse clicks. Undefined when the
+	// panel isn't currently rendered.
+	todosRange?: [number, number];
+	terminalInputListener?: (data: string) => { consume?: boolean; data?: string } | undefined;
+	unsubscribeTerminalInput?: () => void;
+	// Whether our terminal input listener has successfully been moved ahead of
+	// Pi's own fullscreen viewport listener this render. Re-derived every
+	// frame since Pi may rebind its private listener set (e.g. on a regular
+	// <-> fullscreen mode switch).
+	inputPriorityReady: boolean;
 }
 
 const isCurrent = (runtime: Runtime | undefined, ctx: ExtensionContext): runtime is Runtime =>
@@ -91,47 +110,63 @@ function snapshot(runtime: Runtime): SidebarSnapshot {
 					provider: model.provider,
 					id: model.id,
 					name: model.name,
-					subscriptionRemaining: runtime.subscriptionRemaining,
 				  }
 			: undefined,
 		thinkingLevel: runtime.ctx.thinkingLevel,
 		activity: runtime.activity,
 		context,
+		limits: runtime.limits,
 		usage: sumBranchUsage(runtime.ctx.sessionManager.getBranch()),
 		todos: runtime.todos,
 		subagents: runtime.subagents,
 	};
 }
 
-function subscriptionRemaining(report: UsageReport): number | undefined {
-	const buckets = report.buckets.filter((bucket) => bucket.unit === "percent" && bucket.remaining !== undefined);
-	if (report.semantics.kind !== "consumer-subscription" || buckets.length === 0) return undefined;
-	return Math.max(0, Math.min(100, Math.min(...buckets.map((bucket) => bucket.remaining as number))));
-}
-
-async function refreshSubscription(runtime: Runtime): Promise<void> {
-	runtime.usageRefresh?.abort();
-	runtime.subscriptionRemaining = undefined;
+// Reads the limits state for the current model from pi-usage-vflo's published
+// cache. Returns whether the current provider is a subscription provider, so
+// the caller can stop polling for models that can never have limit windows.
+//
+// This performs no network I/O on purpose: see src/limits.ts for why the
+// sidebar must not query the provider itself.
+async function refreshSubscription(runtime: Runtime): Promise<boolean> {
 	const model = runtime.ctx.model;
 	const adapter = adapterForProvider(model?.provider);
-	if (!model || !adapter || adapter.semantics.kind !== "consumer-subscription") {
+	const isSubscriptionModel = !!model && !!adapter && adapter.semantics.kind === "consumer-subscription";
+	if (!isSubscriptionModel) {
+		runtime.limits = { buckets: [] };
 		requestRender(runtime);
-		return;
+		return false;
 	}
-	const controller = new AbortController();
-	runtime.usageRefresh = controller;
-	try {
-		const auth = await resolveUsageAuth(runtime.ctx, adapter);
-		if (!auth) return;
-		const report = await queryProviderUsage(adapter, auth, controller.signal, 15_000);
-		if (controller.signal.aborted || runtime.ctx.model !== model) return;
-		runtime.subscriptionRemaining = subscriptionRemaining(report);
-		requestRender(runtime);
-	} catch {
-		// pi-usage owns the authoritative status; the sidebar simply omits unavailable data.
-	} finally {
-		if (runtime.usageRefresh === controller) runtime.usageRefresh = undefined;
-	}
+	const entry = await readSharedProviderEntry(model.provider);
+	// The model may have been switched while we were reading the file; in that
+	// case the newer refresh owns the state and this result is discarded.
+	if (runtime.ctx.model !== model) return true;
+	runtime.limits = limitsFromEntry(entry, true, Date.now());
+	requestRender(runtime);
+	return true;
+}
+
+function clearSubscriptionPoll(runtime: Runtime): void {
+	if (runtime.subscriptionPollTimer === undefined) return;
+	clearTimeout(runtime.subscriptionPollTimer);
+	runtime.subscriptionPollTimer = undefined;
+}
+
+// Self-rescheduling, unref'd poll: it never keeps the process alive on its
+// own, and it is cleared synchronously whenever the sidebar is hidden or the
+// session ends, so a stale timer can never fire against a torn-down runtime.
+function scheduleSubscriptionPoll(runtime: Runtime, delayMs = SUBSCRIPTION_POLL_MS): void {
+	clearSubscriptionPoll(runtime);
+	if (!runtime.sidebarVisible) return;
+	const timer = setTimeout(() => {
+		void refreshSubscription(runtime).then((isSubscriptionModel) => {
+			if (runtime.subscriptionPollTimer !== timer) return;
+			runtime.subscriptionPollTimer = undefined;
+			if (isSubscriptionModel) scheduleSubscriptionPoll(runtime);
+		});
+	}, delayMs);
+	timer.unref?.();
+	runtime.subscriptionPollTimer = timer;
 }
 
 function requestRender(runtime: Runtime): void {
@@ -160,7 +195,7 @@ async function openSettings(runtime: Runtime): Promise<void> {
 		return;
 	}
 	const panelLabels: Array<[SidebarPanelId, string]> = [
-		["model", "Model"], ["activity", "Activity"], ["context", "Context"],
+		["model", "Model"], ["activity", "Activity"], ["context", "Context"], ["limits", "Limits"],
 		["usage", "Session usage"], ["todos", "Todos"], ["subagents", "Subagents"],
 	];
 	const presets: SidebarConfig["colorPreset"][] = ["monokai", "catppuccin", "dracula"];
@@ -210,8 +245,11 @@ function setSidebarVisible(runtime: Runtime, visible: boolean): void {
 		else startOverlay(runtime);
 		runtime.overlayHandle?.setHidden(false);
 		suppressTodoWidget(runtime);
+		// No point polling for subscription data nobody can see.
+		scheduleSubscriptionPoll(runtime);
 	} else {
 		closeOverlay(runtime);
+		clearSubscriptionPoll(runtime);
 	}
 	requestRender(runtime);
 }
@@ -244,7 +282,15 @@ function startOverlay(runtime: Runtime): void {
 				return {
 					render(width: number): string[] {
 						sidebarTheme.preset = runtime.config.colorPreset;
-						return renderSidebar(snapshot(runtime), runtime.config, sidebarTheme, width, tui.terminal.rows);
+						// Re-derived every frame: Pi may rebind its private fullscreen
+						// input-listener Set (e.g. on a regular <-> fullscreen switch),
+						// so priority must be re-established rather than cached once.
+						if (runtime.terminalInputListener) {
+							runtime.inputPriorityReady = prioritizeInputListener(tui, runtime.terminalInputListener);
+						}
+						const { lines, todosRange } = renderSidebar(snapshot(runtime), runtime.config, sidebarTheme, width, tui.terminal.rows, runtime.todosExpanded);
+						runtime.todosRange = todosRange;
+						return lines;
 					},
 					invalidate() {},
 				};
@@ -296,8 +342,44 @@ function closeOverlay(runtime: Runtime): void {
 	runtime.tui = undefined;
 }
 
+// Parses raw terminal input for a mouse click landing on the Todos panel.
+// Fullscreen-mode only, and never enables mouse tracking itself — it only
+// observes SGR reports Pi's own fullscreen renderer is already generating.
+// Every non-matching report (release, motion, wheel, clicks elsewhere, a
+// click while a real capturing dialog is open) is returned as `undefined` so
+// Pi's own input handling proceeds completely untouched.
+function handleTerminalInput(runtime: Runtime, data: string): { consume?: boolean } | undefined {
+	try {
+		if (!runtime.sidebarVisible || !runtime.tui || !runtime.split) return undefined;
+		const event = parseSgrMouseEvent(data);
+		if (!event || !isUnmodifiedPrimaryPress(event)) return undefined;
+		const tui = runtime.tui;
+		if (tui.mode !== "fullscreen") return undefined;
+		if (typeof tui.hasOverlay !== "function" || tui.hasOverlay()) return undefined;
+		// Our listener isn't ahead of Pi's own viewport listener this frame (a
+		// future pi-tui version may not expose the private shape we rely on) —
+		// fail open and let Pi handle the click as it normally would.
+		if (!runtime.inputPriorityReady) return undefined;
+		if (!runtime.todosRange) return undefined;
+		const sidebarWidth = runtime.split.getSidebarWidth();
+		const columns = tui.terminal.columns;
+		const leftCol0 = columns - sidebarWidth;
+		if (event.x < leftCol0) return undefined;
+		const [start, end] = runtime.todosRange;
+		if (event.y < start || event.y >= end) return undefined;
+		runtime.todosExpanded = !runtime.todosExpanded;
+		requestRender(runtime);
+		return { consume: true };
+	} catch {
+		// A future TUI/terminal quirk must never break normal input handling.
+		return undefined;
+	}
+}
+
 function disposeRuntime(runtime: Runtime): void {
-	runtime.usageRefresh?.abort();
+	clearSubscriptionPoll(runtime);
+	runtime.unsubscribeTerminalInput?.();
+	runtime.unsubscribeTerminalInput = undefined;
 	closeOverlay(runtime);
 }
 
@@ -328,15 +410,22 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 			subagents: [],
 			activeToolCalls: new Map(),
 			subagentBatches: new Map(),
+			limits: { buckets: [] },
 			overlayGeneration: 0,
 			overlayStarting: false,
+			todosExpanded: false,
+			inputPriorityReady: false,
 		};
 		current = runtime;
 		startOverlay(runtime);
-		void refreshSubscription(runtime);
+		void refreshSubscription(runtime).then(() => scheduleSubscriptionPoll(runtime));
 		if (runtime.sidebarVisible) {
 			suppressTodoWidget(runtime);
 			queueMicrotask(() => suppressTodoWidget(runtime));
+		}
+		if (ctx.mode === "tui") {
+			runtime.terminalInputListener = (data) => handleTerminalInput(runtime, data);
+			runtime.unsubscribeTerminalInput = ctx.ui.onTerminalInput(runtime.terminalInputListener);
 		}
 	});
 
@@ -364,6 +453,16 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 			if (!runtime) return;
 			setSidebarVisible(runtime, !runtime.sidebarVisible);
 			await persist(runtime);
+		},
+	});
+
+	pi.registerShortcut("alt+t", {
+		description: "Expand/collapse the Sidebar VFLO Todos panel",
+		handler: (ctx) => {
+			const runtime = runtimeFor(current, ctx);
+			if (!runtime) return;
+			runtime.todosExpanded = !runtime.todosExpanded;
+			requestRender(runtime);
 		},
 	});
 
@@ -480,7 +579,7 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 	pi.on("model_select", (_event, ctx) => {
 		const runtime = runtimeFor(current, ctx);
 		if (runtime) {
-			void refreshSubscription(runtime);
+			void refreshSubscription(runtime).then(() => scheduleSubscriptionPoll(runtime));
 			requestRender(runtime);
 		}
 	});
@@ -489,6 +588,26 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 		if (runtime) requestRender(runtime);
 	});
 	pi.on("session_compact", (_event, ctx) => {
+		const runtime = runtimeFor(current, ctx);
+		if (runtime) requestRender(runtime);
+	});
+	// Context tokens are recomputed fresh on every render already; these
+	// handlers exist purely to trigger MORE render passes at more lifecycle
+	// points so the Context panel reflects changes without waiting for an
+	// unrelated event (tool call, model switch, etc.) to happen to fire first.
+	pi.on("message_start", (_event, ctx) => {
+		const runtime = runtimeFor(current, ctx);
+		if (runtime) requestRender(runtime);
+	});
+	pi.on("message_end", (_event, ctx) => {
+		const runtime = runtimeFor(current, ctx);
+		if (runtime) requestRender(runtime);
+	});
+	pi.on("turn_end", (_event, ctx) => {
+		const runtime = runtimeFor(current, ctx);
+		if (runtime) requestRender(runtime);
+	});
+	pi.on("agent_end", (_event, ctx) => {
 		const runtime = runtimeFor(current, ctx);
 		if (runtime) requestRender(runtime);
 	});

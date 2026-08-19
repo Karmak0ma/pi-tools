@@ -152,6 +152,7 @@ export function emptySnapshot(): SidebarSnapshot {
 		thinkingLevel: undefined,
 		activity: { state: "ready", label: "Ready", activeTools: [] },
 		context: undefined,
+		limits: { buckets: [] },
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		todos: [],
 		subagents: [],
