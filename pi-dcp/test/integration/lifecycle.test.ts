@@ -9,6 +9,7 @@ import { defaults } from "../../src/config/defaults.ts";
 import { emptyState } from "../../src/state/reducer.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
 import { registerLifecycle } from "../../src/lifecycle.ts";
+import { sha256 } from "../../src/util/hash.ts";
 
 describe("extension capability gate", () => {
   it("requires the mutation surface before registering behavior", () => { const result = checkFactoryCapabilities({} as any); expect(result.ok).toBe(false); expect(result.missing).toContain("appendEntry"); });
@@ -174,6 +175,89 @@ describe("extension capability gate", () => {
     }
   });
 
+  it("never persists a compression envelope the reducer would reject (regression: 2026-08-19 permanent block)", async () => {
+    // A rejected envelope must fail closed *before* pi.appendEntry, not
+    // after: reconstructFromBranch replays the full persisted branch
+    // unconditionally on every resume and restart, so anything appended
+    // then rejected corrupts the session forever (compression/tool.ts
+    // comment above the dry run explains why). This forces exactly that
+    // disagreement without depending on any specific bug: a requestKey the
+    // real compress call is about to write is pre-seeded with a mismatched
+    // payload hash, which is precisely the condition reduceEnvelope's own
+    // idempotency check treats as state_conflict.
+    const messages = [
+      { role: "user", content: "old completed work", timestamp: 1 },
+      { role: "assistant", content: [{ type: "text", text: "the old work is complete" }], api: "openai-completions", provider: "openai", model: "model", stopReason: "stop", timestamp: 2 },
+      { role: "user", content: "current request", timestamp: 3 },
+    ] as any[];
+    const entries = messages.map((message, index) => ({ type: "message", id: `entry-${index + 1}`, parentId: index ? `entry-${index}` : null, timestamp: new Date(index + 1).toISOString(), message }));
+    let registered: any;
+    const appended: unknown[] = [];
+    const statsDir = await mkdtemp(join(tmpdir(), "pi-dcp-fail-closed-test-"));
+    const previousStatsDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = statsDir;
+    try {
+      const pi = {
+        registerTool: (tool: any) => { registered = tool; },
+        appendEntry: (_customType: string, data: unknown) => { appended.push(data); },
+        sendMessage: () => undefined,
+      } as any;
+      const runtime = createRuntime(pi);
+      runtime.sessionId = "session-1";
+      runtime.generation = 1;
+      const ctx = {
+        cwd: "/tmp",
+        hasUI: false,
+        model: { provider: "openai", id: "model", api: "openai-completions", contextWindow: 128_000 },
+        getContextUsage: () => ({ tokens: null, contextWindow: 128_000 }),
+        ui: { notify: () => undefined, confirm: async () => true },
+        sessionManager: {
+          buildContextEntries: () => entries,
+          getLeafId: () => "entry-3",
+        },
+      } as any;
+      registerCompressionTool(pi, runtime);
+      const transformed = transformOutgoingContext(messages, { ctx, sessionId: runtime.sessionId, generation: runtime.generation, state: emptyState(), config: structuredClone(defaults) as any });
+      expect(transformed.snapshot).toBeDefined();
+      publishBaseline(runtime, transformed.snapshot!);
+      runtime.index = transformed.index;
+      runtime.reduced = transformed.state;
+
+      const toolCallId = "compress-call";
+      const compressionParams = { topic: "old work", content: [{ startId: "m0001", endId: "m0002", summary: "old work was completed and verified" }] };
+      await bindCompressionProvenance(toolCallId, ctx, runtime);
+
+      // Pre-seed the exact requestKey this call is about to compute (same
+      // formula as compression/service.ts) with a payload hash that cannot
+      // match what buildCompressionEnvelope actually builds - simulating a
+      // conflicting entry already present on the branch.
+      const requestKey = sha256(`${runtime.sessionId}\0${toolCallId}\0${transformed.snapshot!.hash}`);
+      runtime.reduced.requestKeys.set(requestKey, "mismatched-payload-hash");
+
+      const result = await registered.execute(toolCallId, compressionParams, undefined, undefined, ctx);
+
+      expect(result.content[0].text).toContain("pi-dcp: state_conflict");
+      expect(result.details).toMatchObject({ reason: "state_conflict" });
+      // The whole point: nothing was ever written to the branch, and the live
+      // runtime state was never swapped for the rejected dry run.
+      expect(appended).toHaveLength(0);
+      expect(runtime.reduced.corruptReason).toBeUndefined();
+      expect(runtime.generation).toBe(1);
+
+      // The session is not blocked: a normal compress call on a fresh
+      // tool-call ID (no colliding requestKey) still succeeds right after.
+      const retryEntries = [...entries, { type: "message", id: "entry-4", parentId: "entry-3", timestamp: new Date(4).toISOString(), message: { role: "assistant", content: [{ type: "toolCall", id: "compress-retry", name: "compress", arguments: compressionParams }], api: "openai-completions", provider: "openai", model: "model", stopReason: "toolUse", timestamp: 4 } }];
+      entries.push(retryEntries.at(-1)!);
+      const retryResult = await registered.execute("compress-retry", compressionParams, undefined, undefined, ctx);
+      expect(retryResult.content[0].text).toContain("pi-dcp compressed 1 range(s)");
+      expect(appended).toHaveLength(1);
+    } finally {
+      if (previousStatsDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousStatsDir;
+      await rm(statsDir, { recursive: true, force: true });
+    }
+  });
+
   it("materializes an automatic nudge on the next agent request", async () => {
     const handlers = new Map<string, (event: any, ctx: any) => unknown>();
     const runtime = createRuntime();
@@ -312,7 +396,12 @@ describe("extension capability gate", () => {
     }
   });
 
-  it("still injects a status message when the runtime is invalid", async () => {
+  it("injects no status message when the runtime is invalid", async () => {
+    // A not-ready runtime has no labels to publish, so the status line is
+    // omitted entirely rather than broadcasting an "unavailable" reason every
+    // turn - its absence is itself the signal (SYSTEM_GUIDANCE: "do not call
+    // compress if no labels are visible"). A compress call attempted anyway
+    // still gets a normal, explanatory tool-call failure from compression/tool.ts.
     const handlers = new Map<string, (event: any, ctx: any) => Promise<any>>();
     const runtime = createRuntime();
     const pi = { on: (name: string, handler: (event: any, ctx: any) => Promise<any>) => { handlers.set(name, handler); } } as any;
@@ -324,8 +413,7 @@ describe("extension capability gate", () => {
     const result = await handlers.get("context")?.({ messages: [{ role: "user", content: "hi", timestamp: 1 } as any] }, ctx) as any;
 
     const status = result.messages.find((message: any) => message.role === "custom" && message.customType === "pi-dcp.v2.status");
-    expect(status).toBeDefined();
-    expect(status.content).toContain("capability_missing");
+    expect(status).toBeUndefined();
   });
 
   it("records and deduplicates loud transform failures", async () => {

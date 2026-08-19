@@ -11,7 +11,7 @@ describe("status/cache soak", () => {
     runtime.sessionId = "soak";
     const entries: any[] = [];
     const messages: any[] = [];
-    let previous: any[] | undefined;
+    let previousBody: any[] | undefined;
     const started = performance.now();
     for (let turn = 0; turn < 50; turn++) {
       const message = { role: "user", content: `turn ${turn}`, timestamp: turn + 1 };
@@ -19,9 +19,17 @@ describe("status/cache soak", () => {
       entries.push({ type: "message", id: `entry-${turn + 1}`, parentId: turn ? `entry-${turn}` : null, timestamp: new Date(turn + 1).toISOString(), message });
       const ctx = { cwd: "/tmp", model: { provider: "test", id: "model", api: "test", contextWindow: 100_000 }, getContextUsage: () => ({ tokens: null, contextWindow: 100_000 }), sessionManager: { buildContextEntries: () => entries, getLeafId: () => `entry-${turn + 1}` }, ui: { notify: () => undefined } } as any;
       const transformed = await handlers.get("context")?.({ messages: [...messages] }, ctx);
-      expect(transformed.messages.at(-1).customType).toBe("pi-dcp.v2.status");
-      if (previous) expect(transformed.messages.slice(0, previous.length - 1)).toEqual(previous.slice(0, -1));
-      previous = transformed.messages;
+      // No nudge is ever pending in this soak, so pi-dcp must add NO message
+      // of its own on any of the 50 turns. This is the invariant the redesign
+      // bought: an ordinary request carries zero fabricated turns, so the
+      // whole transformed array is a strictly growing, byte-stable prefix and
+      // the provider cache breakpoint never has to be relocated off a tail
+      // that changes every request (see prompts/status.ts).
+      const hasStatus = transformed.messages.some((message: any) => message.customType === "pi-dcp.v2.status");
+      expect(hasStatus).toBe(false);
+      const body = transformed.messages;
+      if (previousBody) expect(body.slice(0, previousBody.length)).toEqual(previousBody);
+      previousBody = body;
     }
     const elapsed = performance.now() - started;
     expect(elapsed).toBeGreaterThanOrEqual(0);

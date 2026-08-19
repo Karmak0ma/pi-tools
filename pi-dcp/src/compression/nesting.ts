@@ -26,7 +26,23 @@ function expand(summary: string, state: ReducedState, selected: Set<string>, use
       const nested = expand(block.summary, state, selected, used, stack, depth + 1, maxDepth, aliases);
       stack.delete(blockId);
       if (!nested.ok) throw new Error("placeholder");
-      maxSeen = Math.max(maxSeen, nested.depth);
+      // `nested.depth` alone under-counts: `block.summary` is always already
+      // fully flattened (expandNestedSummary replaces every placeholder with
+      // literal text at creation time, see below), so recursing into it can
+      // never find a further `(bNNNN)` match beyond one hop - `nested.depth`
+      // therefore always collapses to `depth + 1` no matter how deep `block`
+      // itself already was. That silent under-count let a compress call that
+      // re-nests an already-nested block (nestedDepth >= 1) build an envelope
+      // whose computed depth looked one level shallower than the reducer's
+      // authoritative invariant requires (state/reducer.ts:
+      // `block.nestedDepth < child.nestedDepth + 1`), so the envelope passed
+      // every check here, got persisted, and only then failed to reduce -
+      // corrupting the session (2026-08-19 incident). `block.nestedDepth` is
+      // the reducer's own already-validated depth for this exact child, and
+      // is authoritative regardless of what its flattened text still
+      // contains; folding it in here keeps this computation in sync with the
+      // invariant it is required to satisfy.
+      maxSeen = Math.max(maxSeen, nested.depth, block.nestedDepth + 1);
       return `[DCP nested summary]\n${nested.summary}`;
     });
     return { ok: true, summary: replaced, consumedBlockIds: used, depth: maxSeen };

@@ -73,7 +73,7 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
         afterEntryId: indexResult.units[Math.max(...indexes) + 1]?.entryIds[0],
       });
     }
-    const availableState = reconcileAvailability(markAvailability(state, availableEntryIds, validAnchors), indexResult);
+    const availableState = reconcileAvailability(markAvailability(state, availableEntryIds, validAnchors, projection.unprojectedEntryIds), indexResult);
     const model = modelKey(options.ctx.model, options.ctx.getContextUsage()?.contextWindow || 0);
     const snapshot = createBaselineSnapshot({
       sessionId: options.sessionId,

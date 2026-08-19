@@ -60,6 +60,20 @@ export interface DcpRuntime {
   lastNudgeTurn?: number;
   lastNudgeEvaluation?: NudgeEvaluation;
   warnedReasonCodes: Set<string>;
+  /**
+   * The reason the last request had to be sent raw, or undefined while the
+   * transform is working. A silent fallback is expensive - it sends the whole
+   * uncompressed history on every later request - so it must never again be
+   * observable only as a bigger bill.
+   */
+  fallbackReason?: string;
+  /**
+   * A chat notice waiting to be written to the session. It is produced inside
+   * the `context` hook but can only be delivered from `agent_settled`: mid-turn
+   * insertion would place a custom message between an assistant tool call and
+   * its tool results and break protocol ordering.
+   */
+  pendingFallbackNotice?: string;
   mutationBlocked: boolean;
   logger: Logger;
   pi?: ExtensionAPI;

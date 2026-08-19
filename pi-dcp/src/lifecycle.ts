@@ -16,9 +16,10 @@ import { createEnvelope, isOperationEnvelope, OPERATION_CUSTOM_TYPE, type OpEnve
 import { reduceEnvelope, markAvailability, type ReducedState } from "./state/reducer.ts";
 import { clearBaselines, disableRuntime, invalidateSnapshot, publishBaseline, runtimeSessionIdentity, setDcpToolActive, type DcpRuntime } from "./runtime.ts";
 import { modelKey } from "./identity/snapshot.ts";
-import { SYSTEM_GUIDANCE } from "./prompts/defaults.ts";
+import { buildSystemGuidance } from "./prompts/defaults.ts";
 import { persistMissingSavingsBestEffort, persistSavingsBestEffort } from "./stats.ts";
 import { bindCompressionProvenance } from "./compression/tool.ts";
+import { stripLeakedLabelTags } from "./ui/strip-labels.ts";
 
 export const VERSION = "0.2.0";
 
@@ -50,6 +51,13 @@ export function registerLifecycle(pi: ExtensionAPI, runtime: DcpRuntime): void {
     if (event.toolName === "compress") await bindCompressionProvenance(event.toolCallId, ctx, runtime);
   });
   pi.on("agent_settled", async (_event: AgentSettledEvent, ctx) => { await onSettled(ctx, runtime, pi); });
+  // Display-only safety net: strips any pi-dcp label tag the model imitated
+  // into its own reply (see src/ui/strip-labels.ts). Feature-detected because
+  // registerMarkdownTransformer is not part of checkFactoryCapabilities' hard
+  // requirements - its absence must never disable the rest of the extension.
+  if (typeof pi.registerMarkdownTransformer === "function") {
+    pi.registerMarkdownTransformer((markdown) => stripLeakedLabelTags(markdown));
+  }
 }
 
 async function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionAPI): Promise<void> {
@@ -73,7 +81,7 @@ async function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext, r
   const initialProjection = projectContextEntries(ctx.sessionManager.buildContextEntries());
   if (initialProjection.ok) {
     const initialIndex = buildProtocolUnits(initialProjection.messages);
-    if ("units" in initialIndex) runtime.reduced = reconcileAvailability(runtime.reduced, initialIndex);
+    if ("units" in initialIndex) runtime.reduced = reconcileAvailability(runtime.reduced, initialIndex, initialProjection.unprojectedEntryIds);
   }
   runtime.generation++;
   clearBaselines(runtime);
@@ -107,7 +115,7 @@ async function rebase(ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionA
     const rebuilt = reconstructFromBranch(ctx.sessionManager.getBranch());
     const projection = projectContextEntries(ctx.sessionManager.buildContextEntries());
     const index = projection.ok ? buildProtocolUnits(projection.messages) : { ok: false as const, reason: "projection_unsupported" as const };
-    runtime.reduced = "units" in index ? reconcileAvailability(rebuilt.state, index) : rebuilt.state;
+    runtime.reduced = "units" in index ? reconcileAvailability(rebuilt.state, index, projection.ok ? projection.unprojectedEntryIds : undefined) : rebuilt.state;
     runtime.index = "units" in index ? index : undefined;
     clearBaselines(runtime);
     runtime.lastSettledSuffixHash = undefined;
@@ -123,10 +131,17 @@ async function rebase(ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionA
   });
 }
 
-async function beforeAgentStart(event: BeforeAgentStartEvent, _ctx: ExtensionContext, _runtime: DcpRuntime): Promise<{ systemPrompt: string }> {
-  // Nudges are operation-backed for replay/audit, but their model-visible
-  // delivery is transient and happens in the status suffix of context.
-  return { systemPrompt: `${event.systemPrompt}\n\n${SYSTEM_GUIDANCE}` };
+async function beforeAgentStart(event: BeforeAgentStartEvent, _ctx: ExtensionContext, runtime: DcpRuntime): Promise<{ systemPrompt: string }> {
+  // The guidance carries the compression selection rules, including the
+  // turn-relative ones, so no per-request message has to restate them. It is
+  // built from config rather than being a constant, but config is fixed for a
+  // session, so the system prefix stays byte-stable and cacheable.
+  //
+  // Nudges are operation-backed for replay/audit; their model-visible delivery
+  // stays transient and happens in the status suffix of context, because a
+  // per-request byte in the system channel would invalidate the whole
+  // conversation cache (see prompts/status.ts).
+  return { systemPrompt: `${event.systemPrompt}\n\n${buildSystemGuidance(runtime.config)}` };
 }
 
 async function transformContext(event: ContextEvent, ctx: ExtensionContext, runtime: DcpRuntime): Promise<{ messages: AgentMessage[] }> {
@@ -157,14 +172,28 @@ async function transformContext(event: ContextEvent, ctx: ExtensionContext, runt
       runtime.branchLeafId = ctx.sessionManager.getLeafId();
       runtime.lastModel = modelKey(ctx.model, ctx.getContextUsage()?.contextWindow || 0);
       runtime.lastReadiness = { ready: true, adapterId: ctx.model?.api || "unknown", generation: runtime.generation };
+      // Announce recovery as well. Without it a user who saw the failure notice
+      // has no way to know the extension started working again.
+      if (runtime.fallbackReason) {
+        runtime.pendingFallbackNotice = `pi-dcp: context compression resumed (was disabled: ${runtime.fallbackReason}).`;
+        runtime.fallbackReason = undefined;
+      }
     } else {
       // A failed publication must not leave an unrelated authorization slot.
       clearBaselines(runtime);
       runtime.lastReadiness = { ready: false, reason: result.reason || "unknown", generation: runtime.generation };
       runtime.logger.diagnostic({ reason: result.reason || "unknown", confidence: result.confidence } as any);
-      if (result.reason && !runtime.warnedReasonCodes.has(result.reason)) {
-        runtime.warnedReasonCodes.add(result.reason);
-        ctx.ui?.notify?.(`pi-dcp: context transform disabled: ${result.reason}`);
+      const reason = result.reason || "unknown";
+      // Re-announce whenever the reason changes, not once per process. The
+      // 2026-08-18 incident stayed invisible because the single toast had
+      // already been consumed by an unrelated reason earlier in the run.
+      if (runtime.fallbackReason !== reason) {
+        runtime.fallbackReason = reason;
+        runtime.pendingFallbackNotice = `pi-dcp: context compression disabled: ${reason}. Every request is now sent uncompressed. Restarting the session usually clears this.`;
+        if (!runtime.warnedReasonCodes.has(reason)) {
+          runtime.warnedReasonCodes.add(reason);
+          ctx.ui?.notify?.(`pi-dcp: context transform disabled: ${reason}`);
+        }
       }
     }
     runtime.lastTransform = {
@@ -180,7 +209,7 @@ async function transformContext(event: ContextEvent, ctx: ExtensionContext, runt
   });
 }
 
-function reconcileAvailability(state: ReducedState, index: { units: { entryIds: string[]; role: string; compressible: boolean }[] }): ReducedState {
+function reconcileAvailability(state: ReducedState, index: { units: { entryIds: string[]; role: string; compressible: boolean }[] }, unprojectedEntryIds: ReadonlySet<string> = new Set()): ReducedState {
   const available = new Set(index.units.flatMap((unit) => unit.entryIds));
   const anchors = new Map<string, { beforeEntryId?: string; afterEntryId?: string }>();
   for (const block of state.blocks.values()) {
@@ -190,7 +219,7 @@ function reconcileAvailability(state: ReducedState, index: { units: { entryIds: 
       afterEntryId: index.units[Math.max(...indexes) + 1]?.entryIds[0],
     });
   }
-  const next = markAvailability(state, available, anchors);
+  const next = markAvailability(state, available, anchors, unprojectedEntryIds);
   const latestUser = Math.max(-1, ...index.units.map((unit, position) => unit.role === "user" ? position : -1));
   for (const block of next.blocks.values()) {
     const indexes = index.units.map((unit, position) => block.coverage.effectiveEntryIds.some((id) => unit.entryIds.includes(id)) ? position : -1).filter((position) => position >= 0);
@@ -208,6 +237,22 @@ async function persistBranchSavings(entries: readonly SessionEntry[], runtime: D
   await persistMissingSavingsBestEffort(envelopes, runtime.logger);
 }
 
+/**
+ * Write the pending fallback notice into the transcript. `agent_settled` is the
+ * first safe moment: the agent is no longer streaming, so Pi appends the custom
+ * message directly instead of queuing it, and no tool-call/tool-result pair can
+ * be split. The entry is persisted, so the degradation is still diagnosable
+ * from the session file long after the toast is gone.
+ */
+function flushFallbackNotice(runtime: DcpRuntime, pi: ExtensionAPI): void {
+  const notice = runtime.pendingFallbackNotice;
+  if (!notice) return;
+  runtime.pendingFallbackNotice = undefined;
+  try {
+    pi.sendMessage({ customType: "pi-dcp.v2.notification", content: notice, display: true }, { triggerTurn: false });
+  } catch { /* a warning must never break the turn it is warning about */ }
+}
+
 function lastAssistantContainsCompress(ctx: ExtensionContext | undefined): boolean {
   if (!ctx) return false;
   const last = [...ctx.sessionManager.getBranch()].reverse().find((entry) => entry.type === "message" && entry.message.role === "assistant");
@@ -216,6 +261,7 @@ function lastAssistantContainsCompress(ctx: ExtensionContext | undefined): boole
 }
 
 async function onSettled(ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionAPI): Promise<void> {
+  flushFallbackNotice(runtime, pi);
   if (!runtime.valid) return;
   await runtime.mutex.runExclusive(async () => {
     try {
@@ -225,7 +271,7 @@ async function onSettled(ctx: ExtensionContext, runtime: DcpRuntime, pi: Extensi
       if (!projection.ok) return;
       const index = buildProtocolUnits(projection.messages);
       if (!("units" in index)) return;
-      runtime.reduced = reconcileAvailability(rebuilt.state, index);
+      runtime.reduced = reconcileAvailability(rebuilt.state, index, projection.unprojectedEntryIds);
 
       // Automatic strategies are explicitly gated here. Manual mode no longer
       // makes evaluateSettledStrategies silently discard the configured flag.

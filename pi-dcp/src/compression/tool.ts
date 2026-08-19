@@ -7,11 +7,12 @@ import { projectContextEntries } from "../identity/project.ts";
 import { buildProtocolUnits } from "../identity/protocol.ts";
 import { reduceEnvelope } from "../state/reducer.ts";
 import { OPERATION_CUSTOM_TYPE } from "../state/operations.ts";
-import { notify } from "../ui/notify.ts";
+import { formatNotification, notify } from "../ui/notify.ts";
 import { hashJson } from "../util/hash.ts";
 import { clearBaselines, findBaselineForParent, latestBaseline, pinBaseline, unpinBaseline, type DcpRuntime } from "../runtime.ts";
 import { persistSavingsBestEffort } from "../stats.ts";
 import { buildErrorText } from "./errors.ts";
+import { selectionRules } from "../prompts/defaults.ts";
 
 export function registerCompressionTool(pi: ExtensionAPI, runtime: DcpRuntime): void {
   const tool: ToolDefinition<typeof CompressionParameters> = {
@@ -23,7 +24,8 @@ Selection
 - Choose complete protocol units (a user turn, or an assistant tool-call message together with ALL of its tool results) whose work is finished.
 - The range is inclusive: every unit between startId and endId is included.
 - startId must precede endId; ranges must not overlap.
-- Use only labels visible in the current context: <pi-dcp-message-id>mNNNN</pi-dcp-message-id> for units, <pi-dcp-message-id>bNNNN</pi-dcp-message-id> for active blocks. Units marked BLOCKED cannot be included.
+- Read labels off the message they are attached to: <pi-dcp-message-id>mNNNN</pi-dcp-message-id> for units, <pi-dcp-message-id>bNNNN</pi-dcp-message-id> for active blocks.
+${selectionRules(runtime.config)}
 - Never invent labels; if no labels are visible, do not call this tool.
 - Do not include: active work, unresolved questions, pending tool exchanges, or details still needed for immediate edits.
 - Protected tool output (configured protected tools and file patterns) does not need to be described in your summary or avoided: pi-dcp automatically appends it to the block verbatim, so it survives compression even if your prose omits it.
@@ -38,16 +40,19 @@ Nested blocks
 - If your range includes a block (bNNNN), you MUST reference it in the summary as (bNNNN) exactly once per block.
 - (bNNNN) are reserved tokens; do not invent them and do not repeat one.
 - Preflight check before calling: every block inside your range appears exactly once in your summary.
+- (bNNNN) is a write-only instruction to this tool, not the stored result: pi-dcp replaces it with that block's full stored content before saving, atomically, in the same call. A tool result reporting success means this already happened - there is nothing left to fix and nothing to verify by re-reading. Never call compress again on a block just because you cannot see its expanded text; that re-wraps real content for no reason and risks failing for reasons unrelated to your actual task.
 
 Batching
 - You may pass up to 16 ranges in one call; each range gets its own summary.
 
 Validation
-- The call is authorized from the assistant response that produced the tool call; ranges are validated against the current baseline. Failures return the reason and the currently valid labels so you can retry.`,
+- The call is authorized from the assistant response that produced the tool call; ranges are validated against the current baseline.
+- Validation is the authority on what is selectable right now, so you never need a per-turn list: a rejected call changes nothing, names the reason, and lists the labels you may use instead. Fix the range from that list and retry once.`,
     promptSnippet: "compress older resolved context ranges",
     promptGuidelines: [
       "Use compress only for older closed work and complete protocol units.",
       "Use compress only with current visible mNNNN or bNNNN labels; never invent labels.",
+      "Never pass compress a BLOCKED unit or a still-live recent user turn.",
       "If no labels are visible, do not call compress.",
     ],
     parameters: CompressionParameters,
@@ -150,22 +155,46 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
     });
     if (!built.ok) return failure(built.reason, built, runtime, baseline);
 
+    // Validate the envelope against the reducer *before* persisting it. This
+    // is a pure, non-mutating dry run (reduceEnvelope always clones state; it
+    // never touches runtime.reduced), so trying it first costs nothing when
+    // it succeeds. What it buys: buildCompressionEnvelope's checks (range,
+    // placeholder, size) and the reducer's own invariants (anchors, coverage,
+    // nestedDepth, no-overlap) are two independently maintained pieces of
+    // logic, and a future gap between them - like the nestedDepth
+    // under-count fixed in nesting.ts (2026-08-19 incident) - must never
+    // reach `pi.appendEntry`. Once appended, a rejected envelope is
+    // permanent: reconstructFromBranch (state/reconstruct.ts) replays the
+    // full persisted branch unconditionally on every resume *and* restart,
+    // so a corrupt entry re-corrupts the state every single time and disables
+    // compression for the rest of the session's life, contrary to the
+    // fallback notice's own claim that restarting clears it. Checking first
+    // turns any such mismatch into what it always should have been: a
+    // normal, retryable tool-call failure that never touches history.
+    const dryRun = reduceEnvelope(runtime.reduced, built.envelope);
+    if (dryRun.corruptReason) return failure("state_conflict", {}, runtime, baseline);
+
     pi.appendEntry(OPERATION_CUSTOM_TYPE, built.envelope);
     await persistSavingsBestEffort(built.envelope, runtime.logger);
-    runtime.reduced = reduceEnvelope(runtime.reduced, built.envelope);
-    if (runtime.reduced.corruptReason) return failure("state_conflict", {}, runtime);
+    runtime.reduced = dryRun;
     runtime.generation++;
     clearBaselines(runtime);
     runtime.lastReadiness = { ready: false, reason: "state_invalidated", generation: runtime.generation };
-    notify(ctx, runtime.config, {
+    const report = {
       action: "compressed",
       topic: params.topic,
       count: built.blocks.length,
       estimatedTokens: built.blocks.reduce((sum, block) => sum + (block.estimatedSavingsTokens || 0), 0),
       confidence: "heuristic",
-    }, pi);
+    } as const;
+    notify(ctx, runtime.config, report);
+    // The statistics belong in the tool result, not in a separate chat message.
+    // Pi can only insert an extension message mid-turn with `deliverAs:
+    // "nextTurn"`, so the old chat notification always appeared one turn late
+    // and looked unrelated to the call that produced it.
+    const stats = formatNotification(runtime.config, report);
     return {
-      content: [{ type: "text", text: `pi-dcp compressed ${built.blocks.length} range(s). Refresh context aliases.` }],
+      content: [{ type: "text", text: `pi-dcp compressed ${built.blocks.length} range(s). Refresh context aliases.${stats ? ` ${stats}.` : ""}` }],
       details: {
         runId: built.envelope.operation.type === "compression.created" ? built.envelope.operation.runId : undefined,
         blockIds: built.blocks.map((block) => block.blockId),

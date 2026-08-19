@@ -3,13 +3,48 @@ import type { BranchSummaryEntry, CompactionEntry, CustomMessageEntry, SessionEn
 import { fingerprintMessage } from "./fingerprint.ts";
 import type { ProjectedMessage } from "./types.ts";
 
-export type ProjectionResult = { ok: true; messages: ProjectedMessage[] } | { ok: false; reason: "projection_unsupported" };
+export type ProjectionResult =
+  | {
+    ok: true;
+    messages: ProjectedMessage[];
+    /**
+     * Entries on the branch that exist in the session file but are
+     * deliberately not projected (see `isRetryDroppableAssistant`). Callers
+     * that ask "does this entry id still exist on the branch?" - block
+     * coverage and block anchors - must treat these as present, otherwise a
+     * block created before this rule existed would silently go unavailable
+     * and the whole context would expand again.
+     */
+    unprojectedEntryIds: Set<string>;
+  }
+  | { ok: false; reason: "projection_unsupported" };
+
+/**
+ * An assistant message with no content parts carries nothing for the provider.
+ * Pi writes one for every failed request (rate limit, overload, abort) and then,
+ * when it auto-retries, removes it from `agent.state.messages` while keeping it
+ * in the session file (see `_prepareRetry` in Pi's agent-session). If we kept
+ * projecting it, our "expected" list would permanently contain messages the
+ * incoming list no longer has, `joinProjectedMessages` would fail closed with
+ * `join_ambiguous`, and every later request in the process would be sent raw.
+ *
+ * Dropping it is safe in both directions: when Pi does keep the message, it
+ * simply arrives as an unmatched extra and the pipeline passes it through
+ * byte-for-byte, so the provider still receives exactly what Pi decided to send.
+ */
+function isRetryDroppableAssistant(entry: SessionEntry): boolean {
+  if (entry.type !== "message") return false;
+  const message = (entry as SessionMessageEntry).message;
+  return message.role === "assistant" && Array.isArray(message.content) && message.content.length === 0;
+}
 
 /** Versioned Pi 0.84.1 projection adapter. Keep this local: private Pi internals are not imported. */
 export function projectContextEntries(entries: readonly SessionEntry[]): ProjectionResult {
   const messages: ProjectedMessage[] = [];
+  const unprojectedEntryIds = new Set<string>();
   for (const entry of entries) {
     if (typeof entry.id !== "string" || !entry.id || typeof entry.timestamp !== "string" || !Number.isFinite(Date.parse(entry.timestamp))) return { ok: false, reason: "projection_unsupported" };
+    if (isRetryDroppableAssistant(entry)) { unprojectedEntryIds.add(entry.id); continue; }
     let projected: AgentMessage[];
     switch (entry.type) {
       case "message": projected = [(entry as SessionMessageEntry).message]; break;
@@ -37,7 +72,7 @@ export function projectContextEntries(entries: readonly SessionEntry[]): Project
       fingerprint: fingerprintMessage(message), toolCallIds: toolIds(message),
     }));
   }
-  return { ok: true, messages };
+  return { ok: true, messages, unprojectedEntryIds };
 }
 
 function isValidProjectedMessage(message: AgentMessage): boolean { if (!message || typeof message !== "object" || typeof message.role !== "string") return false; if (message.role === "user") return typeof message.content === "string" || (Array.isArray(message.content) && message.content.every((part) => part && typeof part === "object" && ((part as { type?: string }).type === "text" ? typeof (part as { text?: unknown }).text === "string" : (part as { type?: string }).type === "image" && typeof (part as { data?: unknown }).data === "string" && typeof (part as { mimeType?: unknown }).mimeType === "string"))); if (message.role === "assistant") return Array.isArray(message.content) && message.content.every((part) => part && typeof part === "object" && ((part as { type?: string }).type === "text" && typeof (part as { text?: unknown }).text === "string" || (part as { type?: string }).type === "thinking" && typeof (part as { thinking?: unknown }).thinking === "string" || (part as { type?: string }).type === "toolCall" && typeof (part as { id?: unknown }).id === "string" && typeof (part as { name?: unknown }).name === "string" && (part as { arguments?: unknown }).arguments !== undefined)); if (message.role === "toolResult") return typeof message.toolCallId === "string" && typeof message.toolName === "string" && Array.isArray(message.content); if (message.role === "custom") return typeof message.customType === "string" && (typeof message.content === "string" || Array.isArray(message.content)); if (message.role === "compactionSummary") return typeof message.summary === "string"; if (message.role === "branchSummary") return typeof message.summary === "string" && typeof message.fromId === "string"; return false; }

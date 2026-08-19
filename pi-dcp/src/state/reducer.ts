@@ -23,6 +23,14 @@ export interface ReducedState {
   blocks: Map<BlockId, ReducedBlock>;
   runs: Map<RunId, BlockId[]>;
   toolPrunes: Map<string, ReducedToolPrune>;
+  /**
+   * Tool-call IDs of compress calls that actually produced blocks. The authored
+   * summary text is stored in the block, so keeping the identical text in the
+   * tool-call arguments charges the user twice for it forever - the arguments
+   * live after the compressed range and can never be covered by a block.
+   * See applyPersistedRedactions in transform/tools.ts.
+   */
+  compressToolCallIds: Set<string>;
   nudges: Map<string, ReducedNudge>;
   manualMode: boolean;
   savings: SavingsTotals;
@@ -39,6 +47,7 @@ export function emptyState(): ReducedState {
     blocks: new Map(),
     runs: new Map(),
     toolPrunes: new Map(),
+    compressToolCallIds: new Set(),
     nudges: new Map(),
     manualMode: false,
     savings: emptySavingsTotals(),
@@ -67,6 +76,7 @@ export function cloneState(state: ReducedState): ReducedState {
     }])),
     runs: new Map([...state.runs].map(([id, blocks]) => [id, [...blocks]])),
     toolPrunes: new Map([...state.toolPrunes].map(([id, prune]) => [id, { ...prune }])),
+    compressToolCallIds: new Set(state.compressToolCallIds || []),
     nudges: new Map([...state.nudges].map(([key, nudge]) => [key, { ...nudge }])),
     manualMode: state.manualMode,
     savings: cloneSavingsTotals(state.savings || emptySavingsTotals()),
@@ -147,6 +157,7 @@ function applyOperation(state: ReducedState, operation: DcpOperation, opId: stri
       }
     }
     state.runs.set(operation.runId, ids);
+    if (operation.toolCallId) state.compressToolCallIds.add(operation.toolCallId);
     addSavingsTotals(state.savings, savingsFromOperation(operation));
     return true;
   }
@@ -211,25 +222,36 @@ function activateEligibleDescendants(state: ReducedState, blockId: string): void
   }
 }
 
-export function markAvailability(state: ReducedState, availableEntryIds: ReadonlySet<string>, validAnchors: ReadonlyMap<string, CreatedBlock["anchor"]>): ReducedState {
+/**
+ * @param unprojectedEntryIds Entries that are still on the branch but are no
+ * longer projected into the model context (empty assistant messages left by a
+ * failed request). They count as present for coverage, and any recorded anchor
+ * that points at one is treated as an open boundary, because the anchor we can
+ * recompute today can never name an entry that is not in the index anymore.
+ * Without this, a block created next to - or over - a failed request would lose
+ * its anchor match and deactivate itself forever.
+ */
+export function markAvailability(state: ReducedState, availableEntryIds: ReadonlySet<string>, validAnchors: ReadonlyMap<string, CreatedBlock["anchor"]>, unprojectedEntryIds: ReadonlySet<string> = new Set()): ReducedState {
   const next = cloneState(state);
+  const present = (id: string): boolean => availableEntryIds.has(id) || unprojectedEntryIds.has(id);
   for (const block of next.blocks.values()) {
-    const coverageAvailable = block.coverage.effectiveEntryIds.every((id) => availableEntryIds.has(id));
-    const before = block.anchor.beforeEntryId ? availableEntryIds.has(block.anchor.beforeEntryId) : true;
-    const after = block.anchor.afterEntryId ? availableEntryIds.has(block.anchor.afterEntryId) : true;
+    const coverageAvailable = block.coverage.effectiveEntryIds.every(present);
+    const before = block.anchor.beforeEntryId ? present(block.anchor.beforeEntryId) : true;
+    const after = block.anchor.afterEntryId ? present(block.anchor.afterEntryId) : true;
     // A missing recorded side is an open boundary. A block created at the
     // tail has no afterEntryId, so a later append must not make its anchor
     // invalid merely because a new entry now exists after the block. Recorded
     // boundaries still protect against a branch edit or deleted neighbour.
     const currentAnchor = validAnchors.get(block.blockId);
-    const anchorValid = validAnchors.size === 0 || (currentAnchor !== undefined && anchorMatches(block.anchor, currentAnchor));
+    const anchorValid = validAnchors.size === 0 || (currentAnchor !== undefined && anchorMatches(block.anchor, currentAnchor, unprojectedEntryIds));
     block.available = coverageAvailable && before && after && anchorValid;
     if (!block.available) block.active = false;
   }
   return next;
 }
 
-function anchorMatches(recorded: CreatedBlock["anchor"], current: CreatedBlock["anchor"]): boolean {
-  return (recorded.beforeEntryId === undefined || recorded.beforeEntryId === current.beforeEntryId)
-    && (recorded.afterEntryId === undefined || recorded.afterEntryId === current.afterEntryId);
+function anchorMatches(recorded: CreatedBlock["anchor"], current: CreatedBlock["anchor"], unprojectedEntryIds: ReadonlySet<string>): boolean {
+  const side = (recordedId: string | undefined, currentId: string | undefined): boolean =>
+    recordedId === undefined || unprojectedEntryIds.has(recordedId) || recordedId === currentId;
+  return side(recorded.beforeEntryId, current.beforeEntryId) && side(recorded.afterEntryId, current.afterEntryId);
 }

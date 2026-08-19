@@ -1,61 +1,54 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { latestBaseline, type DcpRuntime } from "../runtime.ts";
+import { type DcpRuntime } from "../runtime.ts";
 import { stableNudgeText, type NudgeType } from "../transform/metadata.ts";
-import { buildEligibility, compressibleSegments } from "../compression/eligibility.ts";
 
 /** Marker every transient status message starts with; also identifies the block
  * carrying the request's tail cache breakpoint (see transform/cache-breakpoint.ts). */
 export const STATUS_PREFIX = "[pi-dcp status]";
 
 /**
- * Every provider wire adapter renders pi-dcp's "custom" role as a plain
- * "user" message (see transform/adapters.ts canonicalWire) because no
- * provider API has a real "custom" role. That means this status ping is
- * indistinguishable, on the wire, from a message the human actually typed -
- * it lands as the newest turn, which is exactly the turn a model is most
- * likely to feel compelled to respond to. This label is the only defense
- * against that: it must say, up front, that the line is inert telemetry and
- * not a request. Keep it short (it is re-sent every single turn) but never
- * remove this framing.
+ * Build the transient, model-visible request suffix. It exists only to deliver
+ * a pending nudge, and therefore appears on almost no requests at all.
+ *
+ * Why nothing else is sent here. Pi's `convertToLlm`
+ * (core/messages.js) maps pi-dcp's "custom" role to a plain "user" message, so
+ * anything returned from this function lands as a brand-new user turn at the
+ * tail of the request - the turn a model is statistically most likely to feel
+ * compelled to answer. An earlier revision paid that cost on *every* request
+ * to list which mNNNN units were compressible right now. That inventory was
+ * pure derived data: the inline <pi-dcp-message-id> tags already say which
+ * units exist and which are permanently BLOCKED, and the only missing fact -
+ * which recent user turns are still live - is a fixed rule, now stated once in
+ * the cached system prompt (see prompts/defaults.ts selectionRules). Sending
+ * derived data as a fresh conversational turn, forever, to save the model one
+ * subtraction was the wrong trade.
+ *
+ * Position is not negotiable, which is why the nudge still goes here rather
+ * than into the system prompt. Anthropic prompt caching is a prefix hierarchy
+ * (tools, then system, then messages), so any per-request byte placed in the
+ * system channel invalidates the conversation cache breakpoint that sits after
+ * it - a full context re-read on every turn. Per-request content can only live
+ * after the last cache breakpoint, i.e. at the message tail, where
+ * transform/cache-breakpoint.ts already relocates the breakpoint off it.
+ *
+ * Readiness is deliberately not reported. A model that tries to compress an
+ * unavailable state gets an explanatory tool-call failure from
+ * compression/errors.ts, which is both more accurate (it is computed at the
+ * moment of use) and free on every turn the model does not call the tool.
  */
-const NOT_A_REQUEST = "background telemetry, not a request from the user - do not reply to, quote, or otherwise react to this line.";
-
-/** Build the deterministic, suffix-only model-visible request status. */
 export function buildStatusMessage(runtime: DcpRuntime): AgentMessage | undefined {
   const readiness = runtime.lastReadiness;
   if (!readiness?.ready) {
     // A nudge is tied to the successful request that published its aliases;
     // never carry it across a failed or invalidated transform.
     runtime.pendingNudge = undefined;
-    return statusMessage(`${STATUS_PREFIX} ${NOT_A_REQUEST} Compression unavailable for this request: ${readiness?.reason || "state_invalidated"}. No aliases were published. Do not call compress; retry on a later request.`);
+    return undefined;
   }
 
-  const baseline = latestBaseline(runtime);
-  // Report compressible mNNNN segments, not a first-last span: a span can
-  // straddle a BLOCKED unit and advertise a range the model cannot actually
-  // select in one compress call.
-  const span = baseline
-    ? (() => {
-        const eligibility = buildEligibility(baseline.units, { turnProtection: runtime.config.turnProtection, protectUserMessages: runtime.config.compress.protectUserMessages });
-        const segments = compressibleSegments(baseline.units, eligibility);
-        return segments.length ? segments.join(", ") : "none";
-      })()
-    : "none";
-  const activeBlocks = baseline
-    ? [...baseline.blockAliases.values()]
-      .filter((block) => {
-        const state = runtime.reduced.blocks.get(block.blockId);
-        return state?.active && state.available;
-      })
-      .map((block) => `${block.alias} (${block.topic})`)
-    : [];
-  let content = `${STATUS_PREFIX} ${NOT_A_REQUEST} Compression ready. Compressible labels: ${span}. Active blocks: ${activeBlocks.length ? activeBlocks.join(", ") : "none"}. Units outside these segments are marked BLOCKED inline.`;
   const pending = runtime.pendingNudge;
-  if (pending) {
-    content += ` ${stableNudgeText(pending.band as NudgeType)}`;
-    runtime.pendingNudge = undefined;
-  }
-  return statusMessage(content);
+  if (!pending) return undefined;
+  runtime.pendingNudge = undefined;
+  return statusMessage(`${STATUS_PREFIX} ${stableNudgeText(pending.band as NudgeType)}`);
 }
 
 function statusMessage(content: string): AgentMessage {
