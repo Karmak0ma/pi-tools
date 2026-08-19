@@ -16,6 +16,7 @@ import {
   type Model,
   type SimpleStreamOptions,
   type TextContent,
+  type ThinkingLevelMap,
   type Tool,
   type ToolCall,
 } from "@earendil-works/pi-ai";
@@ -38,6 +39,7 @@ const DEFAULT_FREE_MODELS = [
 ];
 
 let registeredModels: string[] = [];
+let registeredVariants: Map<string, string[]> = new Map();
 let lastDiscoveryTime: number | undefined;
 let lastDiscoveryError: string | undefined;
 
@@ -76,6 +78,44 @@ function looksFree(model: string): boolean {
 
 function dedupe(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+const THINKING_LEVELS = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+
+function thinkingLevelMapFor(
+  variants: string[],
+): ThinkingLevelMap | undefined {
+  if (variants.length === 0) return undefined;
+  const available = new Set(variants);
+  const map: Record<string, string | null> = {};
+  for (const level of THINKING_LEVELS) {
+    // null excludes a level from pi's supported list; undefined does not.
+    map[level] = available.has(level) ? level : null;
+  }
+  return map as ThinkingLevelMap;
+}
+
+function providerModelFor(
+  model: string,
+  thinkingMap: ThinkingLevelMap | undefined,
+) {
+  return {
+    id: model,
+    name: `${modelDisplayName(model)} (OpenCode CLI)`,
+    reasoning: thinkingMap !== undefined,
+    thinkingLevelMap: thinkingMap,
+    input: ["text"] as ("text" | "image")[],
+    contextWindow: contextWindowFor(model),
+    maxTokens: maxTokensFor(model),
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  };
 }
 
 function runCapture(
@@ -119,19 +159,63 @@ function runCapture(
   });
 }
 
+function parseVerboseModels(stdout: string): Map<string, string[]> {
+  const variantsByModel = new Map<string, string[]>();
+  const lines = stdout.split(/\r?\n/);
+  let currentModel: string | undefined;
+  let jsonLines: string[] = [];
+  const flush = () => {
+    if (!currentModel || jsonLines.length === 0) return;
+    try {
+      const record = JSON.parse(jsonLines.join("\n"));
+      const variants = record?.variants;
+      if (variants && typeof variants === "object" && !Array.isArray(variants)) {
+        const names = Object.keys(variants);
+        if (names.length > 0) variantsByModel.set(currentModel, names);
+      }
+    } catch {
+      // Malformed records degrade gracefully: the model stays reasoning:false.
+    }
+  };
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^opencode\/\S+$/.test(trimmed)) {
+      flush();
+      currentModel = trimmed;
+      jsonLines = [];
+    } else if (currentModel) {
+      jsonLines.push(line);
+    }
+  }
+  flush();
+  return variantsByModel;
+}
+
 async function discoverModels(): Promise<{
   models: string[];
+  variantsByModel: Map<string, string[]>;
   time: number;
   error: string | undefined;
 }> {
   const configured = configuredModels();
   if (configured?.length) {
     lastDiscoveryError = undefined;
-    return { models: dedupe(configured), time: Date.now(), error: undefined };
+    return {
+      models: dedupe(configured),
+      variantsByModel: new Map(),
+      time: Date.now(),
+      error: undefined,
+    };
   }
 
   try {
-    const result = await runCapture(["models", "opencode"]);
+    // --verbose exposes each model's variants map; older opencode builds may
+    // reject the flag, so fall back to the plain list (no variant data).
+    const verbose = await runCapture(["models", "opencode", "--verbose"]);
+    const result =
+      verbose.code !== 0 || !verbose.stdout.trim()
+        ? await runCapture(["models", "opencode"])
+        : verbose;
     if (result.code !== 0) {
       throw new Error(
         result.stderr.trim() ||
@@ -143,9 +227,12 @@ async function discoverModels(): Promise<{
       .map((line) => line.trim())
       .filter((line) => line.startsWith("opencode/"))
       .filter(looksFree);
+    const variantsByModel =
+      result === verbose ? parseVerboseModels(result.stdout) : new Map();
     lastDiscoveryError = undefined;
     return {
       models: dedupe(discovered.length > 0 ? discovered : DEFAULT_FREE_MODELS),
+      variantsByModel,
       time: Date.now(),
       error: undefined,
     };
@@ -153,6 +240,7 @@ async function discoverModels(): Promise<{
     lastDiscoveryError = error instanceof Error ? error.message : String(error);
     return {
       models: DEFAULT_FREE_MODELS,
+      variantsByModel: new Map(),
       time: Date.now(),
       error: lastDiscoveryError,
     };
@@ -164,8 +252,9 @@ async function refreshModels(
   ctx: { ui: { notify: (msg: string, level?: string) => void } },
 ): Promise<void> {
   const previousModels = new Set(registeredModels);
-  const { models, time, error } = await discoverModels();
+  const { models, variantsByModel, time, error } = await discoverModels();
   registeredModels = models;
+  registeredVariants = variantsByModel;
   lastDiscoveryTime = time;
 
   // Re-register the provider with the updated model list
@@ -174,15 +263,9 @@ async function refreshModels(
     baseUrl: "cli:opencode",
     apiKey: "opencode-cli-no-api-key",
     api: API_ID,
-    models: models.map((model) => ({
-      id: model,
-      name: `${modelDisplayName(model)} (OpenCode CLI)`,
-      reasoning: false,
-      input: ["text"] as const,
-      contextWindow: contextWindowFor(model),
-      maxTokens: maxTokensFor(model),
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    })),
+    models: models.map((model) =>
+      providerModelFor(model, thinkingLevelMapFor(variantsByModel.get(model) ?? [])),
+    ),
     streamSimple: streamOpenCode,
   };
 
@@ -696,6 +779,7 @@ Use the Pi tools listed in the user prompt, not OpenCode-native tools. When a Pi
 
 type OpenCodeTurnResult = {
   text: string;
+  reasoning: string;
   stderr: string;
   code: number | null;
   toolUse?: string;
@@ -707,8 +791,10 @@ async function runOpenCodeTurn(
   prompt: string,
   signal: AbortSignal | undefined,
   output: AssistantMessage,
+  variant?: string,
 ): Promise<OpenCodeTurnResult> {
   let accumulatedText = "";
+  let accumulatedReasoning = "";
   let stderr = "";
   let stdoutRemainder = "";
   let opencodeToolUse: string | undefined;
@@ -724,6 +810,7 @@ async function runOpenCodeTurn(
     "--dir",
     tempDir,
   ];
+  if (variant) args.push("--variant", variant, "--thinking");
   const child = spawn(opencodeBin(), args, {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, OPENCODE_DISABLE_UPDATE_CHECK: "1" },
@@ -746,6 +833,10 @@ async function runOpenCodeTurn(
     }
     if (event.type === "text" && typeof event.part?.text === "string") {
       accumulatedText += event.part.text;
+      return;
+    }
+    if (event.type === "reasoning" && typeof event.part?.text === "string") {
+      accumulatedReasoning += event.part.text;
       return;
     }
     if (event.type === "step_finish" && event.part?.tokens) {
@@ -789,7 +880,13 @@ async function runOpenCodeTurn(
   });
   signal?.removeEventListener("abort", abort);
   if (stdoutRemainder.trim()) handleLine(stdoutRemainder);
-  return { text: accumulatedText, stderr, code, toolUse: opencodeToolUse };
+  return {
+    text: accumulatedText,
+    reasoning: accumulatedReasoning,
+    stderr,
+    code,
+    toolUse: opencodeToolUse,
+  };
 }
 
 function streamOpenCode(
@@ -813,6 +910,10 @@ function streamOpenCode(
 
     let tempDir: string | undefined;
     const prompt = buildPrompt(context);
+    const reasoning = options?.reasoning;
+    const variant = reasoning
+      ? model.thinkingLevelMap?.[reasoning] ?? undefined
+      : undefined;
 
     try {
       stream.push({ type: "start", partial: output });
@@ -828,6 +929,7 @@ function streamOpenCode(
           requestPrompt,
           options?.signal,
           output,
+          variant,
         );
         if (options?.signal?.aborted) throw new Error("Request was aborted");
         if (result.code !== 0)
@@ -858,6 +960,29 @@ Retry now. Emit only one compact, valid <pi_tool_call>{"name":"exact_tool_name",
       const accumulatedText = result?.text ?? "";
       const toolCalls = parsed?.calls ?? [];
       setEstimatedUsage(model, output, prompt, accumulatedText);
+
+      const reasoningText = result?.reasoning ?? "";
+      if (reasoningText) {
+        const contentIndex = output.content.length;
+        output.content.push({ type: "thinking", thinking: reasoningText });
+        stream.push({
+          type: "thinking_start",
+          contentIndex,
+          partial: output,
+        });
+        stream.push({
+          type: "thinking_delta",
+          contentIndex,
+          delta: reasoningText,
+          partial: output,
+        });
+        stream.push({
+          type: "thinking_end",
+          contentIndex,
+          content: reasoningText,
+          partial: output,
+        });
+      }
 
       if (toolCalls.length > 0) {
         output.stopReason = "toolUse";
@@ -941,8 +1066,12 @@ function statusLines(): string[] {
   if (lastDiscoveryError)
     lines.push(`Discovery fallback: ${lastDiscoveryError}`);
   lines.push("");
-  for (const model of registeredModels)
-    lines.push(`  - ${PROVIDER_ID}/${model}`);
+  for (const model of registeredModels) {
+    const variants = registeredVariants.get(model);
+    const variantLabel =
+      variants && variants.length > 0 ? ` (variants: ${variants.join(", ")})` : "";
+    lines.push(`  - ${PROVIDER_ID}/${model}${variantLabel}`);
+  }
   lines.push("");
   lines.push(
     "OpenCode login is not required for the bundled free OpenCode models.",
@@ -957,8 +1086,9 @@ function statusLines(): string[] {
 }
 
 export default async function opencodePiExtension(pi: ExtensionAPI) {
-  const { models, time } = await discoverModels();
+  const { models, variantsByModel, time } = await discoverModels();
   registeredModels = models;
+  registeredVariants = variantsByModel;
   lastDiscoveryTime = time;
 
   pi.registerProvider(PROVIDER_ID, {
@@ -966,15 +1096,12 @@ export default async function opencodePiExtension(pi: ExtensionAPI) {
     baseUrl: "cli:opencode",
     apiKey: "opencode-cli-no-api-key",
     api: API_ID,
-    models: registeredModels.map((model) => ({
-      id: model,
-      name: `${modelDisplayName(model)} (OpenCode CLI)`,
-      reasoning: false,
-      input: ["text"],
-      contextWindow: contextWindowFor(model),
-      maxTokens: maxTokensFor(model),
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    })),
+    models: registeredModels.map((model) =>
+      providerModelFor(
+        model,
+        thinkingLevelMapFor(variantsByModel.get(model) ?? []),
+      ),
+    ),
     streamSimple: streamOpenCode,
   });
 
@@ -1000,8 +1127,14 @@ export default async function opencodePiExtension(pi: ExtensionAPI) {
         return;
       }
       if (sub === "models") {
-        for (const model of registeredModels)
-          ctx.ui.notify(`${PROVIDER_ID}/${model}`, "info");
+        for (const model of registeredModels) {
+          const variants = registeredVariants.get(model);
+          const variantLabel =
+            variants && variants.length > 0
+              ? ` (variants: ${variants.join(", ")})`
+              : "";
+          ctx.ui.notify(`${PROVIDER_ID}/${model}${variantLabel}`, "info");
+        }
         ctx.ui.notify(
           `Override with OPENCODE_PI_MODELS="opencode/model-a,opencode/model-b"`,
           "info",

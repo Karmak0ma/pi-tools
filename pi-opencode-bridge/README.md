@@ -85,14 +85,20 @@ OpenCode changes its free model roster frequently. Refresh the registered models
 /opencode-pi update
 ```
 
-This queries `opencode models opencode`, updates the provider's model list, and shows how many new models were added. The status command also displays the timestamp of the last discovery.
+This queries `opencode models opencode --verbose`, updates the provider's model list, and shows how many new models were added. The status command also displays the timestamp of the last discovery.
+
+## Thinking effort
+
+Models that report reasoning-effort variants (e.g. `opencode/deepseek-v4-flash-free` with `low`/`high`/`max`) are registered with extended thinking enabled, so Pi's thinking selector (`model • thinking`) offers the matching levels. Selecting a level passes `--variant <level> --thinking` to `opencode run`, and the model's reasoning text is forwarded to Pi as a thinking block; "off" runs without the flag (no reasoning tokens).
+
+Models without variants stay `reasoning: false` and only offer "off".
 
 ## Configuration
 
 | Environment variable | Description                                                                                         |
 | -------------------- | --------------------------------------------------------------------------------------------------- |
 | `OPENCODE_PI_BIN`    | Override the OpenCode executable path. Defaults to `opencode`.                                      |
-| `OPENCODE_PI_MODELS` | Comma- or space-separated model list to register. Values without `/` are prefixed with `opencode/`. |
+| `OPENCODE_PI_MODELS` | Comma- or space-separated model list to register. Values without `/` are prefixed with `opencode/`. Bypasses discovery, so variant data is unavailable and the listed models are registered with thinking off. |
 
 Example:
 
