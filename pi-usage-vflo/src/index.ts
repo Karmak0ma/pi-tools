@@ -19,6 +19,13 @@ import {
 } from "./query.js";
 import { normalizeAnthropicOauthUsagePayload } from "./providers/anthropic.js";
 import { normalizeCodexBackendPayload } from "./providers/codex.js";
+import {
+	publishSharedFailure,
+	publishSharedReport,
+	readSharedProviderEntry,
+	readSharedReportFile,
+	SHARED_REPORT_PATH,
+} from "./shared-report.js";
 import usageExtension from "./usage.js";
 
 export {
@@ -41,9 +48,16 @@ export {
 	runWithConcurrency,
 	sanitizeDisplayText,
 	UsageCache,
+	publishSharedFailure,
+	publishSharedReport,
+	readSharedProviderEntry,
+	readSharedReportFile,
+	SHARED_REPORT_PATH,
 };
 
 export default usageExtension;
+
+export type { SharedProviderEntry, SharedReportFile } from "./shared-report.js";
 
 export type {
 	AnthropicOauthUsagePayload,

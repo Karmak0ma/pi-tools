@@ -19,6 +19,7 @@ import type {
 	UsageDisplayState,
 	UsageProviderAdapter,
 } from "./types.js";
+import { publishSharedFailure, publishSharedReport, readSharedProviderEntry } from "./shared-report.js";
 import {
 	isTimeoutError,
 	modelIdentity,
@@ -204,6 +205,67 @@ export default function usageExtension(pi: ExtensionAPI): void {
 			};
 		}
 
+		// Cross-process guard against the endpoint's hard rate limit.
+		//
+		// `cache` above is a per-PROCESS, in-memory map: it stops one pi session
+		// from calling the endpoint twice inside 5 minutes, but it knows nothing
+		// about the other pi sessions that may be running at the same time, each
+		// with their own `cache`. Anthropic's usage endpoint answers 429 to a
+		// second call made a few seconds after the first, and stays locked out
+		// for minutes — so with N sessions open, N processes independently
+		// deciding "my cache is empty, I'll fetch" is exactly what causes the
+		// lockout, even though each one individually respects a 5-minute cache.
+		//
+		// The shared file (written by whichever process fetches) is the one
+		// piece of state every process can see. Before calling the network, ask
+		// it the same question a normal cache would answer: "has ANY process
+		// already got this within the last 5 minutes?" A fresh answer there is
+		// adopted exactly like a local cache hit, including seeding `cache` so
+		// this process does not re-read the file on its next call. A fresh
+		// FAILURE is treated the same way: if some other process already got
+		// rate-limited moments ago, adding our own call on top would not get us
+		// data, it would only feed the lockout, so we report that failure
+		// instead of dialing in ourselves.
+		//
+		// This still does not GUARANTEE only one process ever calls the network:
+		// two processes can both read the file in the same instant right as it
+		// goes stale (e.g. several pi sessions launched together) and both decide
+		// to fetch. That race is accepted rather than closed with a lock file,
+		// because its damage is small — one of the two calls still succeeds and
+		// publishes fresh data for everyone, the other simply reports the failure
+		// instead of hiding it — and closing it completely would add real
+		// complexity (lock acquisition, staleness timeout, cleanup on crash) for
+		// a rare, already-cheap-to-recover-from case.
+		if (!force) {
+			const shared = await readSharedProviderEntry(adapter.id);
+			const now = Date.now();
+			if (shared?.report && shared.capturedAt !== undefined && now - shared.capturedAt < CACHE_TTL_MS) {
+				cache.set(adapter.id, auth.fingerprint, shared.report, shared.capturedAt);
+				return {
+					state: {
+						providerId: adapter.id,
+						providerName: adapter.displayName,
+						displayState,
+						status: "ready",
+						report: shared.report,
+					},
+					fingerprint: auth.fingerprint,
+				};
+			}
+			if (shared?.failure && now - shared.failure.at < FAILURE_BACKOFF_MS) {
+				return {
+					state: {
+						providerId: adapter.id,
+						providerName: adapter.displayName,
+						displayState,
+						status: "query-failed",
+						message: shared.failure.message,
+					},
+					fingerprint: auth.fingerprint,
+				};
+			}
+		}
+
 		const failureKey = `${adapter.id}:${auth.fingerprint}`;
 		const previousFailure = failureBackoff.get(failureKey);
 		if (!force && previousFailure && previousFailure.until > Date.now()) {
@@ -229,6 +291,10 @@ export default function usageExtension(pi: ExtensionAPI): void {
 			if (latestQueries.get(failureKey) === queryId) {
 				cache.set(adapter.id, auth.fingerprint, report);
 				failureBackoff.delete(failureKey);
+				// This extension owns the only network call to the provider's
+				// usage endpoint (it rate limits hard), so every result is
+				// published for other extensions/processes to read.
+				void publishSharedReport(report);
 			}
 			return {
 				state: {
@@ -254,6 +320,9 @@ export default function usageExtension(pi: ExtensionAPI): void {
 					{ until: now + FAILURE_BACKOFF_MS, message },
 					MAX_ACCOUNT_STATES,
 				);
+				// Failures are published too, so readers can explain WHY the
+				// numbers are missing or stale instead of showing nothing.
+				void publishSharedFailure(adapter.id, message);
 			}
 			return {
 				state: {
