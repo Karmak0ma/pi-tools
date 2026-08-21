@@ -9,7 +9,7 @@ import { reduceEnvelope } from "../state/reducer.ts";
 import { OPERATION_CUSTOM_TYPE } from "../state/operations.ts";
 import { formatNotification, notify } from "../ui/notify.ts";
 import { hashJson } from "../util/hash.ts";
-import { clearBaselines, findBaselineForParent, latestBaseline, pinBaseline, unpinBaseline, type DcpRuntime } from "../runtime.ts";
+import { clearBaselines, findBaselineForParent, latestBaseline, noteSuccessfulCompression, pinBaseline, unpinBaseline, type DcpRuntime } from "../runtime.ts";
 import { persistSavingsBestEffort } from "../stats.ts";
 import { buildErrorText } from "./errors.ts";
 import { selectionRules } from "../prompts/defaults.ts";
@@ -50,6 +50,7 @@ Validation
 - Validation is the authority on what is selectable right now, so you never need a per-turn list: a rejected call changes nothing, names the reason, and lists the labels you may use instead. Fix the range from that list and retry once.`,
     promptSnippet: "compress older resolved context ranges",
     promptGuidelines: [
+      "After substantial work is finished and verified, use compress proactively before beginning a different substantial work phase when a useful safe range is visible.",
       "Use compress only for older closed work and complete protocol units.",
       "Use compress only with current visible mNNNN or bNNNN labels; never invent labels.",
       "Never pass compress a BLOCKED unit or a still-live recent user turn.",
@@ -177,6 +178,7 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
     pi.appendEntry(OPERATION_CUSTOM_TYPE, built.envelope);
     await persistSavingsBestEffort(built.envelope, runtime.logger);
     runtime.reduced = dryRun;
+    noteSuccessfulCompression(runtime);
     runtime.generation++;
     clearBaselines(runtime);
     runtime.lastReadiness = { ready: false, reason: "state_invalidated", generation: runtime.generation };

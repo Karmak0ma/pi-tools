@@ -740,11 +740,11 @@ Custom prompt keys mirror DCP's six names. Overrides are loaded only when `exper
 
 Nudges are ephemeral custom messages inserted only at safe protocol-unit gaps after identity mapping. Anchor identity is the canonical unit key plus nudge kind and configuration generation. The set exists in memory/snapshot only; it is reconstructed rather than persisted.
 
-- Below minimum limit: no context-limit or periodic reminder.
-- At/above minimum: every `nudgeFrequency` eligible context builds may add a soft turn reminder.
-- At/above maximum: add max warning at the latest safe anchor on every eligible build until compression, subject to stable dedup.
-- Iteration nudge: after `iterationNudgeThreshold` assistant/tool iterations since the last real user turn.
-- Turn nudge: after a user turn according to `nudgeForce` (`soft` recommends, `strong` directs).
+- Below minimum limit: no context-limit reminder; semantic reminders still require their savings guard.
+- At/above minimum: `nudge.turnsBetweenNudges` controls the cooldown for soft context reminders.
+- At/above maximum: add a max warning at the latest safe anchor on every eligible build until compression, subject to stable dedup.
+- Iteration nudge: after `nudge.iterationNudgeThreshold` assistant/tool iterations since the last real user turn, when estimated potential savings meet `nudge.minPotentialSavingsTokens`.
+- Turn nudge: after `nudge.turnNudgeFrequency` user-turn boundaries, when estimated potential savings meet `nudge.minPotentialSavingsTokens`. Both semantic nudges are soft.
 
 Never inject between call/result halves. Never count DCP metadata/custom summaries as user turns. Nudges contain no persisted `m` references from another snapshot.
 
@@ -789,6 +789,13 @@ The proposal intentionally starts with the observed DCP values unless noted.
 | `manualMode.automaticStrategies` | true | dedup/purge still run |
 | `turnProtection.enabled` | false | protect recent turns |
 | `turnProtection.turns` | 4 | integer 1..100 |
+| `nudge.minContextPercent` | 35 | context-pressure reminder floor |
+| `nudge.maxContextPercent` | 70 | imperative context-pressure threshold |
+| `nudge.criticalContextPercent` | 90 | critical context-pressure threshold |
+| `nudge.turnsBetweenNudges` | 5 | context-pressure reminder cooldown |
+| `nudge.turnNudgeFrequency` | 5 | user turns before semantic reminder |
+| `nudge.iterationNudgeThreshold` | 15 | assistant/tool iterations before semantic reminder |
+| `nudge.minPotentialSavingsTokens` | 12000 | estimated savings floor for semantic reminders |
 | `experimental.allowSubAgents` | false | future protocol only |
 | `experimental.customPrompts` | false | prompt files ignored |
 | `experimental.messageMode` | false | required in addition to mode `message` |
@@ -801,8 +808,6 @@ The proposal intentionally starts with the observed DCP values unless noted.
 | `compress.minContextLimit` | 50000 | positive integer or `N%`, <= max |
 | `compress.modelMaxLimits` | absent | `provider/model -> limit` |
 | `compress.modelMinLimits` | absent | same |
-| `compress.nudgeFrequency` | 5 | integer 1..1000 |
-| `compress.iterationNudgeThreshold` | 15 | integer 1..1000 |
 | `compress.nudgeForce` | `soft` | `soft|strong` |
 | `compress.protectedTools` | `[]` | additions; baseline adaptation below |
 | `compress.protectUserMessages` | false | preserve text/images verbatim |

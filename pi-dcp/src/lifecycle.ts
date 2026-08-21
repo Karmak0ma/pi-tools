@@ -9,15 +9,16 @@ import { hashJson } from "./util/hash.ts";
 import { deepClone } from "./util/clone.ts";
 import { transformOutgoingContext } from "./transform/pipeline.ts";
 import { evaluateNudge } from "./transform/metadata.ts";
-import { buildStatusMessage } from "./prompts/status.ts";
+import { buildNudgeMessage } from "./prompts/nudge.ts";
 import { stripEchoedLabels } from "./transform/echo.ts";
 import { relocateCacheBreakpoint } from "./transform/cache-breakpoint.ts";
 import { evaluateSettledStrategies } from "./strategies/settle.ts";
 import { createEnvelope, isOperationEnvelope, OPERATION_CUSTOM_TYPE, type OpEnvelope } from "./state/operations.ts";
 import { reduceEnvelope, markAvailability, type ReducedState } from "./state/reducer.ts";
-import { clearBaselines, disableRuntime, invalidateSnapshot, publishBaseline, runtimeSessionIdentity, setDcpToolActive, type DcpRuntime } from "./runtime.ts";
+import { clearBaselines, disableRuntime, invalidateSnapshot, publishBaseline, resetSemanticNudges, runtimeSessionIdentity, setDcpToolActive, type DcpRuntime } from "./runtime.ts";
 import { modelKey } from "./identity/snapshot.ts";
 import { buildSystemGuidance } from "./prompts/defaults.ts";
+import { estimatePotentialSavings, evaluateSemanticNudge } from "./transform/semantic-nudge.ts";
 import { persistMissingSavingsBestEffort, persistSavingsBestEffort } from "./stats.ts";
 import { bindCompressionProvenance } from "./compression/tool.ts";
 import { stripLeakedLabelTags } from "./ui/strip-labels.ts";
@@ -39,11 +40,14 @@ export function registerLifecycle(pi: ExtensionAPI, runtime: DcpRuntime): void {
   // retained baseline for a tool call already in flight.
   pi.on("turn_start", (_event, ctx) => {
     runtime.turnCount++;
+    observeLatestUserTurn(latestUserEntryId(ctx), runtime);
+    runtime.semanticIterationsSinceUserTurn++;
+    runtime.semanticIterationsSinceNudge++;
     if (lastAssistantContainsCompress(ctx)) runtime.pendingNudge = undefined;
   });
   pi.on("before_agent_start", async (event, ctx) => beforeAgentStart(event, ctx, runtime));
   pi.on("context", async (event: ContextEvent, ctx) => transformContext(event, ctx, runtime));
-  // The status suffix would otherwise carry the provider's rolling prompt-cache
+  // The nudge suffix would otherwise carry the provider's rolling prompt-cache
   // breakpoint, which no later request can ever read back.
   pi.on("before_provider_request", (event) => relocateCacheBreakpoint(event.payload));
   // Strip label tags the model wrote into its own reply, before that reply is
@@ -89,9 +93,13 @@ async function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext, r
   if (rebuilt.legacyIgnored) runtime.logger.diagnostic({ reason: "legacy_state_ignored", counts: { entries: rebuilt.legacyOperationEntries } });
   if (rebuilt.operationEntries === 0) runtime.reduced.manualMode = loaded.config.manualMode.enabled;
   const initialProjection = projectContextEntries(ctx.sessionManager.buildContextEntries());
+  resetSemanticNudges(runtime);
   if (initialProjection.ok) {
     const initialIndex = buildProtocolUnits(initialProjection.messages);
-    if ("units" in initialIndex) runtime.reduced = reconcileAvailability(runtime.reduced, initialIndex, initialProjection.unprojectedEntryIds);
+    if ("units" in initialIndex) {
+      runtime.reduced = reconcileAvailability(runtime.reduced, initialIndex, initialProjection.unprojectedEntryIds);
+      runtime.lastSeenUserUnitKey = latestUserUnitKey(initialIndex);
+    }
   }
   runtime.generation++;
   clearBaselines(runtime);
@@ -99,7 +107,6 @@ async function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext, r
   runtime.lastNudgeTurn = undefined;
   runtime.lastNudgeEvaluation = undefined;
   runtime.pendingManual = undefined;
-  runtime.pendingNudge = undefined;
   runtime.mutationBlocked = false;
   runtime.valid = !runtime.reduced.corruptReason && runtime.config.enabled && !runtime.warnedReasonCodes.has("tool_collision");
   runtime.lastReadiness = runtime.valid
@@ -131,6 +138,8 @@ async function rebase(ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionA
     runtime.lastSettledSuffixHash = undefined;
     runtime.lastNudgeTurn = undefined;
     runtime.lastNudgeEvaluation = undefined;
+    resetSemanticNudges(runtime);
+    runtime.lastSeenUserUnitKey = "units" in index ? latestUserUnitKey(index) : undefined;
     runtime.generation++;
     runtime.mutationBlocked = false;
     if (runtime.reduced.corruptReason) {
@@ -148,22 +157,22 @@ async function beforeAgentStart(event: BeforeAgentStartEvent, _ctx: ExtensionCon
   // session, so the system prefix stays byte-stable and cacheable.
   //
   // Nudges are operation-backed for replay/audit; their model-visible delivery
-  // stays transient and happens in the status suffix of context, because a
+  // stays transient and happens in the nudge suffix of context, because a
   // per-request byte in the system channel would invalidate the whole
-  // conversation cache (see prompts/status.ts).
+  // conversation cache (see prompts/nudge.ts).
   return { systemPrompt: `${event.systemPrompt}\n\n${buildSystemGuidance(runtime.config)}` };
 }
 
 async function transformContext(event: ContextEvent, ctx: ExtensionContext, runtime: DcpRuntime): Promise<{ messages: AgentMessage[] }> {
   const fallback = deepClone(event.messages);
   if (!runtime.valid) {
-    const status = buildStatusMessage(runtime);
-    return { messages: status ? [...fallback, status] : fallback };
+    const nudge = buildNudgeMessage(runtime);
+    return { messages: nudge ? [...fallback, nudge] : fallback };
   }
   if (runtime.mutationBlocked) {
     runtime.lastReadiness = { ready: false, reason: "state_invalidated", generation: runtime.generation };
-    const status = buildStatusMessage(runtime);
-    return { messages: status ? [...fallback, status] : fallback };
+    const nudge = buildNudgeMessage(runtime);
+    return { messages: nudge ? [...fallback, nudge] : fallback };
   }
   return runtime.mutex.runExclusive(() => {
     const result = transformOutgoingContext(event.messages, {
@@ -214,8 +223,8 @@ async function transformContext(event: ContextEvent, ctx: ExtensionContext, runt
       confidence: result.confidence,
       reason: result.reason,
     };
-    const status = buildStatusMessage(runtime);
-    return { messages: status ? [...result.messages, status] : result.messages };
+    const nudge = buildNudgeMessage(runtime);
+    return { messages: nudge ? [...result.messages, nudge] : result.messages };
   });
 }
 
@@ -263,6 +272,28 @@ function flushFallbackNotice(runtime: DcpRuntime, pi: ExtensionAPI): void {
   } catch { /* a warning must never break the turn it is warning about */ }
 }
 
+function latestUserEntryId(ctx: ExtensionContext | undefined): string | undefined {
+  if (!ctx) return undefined;
+  const entries = ctx.sessionManager.buildContextEntries();
+  return [...entries].reverse().find((entry) => entry.type === "message" && entry.message.role === "user")?.id;
+}
+
+function latestUserUnitKey(index: { units: { role: string; entryIds: string[] }[] }): string | undefined {
+  const unit = [...index.units].reverse().find((candidate) => candidate.role === "user");
+  return unit?.entryIds.at(-1);
+}
+
+/** Observe a new user boundary without treating assistant/tool loop turns as user work. */
+function observeLatestUserTurn(userKey: string | undefined, runtime: DcpRuntime): void {
+  if (!userKey || userKey === runtime.lastSeenUserUnitKey) return;
+  if (runtime.lastSeenUserUnitKey !== undefined) {
+    runtime.semanticUserTurnsSinceCompression++;
+    runtime.semanticUserTurnsSinceNudge++;
+    runtime.semanticIterationsSinceUserTurn = 0;
+  }
+  runtime.lastSeenUserUnitKey = userKey;
+}
+
 function lastAssistantContainsCompress(ctx: ExtensionContext | undefined): boolean {
   if (!ctx) return false;
   const last = [...ctx.sessionManager.getBranch()].reverse().find((entry) => entry.type === "message" && entry.message.role === "assistant");
@@ -282,6 +313,7 @@ async function onSettled(ctx: ExtensionContext, runtime: DcpRuntime, pi: Extensi
       const index = buildProtocolUnits(projection.messages);
       if (!("units" in index)) return;
       runtime.reduced = reconcileAvailability(rebuilt.state, index, projection.unprojectedEntryIds);
+      observeLatestUserTurn(latestUserUnitKey(index), runtime);
 
       // Automatic strategies are explicitly gated here. Manual mode no longer
       // makes evaluateSettledStrategies silently discard the configured flag.
@@ -320,17 +352,32 @@ async function onSettled(ctx: ExtensionContext, runtime: DcpRuntime, pi: Extensi
       // settled work has completed. This keeps configGeneration equal to the
       // generation that beforeAgentStart will use for delivery.
       const usage = ctx.getContextUsage();
-      const evaluation = evaluateNudge(usage?.tokens, runtime.config, usage?.contextWindow || ctx.model?.contextWindow || 0, runtime.lastNudgeTurn === undefined ? Number.POSITIVE_INFINITY : runtime.turnCount - runtime.lastNudgeTurn, runtime.lastNudgeTurn === runtime.turnCount, ctx.model?.id);
+      const contextEvaluation = evaluateNudge(usage?.tokens, runtime.config, usage?.contextWindow || ctx.model?.contextWindow || 0, runtime.lastNudgeTurn === undefined ? Number.POSITIVE_INFINITY : runtime.turnCount - runtime.lastNudgeTurn, runtime.lastNudgeTurn === runtime.turnCount, ctx.model?.id);
+      const potential = estimatePotentialSavings(index, runtime.reduced, runtime.config, ctx.cwd);
+      const semanticEvaluation = evaluateSemanticNudge({
+        userTurnsSinceCompression: runtime.semanticUserTurnsSinceCompression,
+        iterationsSinceUserTurn: runtime.semanticIterationsSinceUserTurn,
+        userTurnsSinceNudge: runtime.semanticUserTurnsSinceNudge,
+        iterationsSinceNudge: runtime.semanticIterationsSinceNudge,
+      }, potential.estimatedSavingsTokens, runtime.config, runtime.lastNudgeTurn === runtime.turnCount);
+      const evaluation = contextEvaluation.decision
+        ? { ...contextEvaluation, potentialSavingsTokens: potential.estimatedSavingsTokens }
+        : { ...semanticEvaluation, tokens: usage?.tokens, contextWindow: usage?.contextWindow || ctx.model?.contextWindow || 0, modelId: ctx.model?.id, min: contextEvaluation.min, max: contextEvaluation.max, critical: contextEvaluation.critical, turnsSinceNudge: contextEvaluation.turnsSinceNudge, potentialSavingsTokens: potential.estimatedSavingsTokens };
       runtime.lastNudgeEvaluation = evaluation;
-      if (evaluation.decision && runtime.lastReadiness?.ready) {
+      const automaticNudgesAllowed = runtime.lastReadiness?.ready
+        && runtime.config.compress.permission !== "deny"
+        && !runtime.reduced.manualMode;
+      if (evaluation.decision && automaticNudgesAllowed) {
         const branchAnchor = ctx.sessionManager.getLeafId();
-        const nudgeKey = hashJson([branchAnchor, evaluation.decision.type, runtime.generation]);
+        const nudgeKey = hashJson([branchAnchor, evaluation.decision.kind, evaluation.decision.type, runtime.generation]);
         if (!runtime.reduced.nudges.has(nudgeKey)) {
-          const envelope = createEnvelope({ type: "nudge.requested", nudgeKey, band: evaluation.decision.type, branchAnchor, configGeneration: runtime.generation }, runtime.sessionId, VERSION, hashJson(["nudge", nudgeKey]));
+          const envelope = createEnvelope({ type: "nudge.requested", nudgeKey, kind: evaluation.decision.kind, band: evaluation.decision.type, branchAnchor, configGeneration: runtime.generation }, runtime.sessionId, VERSION, hashJson(["nudge", nudgeKey]));
           pi.appendEntry(OPERATION_CUSTOM_TYPE, envelope);
           runtime.reduced = reduceEnvelope(runtime.reduced, envelope);
-          runtime.pendingNudge = { band: evaluation.decision.type, nudgeKey };
+          runtime.pendingNudge = { band: evaluation.decision.type, kind: evaluation.decision.kind, nudgeKey };
           runtime.lastNudgeTurn = runtime.turnCount;
+          runtime.semanticUserTurnsSinceNudge = 0;
+          runtime.semanticIterationsSinceNudge = 0;
           await persistSavingsBestEffort(envelope, runtime.logger);
         }
       }

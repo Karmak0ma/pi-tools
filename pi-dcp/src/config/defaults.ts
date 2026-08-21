@@ -6,7 +6,15 @@ export const defaults = {
   commands: { enabled: true, protectedTools: ["compress", "write", "edit", "todo"] as string[] },
   manualMode: { enabled: false, automaticStrategies: true },
   turnProtection: { enabled: false, turns: 4 },
-  nudge: { minContextPercent: 35, maxContextPercent: 70, criticalContextPercent: 90, turnsBetweenNudges: 5 },
+  nudge: {
+    minContextPercent: 35,
+    maxContextPercent: 70,
+    criticalContextPercent: 90,
+    turnsBetweenNudges: 5,
+    turnNudgeFrequency: 5,
+    iterationNudgeThreshold: 15,
+    minPotentialSavingsTokens: 12000,
+  },
   protectedFilePatterns: [] as string[],
   compress: {
     permission: "allow",
@@ -16,8 +24,6 @@ export const defaults = {
     minContextLimit: 50000,
     modelMaxLimits: {} as Record<string, number | string>,
     modelMinLimits: {} as Record<string, number | string>,
-    nudgeFrequency: 5,
-    iterationNudgeThreshold: 15,
     // No hardcoded floor here (unlike commands.protectedTools): a match
     // absorbs the tool's output into the summary verbatim rather than
     // blocking the range, so "write"/"edit" are deliberately left out by
@@ -42,7 +48,15 @@ export type EffectiveConfig = {
   commands: { enabled: boolean; protectedTools: string[] };
   manualMode: { enabled: boolean; automaticStrategies: boolean };
   turnProtection: { enabled: boolean; turns: number };
-  nudge: { minContextPercent: number; maxContextPercent: number; criticalContextPercent: number; turnsBetweenNudges: number };
+  nudge: {
+    minContextPercent: number;
+    maxContextPercent: number;
+    criticalContextPercent: number;
+    turnsBetweenNudges: number;
+    turnNudgeFrequency: number;
+    iterationNudgeThreshold: number;
+    minPotentialSavingsTokens: number;
+  };
   protectedFilePatterns: string[];
   compress: {
     permission: "allow" | "ask" | "deny";
@@ -52,8 +66,6 @@ export type EffectiveConfig = {
     minContextLimit: number | string;
     modelMaxLimits: Record<string, number | string>;
     modelMinLimits: Record<string, number | string>;
-    nudgeFrequency: number;
-    iterationNudgeThreshold: number;
     protectedTools: string[];
     protectUserMessages: boolean;
   };

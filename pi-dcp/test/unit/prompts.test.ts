@@ -21,6 +21,11 @@ describe("compression prompts", () => {
     expect(guidance).toContain("BLOCKED");
     expect(guidance).toContain("protocol unit");
     expect(guidance).toContain("whole units");
+    expect(guidance).toContain("Compression is part of normal task execution, not optional cleanup");
+    expect(guidance).toContain("Do not wait for the user to request compression or for context pressure");
+    expect(guidance).toContain("before starting a different substantial phase");
+    expect(guidance).toContain("Continue without compression only when no safe closed range is visible");
+    expect(guidance).not.toContain("Act on it or ignore it as you judge best");
   });
 
   it("states the turn-relative rule so no per-request label list is needed", () => {
@@ -30,7 +35,7 @@ describe("compression prompts", () => {
     const guidance = buildSystemGuidance(config());
     expect(guidance).toContain("The newest user turn is still live");
     expect(guidance).toContain("derive it from the two rules above");
-    // No inventory promise anywhere: the tool, not a status line, is the
+    // No inventory promise anywhere: the tool, not a nudge line, is the
     // authority on what is selectable right now.
     expect(guidance).not.toContain("eligible for compress right now");
     expect(guidance).toContain("The compress tool is the authority");
@@ -66,5 +71,8 @@ describe("compression prompts", () => {
     // system prompt does, so the two can never disagree.
     expect(registered.description).toContain(selectionRules(runtime.config));
     expect(registered.description).toContain("you never need a per-turn list");
+    expect(registered.promptGuidelines).toContain(
+      "After substantial work is finished and verified, use compress proactively before beginning a different substantial work phase when a useful safe range is visible.",
+    );
   });
 });

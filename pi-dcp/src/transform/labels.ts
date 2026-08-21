@@ -103,7 +103,7 @@ export function injectInlineLabels(
     // tag would change a historical message's bytes on every later
     // transform and defeat prompt-cache prefix stability. They are enforced
     // at actual compress-call time in service.ts and surfaced through the
-    // transient, non-cached status/error text instead (prompts/status.ts,
+    // transient, non-cached nudge/error text instead (prompts/nudge.ts,
     // compression/errors.ts).
     const unit = units[unitIndex];
     const tag = unit.compressible ? unitAlias(unitIndex) : "BLOCKED";

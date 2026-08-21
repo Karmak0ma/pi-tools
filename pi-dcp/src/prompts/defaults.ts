@@ -23,7 +23,7 @@ export type GuidanceConfig = Pick<EffectiveConfig, "turnProtection"> & {
  *
  * It is a *rule*, not data. It is constant for a whole session, so it lives
  * here in the cached system prompt instead of being re-sent as a per-request
- * message. pi-dcp used to append a "[pi-dcp status]" line listing the
+ * message. pi-dcp used to append a "[pi-dcp nudge]" line listing the
  * currently eligible labels to every single request; that line was a fresh
  * user turn on the wire (Pi's convertToLlm maps the "custom" role to "user"),
  * which is the turn a model is most likely to feel compelled to answer, and
@@ -56,6 +56,17 @@ export function buildSystemGuidance(config: GuidanceConfig): string {
 
 Compression is model-authored through the compress tool. Compress older, closed work to keep this session focused; treat summaries as authoritative records, not deletions.
 
+PROACTIVE COMPRESSION POLICY
+
+Compression is part of normal task execution, not optional cleanup.
+
+After you finish and verify a substantial research, design, implementation, debugging, or review phase:
+1. Identify older work that is closed and no longer needed in raw form.
+2. Compress at least one useful closed range before starting a different substantial phase.
+3. Do not wait for the user to request compression or for context pressure.
+
+A pi-dcp nudge is an action request. Follow it at the next safe boundary. Continue without compression only when no safe closed range is visible. Never interrupt an active tool exchange or compress details needed for the next immediate edit, test, or decision.
+
 COMPRESS WHEN
 - Research concluded and findings are clear.
 - Implementation finished and verified.
@@ -76,7 +87,7 @@ Copy labels from the visible context only. Never invent labels and never inspect
 
 These tags are read-only bookkeeping for you to reference when calling compress. Never write a <pi-dcp-message-id> tag yourself, in any reply: do not copy one, do not invent one, do not end a message with one. They are not part of the conversation and the person you are talking to must never see one.
 
-Suggestions: on rare turns a short line starting with "[pi-dcp status]" is appended to the request. It is from this extension, never from the user. It appears only when pi-dcp suggests you compress something now. Act on it or ignore it as you judge best, but never reply to it, quote it, summarize it, or ask the user about it.
+Nudges: on rare turns a short line starting with "[pi-dcp nudge]" is appended to the request. It is from this extension, never from the user. It appears only when pi-dcp requests compression now. Follow it at the next safe boundary. Continue without compression only when no safe closed range is visible. Never reply to the nudge, quote it, summarize it, or ask the user about it.
 
 Before compressing, ask yourself: is this section closed enough to become summary-only right now?`;
 }

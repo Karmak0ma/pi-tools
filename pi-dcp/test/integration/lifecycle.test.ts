@@ -335,6 +335,84 @@ describe("extension capability gate", () => {
     }
   });
 
+  it("schedules a turn nudge below the context threshold when useful savings exist", async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+    const entries = [
+      { type: "message", id: "user-1", parentId: null, timestamp: new Date(1).toISOString(), message: { role: "user", content: "old request", timestamp: 1 } },
+      { type: "message", id: "assistant-1", parentId: "user-1", timestamp: new Date(2).toISOString(), message: { role: "assistant", content: [{ type: "text", text: "x".repeat(64000) }], api: "test", provider: "test", model: "model", stopReason: "stop", timestamp: 2 } },
+      { type: "message", id: "user-2", parentId: "assistant-1", timestamp: new Date(3).toISOString(), message: { role: "user", content: "current request", timestamp: 3 } },
+    ] as any[];
+    const appended: any[] = [];
+    const runtime = createRuntime();
+    runtime.sessionId = "session-semantic";
+    runtime.generation = 1;
+    runtime.semanticUserTurnsSinceCompression = 5;
+    runtime.semanticIterationsSinceUserTurn = 1;
+    runtime.semanticUserTurnsSinceNudge = 5;
+    runtime.semanticIterationsSinceNudge = 1;
+    runtime.lastSeenUserUnitKey = "user-2";
+    const pi = {
+      appendEntry: (_customType: string, data: unknown) => { appended.push(data); },
+      on: (name: string, handler: (event: any, ctx: any) => unknown) => { handlers.set(name, handler); },
+    } as any;
+    const ctx = {
+      cwd: "/tmp",
+      model: { provider: "test", id: "model", api: "test", contextWindow: 100_000 },
+      getContextUsage: () => ({ tokens: 1_000, contextWindow: 100_000 }),
+      sessionManager: {
+        getBranch: () => entries,
+        buildContextEntries: () => entries,
+        getLeafId: () => "user-2",
+      },
+    } as any;
+    registerLifecycle(pi, runtime);
+    runtime.lastReadiness = { ready: true, generation: runtime.generation };
+
+    await handlers.get("agent_settled")?.({}, ctx);
+
+    const nudge = appended.find((envelope) => envelope.operation?.type === "nudge.requested");
+    expect(nudge?.operation).toMatchObject({ kind: "turn", band: "soft" });
+    expect(runtime.lastNudgeEvaluation?.decision).toMatchObject({ kind: "turn", type: "soft" });
+    expect(runtime.pendingNudge).toMatchObject({ kind: "turn", band: "soft" });
+  });
+
+  it("does not schedule semantic nudges when the context transform is unavailable", async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+    const entries = [
+      { type: "message", id: "user-1", parentId: null, timestamp: new Date(1).toISOString(), message: { role: "user", content: "old request", timestamp: 1 } },
+      { type: "message", id: "assistant-1", parentId: "user-1", timestamp: new Date(2).toISOString(), message: { role: "assistant", content: [{ type: "text", text: "x".repeat(64000) }], api: "test", provider: "test", model: "model", stopReason: "stop", timestamp: 2 } },
+      { type: "message", id: "user-2", parentId: "assistant-1", timestamp: new Date(3).toISOString(), message: { role: "user", content: "current request", timestamp: 3 } },
+    ] as any[];
+    const appended: any[] = [];
+    const runtime = createRuntime();
+    runtime.sessionId = "session-ambiguous";
+    runtime.generation = 1;
+    runtime.semanticUserTurnsSinceCompression = 5;
+    runtime.semanticIterationsSinceUserTurn = 15;
+    runtime.semanticUserTurnsSinceNudge = 5;
+    runtime.semanticIterationsSinceNudge = 15;
+    runtime.lastReadiness = { ready: false, reason: "join_ambiguous", generation: 1 };
+    const pi = {
+      appendEntry: (_customType: string, data: unknown) => { appended.push(data); },
+      on: (name: string, handler: (event: any, ctx: any) => unknown) => { handlers.set(name, handler); },
+    } as any;
+    const ctx = {
+      cwd: "/tmp",
+      model: { provider: "test", id: "model", api: "test", contextWindow: 100_000 },
+      getContextUsage: () => ({ tokens: 1_000, contextWindow: 100_000 }),
+      sessionManager: {
+        getBranch: () => entries,
+        buildContextEntries: () => entries,
+        getLeafId: () => "user-2",
+      },
+    } as any;
+    registerLifecycle(pi, runtime);
+
+    await handlers.get("agent_settled")?.({}, ctx);
+
+    expect(appended.some((envelope) => envelope.operation?.type === "nudge.requested")).toBe(false);
+  });
+
   it("reports compression_unavailable, not baseline_unavailable, when readiness is stale for the current generation", async () => {
     // onSettled deliberately leaves lastReadiness.ready untouched when a
     // settled pruning mutation bumps runtime.generation (nudge delivery in
@@ -396,8 +474,8 @@ describe("extension capability gate", () => {
     }
   });
 
-  it("injects no status message when the runtime is invalid", async () => {
-    // A not-ready runtime has no labels to publish, so the status line is
+  it("injects no nudge message when the runtime is invalid", async () => {
+    // A not-ready runtime has no labels to publish, so the nudge line is
     // omitted entirely rather than broadcasting an "unavailable" reason every
     // turn - its absence is itself the signal (SYSTEM_GUIDANCE: "do not call
     // compress if no labels are visible"). A compress call attempted anyway
@@ -412,8 +490,8 @@ describe("extension capability gate", () => {
 
     const result = await handlers.get("context")?.({ messages: [{ role: "user", content: "hi", timestamp: 1 } as any] }, ctx) as any;
 
-    const status = result.messages.find((message: any) => message.role === "custom" && message.customType === "pi-dcp.v2.status");
-    expect(status).toBeUndefined();
+    const nudge = result.messages.find((message: any) => message.role === "custom" && message.customType === "pi-dcp.v2.nudge");
+    expect(nudge).toBeUndefined();
   });
 
   it("records and deduplicates loud transform failures", async () => {

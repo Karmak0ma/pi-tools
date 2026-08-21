@@ -57,6 +57,14 @@ export interface DcpRuntime {
   lastModel?: ModelKey;
   lastSettledSuffixHash?: string;
   turnCount: number;
+  /** Number of settled user-turn boundaries observed since the last successful compression. */
+  semanticUserTurnsSinceCompression: number;
+  /** Number of model/tool iterations in the current user task. */
+  semanticIterationsSinceUserTurn: number;
+  /** Semantic cooldown counters, shared by turn and iteration reminders. */
+  semanticUserTurnsSinceNudge: number;
+  semanticIterationsSinceNudge: number;
+  lastSeenUserUnitKey?: string;
   lastNudgeTurn?: number;
   lastNudgeEvaluation?: NudgeEvaluation;
   warnedReasonCodes: Set<string>;
@@ -77,7 +85,7 @@ export interface DcpRuntime {
   mutationBlocked: boolean;
   logger: Logger;
   pi?: ExtensionAPI;
-  pendingNudge?: { band: "soft" | "imperative" | "critical"; nudgeKey: string };
+  pendingNudge?: { band: "soft" | "imperative" | "critical"; kind?: "context" | "turn" | "iteration"; nudgeKey: string };
 }
 
 export function createRuntime(pi?: ExtensionAPI): DcpRuntime {
@@ -93,6 +101,10 @@ export function createRuntime(pi?: ExtensionAPI): DcpRuntime {
     compressionProvenance: new Map(),
     mutex: new AsyncMutex(),
     turnCount: 0,
+    semanticUserTurnsSinceCompression: 0,
+    semanticIterationsSinceUserTurn: 0,
+    semanticUserTurnsSinceNudge: 0,
+    semanticIterationsSinceNudge: 0,
     lastReadiness: { ready: false, reason: "extension_disabled", generation: 0 },
     warnedReasonCodes: new Set(),
     mutationBlocked: false,
@@ -163,6 +175,25 @@ export function clearBaselines(runtime: DcpRuntime): void {
   runtime.baselines = createBaselineRegistry(runtime.baselines.maxEntries);
   runtime.compressionProvenance.clear();
   runtime.index = undefined;
+}
+
+/** Reset semantic reminder cadence after a successful model-authored compression. */
+export function noteSuccessfulCompression(runtime: DcpRuntime): void {
+  runtime.semanticUserTurnsSinceCompression = 0;
+  runtime.semanticIterationsSinceUserTurn = 0;
+  runtime.semanticUserTurnsSinceNudge = 0;
+  runtime.semanticIterationsSinceNudge = 0;
+  runtime.pendingNudge = undefined;
+}
+
+/** Reset ephemeral semantic counters when branch/config identity changes. */
+export function resetSemanticNudges(runtime: DcpRuntime): void {
+  runtime.semanticUserTurnsSinceCompression = 0;
+  runtime.semanticIterationsSinceUserTurn = 0;
+  runtime.semanticUserTurnsSinceNudge = 0;
+  runtime.semanticIterationsSinceNudge = 0;
+  runtime.lastSeenUserUnitKey = undefined;
+  runtime.pendingNudge = undefined;
 }
 
 export function invalidateSnapshot(runtime: DcpRuntime, increment = true): void {

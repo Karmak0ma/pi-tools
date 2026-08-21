@@ -17,8 +17,8 @@ import { hasProviderVisibleContent, LABEL_TAG_NAME } from "../../src/transform/l
  *   400 This model does not support assistant message prefill.
  *       The conversation must end with a user message.
  *
- * The bug was invisible while pi-dcp appended a transient status message to
- * every request, because that status message was itself a user-role tail.
+ * The bug was invisible while pi-dcp appended a transient nudge message to
+ * every request, because that nudge message was itself a user-role tail.
  */
 
 function harness(messages: AgentMessage[]) {

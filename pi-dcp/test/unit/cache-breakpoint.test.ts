@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { relocateCacheBreakpoint } from "../../src/transform/cache-breakpoint.ts";
-import { STATUS_PREFIX } from "../../src/prompts/status.ts";
+import { NUDGE_PREFIX } from "../../src/prompts/nudge.ts";
 
 const cc = { type: "ephemeral" };
 
-function statusMessage(marked = true) {
-  return { role: "user", content: [{ type: "text", text: `${STATUS_PREFIX} Compression ready. Current labels: m0001-m0002.`, ...(marked ? { cache_control: cc } : {}) }] };
+function nudgeMessage(marked = true) {
+  return { role: "user", content: [{ type: "text", text: `${NUDGE_PREFIX} Compression ready. Current labels: m0001-m0002.`, ...(marked ? { cache_control: cc } : {}) }] };
 }
 
 function anthropicPayload(messages: unknown[]) {
@@ -18,7 +18,7 @@ describe("cache breakpoint relocation", () => {
       { role: "user", content: [{ type: "text", text: "prompt" }] },
       { role: "assistant", content: [{ type: "thinking", thinking: "..." }, { type: "tool_use", id: "t1", name: "Bash", input: {} }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "out" }] },
-      statusMessage(),
+      nudgeMessage(),
     ]) as any;
 
     relocateCacheBreakpoint(payload);
@@ -33,7 +33,7 @@ describe("cache breakpoint relocation", () => {
     // Content of every message up to and including the marked one, with the
     // markers stripped: this is the prefix Anthropic stores and matches on.
     const cachedPrefix = () => {
-      const payload = anthropicPayload([...history.map((m) => structuredClone(m)), statusMessage()]) as any;
+      const payload = anthropicPayload([...history.map((m) => structuredClone(m)), nudgeMessage()]) as any;
       relocateCacheBreakpoint(payload);
       const index = payload.messages.findIndex((m: any) => m.content.some((b: any) => b.cache_control));
       expect(index).toBeGreaterThanOrEqual(0);
@@ -57,7 +57,7 @@ describe("cache breakpoint relocation", () => {
     const payload = anthropicPayload([
       { role: "user", content: [{ type: "text", text: "prompt" }] },
       { role: "assistant", content: [{ type: "thinking", thinking: "..." }] },
-      statusMessage(),
+      nudgeMessage(),
     ]) as any;
 
     relocateCacheBreakpoint(payload);
@@ -70,7 +70,7 @@ describe("cache breakpoint relocation", () => {
     const payload = anthropicPayload([
       { role: "user", content: [{ type: "text", text: "prompt", cache_control: cc }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "out" }] },
-      statusMessage(),
+      nudgeMessage(),
     ]) as any;
 
     relocateCacheBreakpoint(payload);
@@ -80,7 +80,7 @@ describe("cache breakpoint relocation", () => {
     expect(payload.messages[0].content[0].cache_control).toEqual(cc);
   });
 
-  it("leaves a tail that is not the status suffix untouched", () => {
+  it("leaves a tail that is not the nudge suffix untouched", () => {
     const payload = anthropicPayload([
       { role: "user", content: [{ type: "text", text: "prompt" }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "out", cache_control: cc }] },
@@ -93,11 +93,11 @@ describe("cache breakpoint relocation", () => {
   });
 
   it("is a no-op when caching is off or the payload is another provider's shape", () => {
-    const unmarked = anthropicPayload([{ role: "user", content: [{ type: "text", text: "prompt" }] }, statusMessage(false)]) as any;
+    const unmarked = anthropicPayload([{ role: "user", content: [{ type: "text", text: "prompt" }] }, nudgeMessage(false)]) as any;
     expect(relocateCacheBreakpoint(unmarked)).toBe(unmarked);
     expect(JSON.stringify(unmarked)).not.toContain("cache_control\":{\"type\":\"ephemeral\"},\"messages");
 
-    const openai = { model: "gpt", messages: [{ role: "user", content: "prompt" }, { role: "user", content: `${STATUS_PREFIX} ready` }] };
+    const openai = { model: "gpt", messages: [{ role: "user", content: "prompt" }, { role: "user", content: `${NUDGE_PREFIX} ready` }] };
     expect(JSON.stringify(relocateCacheBreakpoint(openai))).toEqual(JSON.stringify(openai));
 
     expect(relocateCacheBreakpoint(undefined)).toBeUndefined();

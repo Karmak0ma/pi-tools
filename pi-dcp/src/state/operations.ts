@@ -53,6 +53,8 @@ export interface BlockActivationChanged {
 export interface ManualModeChanged { type: "manual.changed"; enabled: boolean; }
 export interface NudgeRequested {
   type: "nudge.requested";
+  /** Optional for replay compatibility with v2 operations created before semantic nudges. */
+  kind?: "context" | "turn" | "iteration";
   nudgeKey: string;
   band: "soft" | "imperative" | "critical";
   branchAnchor: string | null;
@@ -131,7 +133,8 @@ export function isOperation(value: unknown): value is DcpOperation {
   }
   if (operation.type === "manual.changed") return typeof operation.enabled === "boolean";
   if (operation.type === "nudge.requested") {
-    return typeof operation.nudgeKey === "string" && operation.nudgeKey.length > 0
+    return (operation.kind === undefined || operation.kind === "context" || operation.kind === "turn" || operation.kind === "iteration")
+      && typeof operation.nudgeKey === "string" && operation.nudgeKey.length > 0
       && (operation.band === "soft" || operation.band === "imperative" || operation.band === "critical")
       && (operation.branchAnchor === null || typeof operation.branchAnchor === "string")
       && typeof operation.configGeneration === "number" && Number.isInteger(operation.configGeneration) && operation.configGeneration >= 0;

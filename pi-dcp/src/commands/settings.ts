@@ -1,5 +1,5 @@
 import type { ExtensionCommandContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { clearBaselines, setDcpToolActive, type DcpRuntime } from "../runtime.ts";
+import { clearBaselines, resetSemanticNudges, setDcpToolActive, type DcpRuntime } from "../runtime.ts";
 import { defaults, type EffectiveConfig } from "../config/defaults.ts";
 import { settingsPath, writeSettings } from "../config/settings.ts";
 
@@ -25,6 +25,9 @@ export async function settingsCommand(ctx: ExtensionCommandContext, pi: Extensio
     if (choice.startsWith("Maximum context: ")) { const value = await numberInput(ctx, "Maximum context percentage", String(draft.nudge.maxContextPercent), draft.nudge.minContextPercent, draft.nudge.criticalContextPercent - 1); if (value !== undefined) draft.nudge.maxContextPercent = value; continue; }
     if (choice.startsWith("Critical context: ")) { const value = await numberInput(ctx, "Critical context percentage", String(draft.nudge.criticalContextPercent), draft.nudge.maxContextPercent + 1, 100); if (value !== undefined) draft.nudge.criticalContextPercent = value; continue; }
     if (choice.startsWith("Turns between nudges: ")) { const value = await numberInput(ctx, "Turns between nudges", String(draft.nudge.turnsBetweenNudges), 1, 1000); if (value !== undefined) draft.nudge.turnsBetweenNudges = value; continue; }
+    if (choice.startsWith("Turn nudge frequency: ")) { const value = await numberInput(ctx, "User turns before semantic nudge", String(draft.nudge.turnNudgeFrequency), 1, 1000); if (value !== undefined) draft.nudge.turnNudgeFrequency = value; continue; }
+    if (choice.startsWith("Iteration nudge threshold: ")) { const value = await numberInput(ctx, "Iterations before semantic nudge", String(draft.nudge.iterationNudgeThreshold), 1, 1000); if (value !== undefined) draft.nudge.iterationNudgeThreshold = value; continue; }
+    if (choice.startsWith("Minimum nudge savings: ")) { const value = await numberInput(ctx, "Minimum estimated savings tokens", String(draft.nudge.minPotentialSavingsTokens), 1, 10000000); if (value !== undefined) draft.nudge.minPotentialSavingsTokens = value; continue; }
     if (choice.startsWith("Compression permission: ")) { const value = await ctx.ui.select("Compression permission", ["allow — model may compress", "ask — confirm before compression", "deny — disable compression", "Back"]); if (value?.startsWith("allow")) draft.compress.permission = "allow"; else if (value?.startsWith("ask")) draft.compress.permission = "ask"; else if (value?.startsWith("deny")) draft.compress.permission = "deny"; continue; }
     if (choice.startsWith("Automatic pruning: ")) { draft.manualMode.automaticStrategies = await chooseToggle(ctx, "Automatic pruning", draft.manualMode.automaticStrategies); continue; }
     if (choice.startsWith("Recent-turn protection: ")) { const turns = await chooseTurns(ctx, draft.turnProtection.turns); if (turns !== undefined) { draft.turnProtection.enabled = turns > 0; if (turns > 0) draft.turnProtection.turns = turns; } continue; }
@@ -44,6 +47,9 @@ function menuOptions(config: EffectiveConfig): string[] { return [
   `Maximum context: ${config.nudge.maxContextPercent}%`,
   `Critical context: ${config.nudge.criticalContextPercent}%`,
   `Turns between nudges: ${config.nudge.turnsBetweenNudges}`,
+  `Turn nudge frequency: ${config.nudge.turnNudgeFrequency}`,
+  `Iteration nudge threshold: ${config.nudge.iterationNudgeThreshold}`,
+  `Minimum nudge savings: ${config.nudge.minPotentialSavingsTokens}`,
   `Compression permission: ${config.compress.permission}`,
   `Automatic pruning: ${config.manualMode.automaticStrategies ? "enabled" : "disabled"}`,
   `Recent-turn protection: ${config.turnProtection.enabled ? `${config.turnProtection.turns} turns` : "off"}`,
@@ -62,4 +68,4 @@ async function chooseTurns(ctx: ExtensionCommandContext, current: number): Promi
 async function numberInput(ctx: ExtensionCommandContext, title: string, current: string, minimum: number, maximum: number): Promise<number | undefined> { while (true) { const raw = await ctx.ui.input(title, current); if (raw === undefined) return undefined; const value = Number(raw.trim().replace(/%$/, "")); if (Number.isInteger(value) && value >= minimum && value <= maximum) return value; ctx.ui.notify(`Enter a whole number from ${minimum} to ${maximum}.`, "error"); } }
 async function listInput(ctx: ExtensionCommandContext, title: string, current: string[]): Promise<string[] | undefined> { const raw = await ctx.ui.input(`${title} (comma-separated; blank clears)`, current.join(", ")); if (raw === undefined) return undefined; return [...new Set(raw.split(",").map((item) => item.trim()).filter(Boolean))]; }
 function visibleDefaults(): EffectiveConfig { const config = structuredClone(defaults) as unknown as EffectiveConfig; return config; }
-function applyConfig(runtime: DcpRuntime, pi: ExtensionAPI, config: EffectiveConfig): void { runtime.config = config; runtime.configPaths = [...new Set([...runtime.configPaths, settingsPath()])]; runtime.generation++; clearBaselines(runtime); runtime.lastNudgeTurn = undefined; const blocked = runtime.warnedReasonCodes.has("capability_missing") || runtime.warnedReasonCodes.has("tool_collision") || runtime.warnedReasonCodes.has("startup_error"); runtime.valid = !blocked && !runtime.reduced.corruptReason && config.enabled; runtime.lastReadiness = runtime.valid ? { ready: false, reason: "state_invalidated", generation: runtime.generation } : { ready: false, reason: "extension_disabled", generation: runtime.generation }; try { setDcpToolActive(pi, runtime.valid && config.compress.permission !== "deny"); } catch { /* best effort */ } }
+function applyConfig(runtime: DcpRuntime, pi: ExtensionAPI, config: EffectiveConfig): void { runtime.config = config; runtime.configPaths = [...new Set([...runtime.configPaths, settingsPath()])]; runtime.generation++; clearBaselines(runtime); runtime.lastNudgeTurn = undefined; resetSemanticNudges(runtime); const blocked = runtime.warnedReasonCodes.has("capability_missing") || runtime.warnedReasonCodes.has("tool_collision") || runtime.warnedReasonCodes.has("startup_error"); runtime.valid = !blocked && !runtime.reduced.corruptReason && config.enabled; runtime.lastReadiness = runtime.valid ? { ready: false, reason: "state_invalidated", generation: runtime.generation } : { ready: false, reason: "extension_disabled", generation: runtime.generation }; try { setDcpToolActive(pi, runtime.valid && config.compress.permission !== "deny"); } catch { /* best effort */ } }

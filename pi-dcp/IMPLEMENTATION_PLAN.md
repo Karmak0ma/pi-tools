@@ -415,6 +415,15 @@ const defaults = {
   commands: { enabled: true, protectedTools: [] },
   manualMode: { enabled: false, automaticStrategies: true },
   turnProtection: { enabled: false, turns: 4 },
+  nudge: {
+    minContextPercent: 35,
+    maxContextPercent: 70,
+    criticalContextPercent: 90,
+    turnsBetweenNudges: 5,
+    turnNudgeFrequency: 5,
+    iterationNudgeThreshold: 15,
+    minPotentialSavingsTokens: 12000
+  },
   protectedFilePatterns: [],
   compress: {
     permission: "allow",
@@ -424,8 +433,6 @@ const defaults = {
     minContextLimit: 50000,
     modelMaxLimits: {},
     modelMinLimits: {},
-    nudgeFrequency: 5,
-    iterationNudgeThreshold: 15,
     nudgeForce: "soft",
     protectedTools: [],
     protectUserMessages: false

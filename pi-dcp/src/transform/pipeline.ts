@@ -43,7 +43,7 @@ export interface TransformResult {
 }
 
 /**
- * Transform only canonical history. Transient status is appended by the
+ * Transform only canonical history. A transient nudge is appended by the
  * lifecycle after this function so it never affects joining or baselines.
  */
 export function transformOutgoingContext(input: readonly AgentMessage[], options: TransformOptions): TransformResult {

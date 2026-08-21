@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { registerLifecycle } from "../../src/lifecycle.ts";
 import { createRuntime } from "../../src/runtime.ts";
 
-describe("status/cache soak", () => {
+describe("nudge/cache soak", () => {
   it("keeps the transformed prefix stable across repeated turns", async () => {
     const handlers = new Map<string, (event: any, ctx: any) => Promise<any>>();
     const pi = { on: (name: string, handler: (event: any, ctx: any) => Promise<any>) => { handlers.set(name, handler); } } as any;
@@ -24,9 +24,9 @@ describe("status/cache soak", () => {
       // bought: an ordinary request carries zero fabricated turns, so the
       // whole transformed array is a strictly growing, byte-stable prefix and
       // the provider cache breakpoint never has to be relocated off a tail
-      // that changes every request (see prompts/status.ts).
-      const hasStatus = transformed.messages.some((message: any) => message.customType === "pi-dcp.v2.status");
-      expect(hasStatus).toBe(false);
+      // that changes every request (see prompts/nudge.ts).
+      const hasNudge = transformed.messages.some((message: any) => message.customType === "pi-dcp.v2.nudge");
+      expect(hasNudge).toBe(false);
       const body = transformed.messages;
       if (previousBody) expect(body.slice(0, previousBody.length)).toEqual(previousBody);
       previousBody = body;

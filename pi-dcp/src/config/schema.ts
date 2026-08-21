@@ -38,7 +38,6 @@ export function mergeConfig(base: EffectiveConfig, patch: Record<string, unknown
       else if (child === "modelMaxLimits" || child === "modelMinLimits") target[child] = limitsMap(childValue, `${key}.${child}`);
       else if (child === "permission") target[child] = enumValue(childValue, ["allow", "ask", "deny"], `${key}.${child}`);
       else if (child === "maxContextLimit" || child === "minContextLimit") { target[child] = limitValue(childValue, `${key}.${child}`); if (typeof childValue === "string") result.nudge[child === "maxContextLimit" ? "maxContextPercent" : "minContextPercent"] = Number(childValue.slice(0, -1)); }
-      else if (child === "nudgeFrequency") { target[child] = positiveInteger(childValue, `${key}.${child}`); result.nudge.turnsBetweenNudges = target[child] as number; }
       else if (typeof target[child] === "boolean") target[child] = booleanValue(childValue, `${key}.${child}`);
       else target[child] = positiveInteger(childValue, `${key}.${child}`);
     }
@@ -47,11 +46,10 @@ export function mergeConfig(base: EffectiveConfig, patch: Record<string, unknown
   if (typeof result.compress.minContextLimit === typeof result.compress.maxContextLimit) { const minLimit = comparableLimit(result.compress.minContextLimit); const maxLimit = comparableLimit(result.compress.maxContextLimit); if (minLimit > maxLimit) throw new Error("minContextLimit cannot exceed maxContextLimit"); }
   if (result.nudge.minContextPercent > result.nudge.maxContextPercent) throw new Error("nudge.minContextPercent cannot exceed nudge.maxContextPercent");
   if (result.nudge.maxContextPercent >= result.nudge.criticalContextPercent) throw new Error("nudge.maxContextPercent must be below nudge.criticalContextPercent");
-  if (result.compress.nudgeFrequency < 1 || result.compress.iterationNudgeThreshold < 1) throw new Error("nudge limits must be positive");
   return result;
 }
 
-function mergeNudge(target: EffectiveConfig["nudge"], raw: unknown, warnings: string[] = []): void { if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("nudge must be an object"); for (const [child, value] of Object.entries(raw as Record<string, unknown>)) { if (child === "minContextPercent" || child === "maxContextPercent" || child === "criticalContextPercent") target[child] = percentageValue(value, `nudge.${child}`); else if (child === "turnsBetweenNudges") target.turnsBetweenNudges = positiveInteger(value, "nudge.turnsBetweenNudges"); else if (child === "type") warnings.push("deprecated configuration key ignored: nudge.type"); else throw new Error(`unknown configuration key: nudge.${child}`); } }
+function mergeNudge(target: EffectiveConfig["nudge"], raw: unknown, warnings: string[] = []): void { if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("nudge must be an object"); for (const [child, value] of Object.entries(raw as Record<string, unknown>)) { if (child === "minContextPercent" || child === "maxContextPercent" || child === "criticalContextPercent") target[child] = percentageValue(value, `nudge.${child}`); else if (child === "turnsBetweenNudges" || child === "turnNudgeFrequency" || child === "iterationNudgeThreshold" || child === "minPotentialSavingsTokens") target[child] = positiveInteger(value, `nudge.${child}`); else if (child === "type") warnings.push("deprecated configuration key ignored: nudge.type"); else throw new Error(`unknown configuration key: nudge.${child}`); } }
 function percentageValue(value: unknown, key: string): number { if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 100) throw new Error(`${key} must be an integer from 1 to 100`); return value; }
 function booleanValue(value: unknown, key: string): boolean { if (typeof value !== "boolean") throw new Error(`${key} must be boolean`); return value; }
 function stringArray(value: unknown, key: string): string[] { if (!Array.isArray(value) || value.some((x) => typeof x !== "string")) throw new Error(`${key} must be a string array`); return [...value]; }
