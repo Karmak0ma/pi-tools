@@ -28,7 +28,7 @@ const BUILTIN_AGENTS: AgentConfig[] = [
     description: "Fast read-only codebase reconnaissance using the configured Luna model",
     tools: ["read", "grep", "find", "ls", "bash"],
     model: "openai-codex/gpt-5.6-luna",
-    thinking: "low",
+    thinking: "medium",
     systemPrompt: `You are an exploration agent. Your job is to quickly scan and understand codebases.
 
 Rules:
