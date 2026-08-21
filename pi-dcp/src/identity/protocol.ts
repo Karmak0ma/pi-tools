@@ -44,6 +44,13 @@ function makeUnit(items: readonly ProjectedMessage[], start: number, end: number
   const entryIds = [...new Set(items.map((item) => item.key.entryId))];
   const toolCallIds = [...new Set(items.flatMap((item) => item.toolCallIds))];
   const first = items[0]?.message;
-  return { key: hashJson({ keys: messageKeys, calls: toolCallIds }), entryIds, messageKeys, toolCallIds, startProjectedIndex: start, endProjectedIndex: end, settled, compressible: settled && first?.role !== "custom" && first?.role !== "compactionSummary" && first?.role !== "branchSummary", role: first?.role || "unknown", descriptor: describe(first), contentDigest: hashJson(items.map((item) => item.fingerprint)) };
+  // A bashExecution message has no content array where DCP can attach a stable
+  // model-facing alias. Keep it canonical for exact joining, but do not let a
+  // caller select an invisible alias or remove shell provenance via a block.
+  const permanentlyBlocked = first?.role === "custom"
+    || first?.role === "compactionSummary"
+    || first?.role === "branchSummary"
+    || first?.role === "bashExecution";
+  return { key: hashJson({ keys: messageKeys, calls: toolCallIds }), entryIds, messageKeys, toolCallIds, startProjectedIndex: start, endProjectedIndex: end, settled, compressible: settled && !permanentlyBlocked, role: first?.role || "unknown", descriptor: describe(first), contentDigest: hashJson(items.map((item) => item.fingerprint)) };
 }
-function describe(message: AgentMessage | undefined): string { if (!message) return "unknown"; if (message.role === "user") return "user intent"; if (message.role === "assistant") return message.content.some((part) => part.type === "toolCall") ? "tool exchange" : "assistant response"; if (message.role === "toolResult") return "tool result"; return message.role; }
+function describe(message: AgentMessage | undefined): string { if (!message) return "unknown"; if (message.role === "user") return "user intent"; if (message.role === "assistant") return message.content.some((part) => part.type === "toolCall") ? "tool exchange" : "assistant response"; if (message.role === "toolResult") return "tool result"; if (message.role === "bashExecution") return "shell execution"; return message.role; }

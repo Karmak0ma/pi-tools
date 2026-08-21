@@ -37,10 +37,11 @@
     "test:property": "vitest run test/property",
     "test:golden": "vitest run test/golden",
     "test:integration": "vitest run test/integration",
+    "test:regression": "vitest run test/regression",
     "test:crash": "vitest run test/crash",
     "test:security": "vitest run test/security",
     "test:performance": "vitest run test/performance",
-    "check": "npm run typecheck && npm run test:unit && npm run test:property && npm run test:golden && npm run test:integration && npm run test:crash && npm run test:security && npm run test:performance",
+    "check": "npm run typecheck && npm run test:unit && npm run test:property && npm run test:golden && npm run test:integration && npm run test:regression && npm run test:crash && npm run test:security && npm run test:performance",
     "test:live:opencode": "vitest run test/integration --config vitest.config.ts -t live:opencode",
     "test:live:openai": "vitest run test/integration --config vitest.config.ts -t live:openai"
   }

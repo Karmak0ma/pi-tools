@@ -75,7 +75,29 @@ export function projectContextEntries(entries: readonly SessionEntry[]): Project
   return { ok: true, messages, unprojectedEntryIds };
 }
 
-function isValidProjectedMessage(message: AgentMessage): boolean { if (!message || typeof message !== "object" || typeof message.role !== "string") return false; if (message.role === "user") return typeof message.content === "string" || (Array.isArray(message.content) && message.content.every((part) => part && typeof part === "object" && ((part as { type?: string }).type === "text" ? typeof (part as { text?: unknown }).text === "string" : (part as { type?: string }).type === "image" && typeof (part as { data?: unknown }).data === "string" && typeof (part as { mimeType?: unknown }).mimeType === "string"))); if (message.role === "assistant") return Array.isArray(message.content) && message.content.every((part) => part && typeof part === "object" && ((part as { type?: string }).type === "text" && typeof (part as { text?: unknown }).text === "string" || (part as { type?: string }).type === "thinking" && typeof (part as { thinking?: unknown }).thinking === "string" || (part as { type?: string }).type === "toolCall" && typeof (part as { id?: unknown }).id === "string" && typeof (part as { name?: unknown }).name === "string" && (part as { arguments?: unknown }).arguments !== undefined)); if (message.role === "toolResult") return typeof message.toolCallId === "string" && typeof message.toolName === "string" && Array.isArray(message.content); if (message.role === "custom") return typeof message.customType === "string" && (typeof message.content === "string" || Array.isArray(message.content)); if (message.role === "compactionSummary") return typeof message.summary === "string"; if (message.role === "branchSummary") return typeof message.summary === "string" && typeof message.fromId === "string"; return false; }
+function isValidProjectedMessage(message: AgentMessage): boolean {
+  if (!message || typeof message !== "object" || typeof message.role !== "string") return false;
+  if (message.role === "user") return typeof message.content === "string" || (Array.isArray(message.content) && message.content.every((part) => part && typeof part === "object" && ((part as { type?: string }).type === "text" ? typeof (part as { text?: unknown }).text === "string" : (part as { type?: string }).type === "image" && typeof (part as { data?: unknown }).data === "string" && typeof (part as { mimeType?: unknown }).mimeType === "string")));
+  if (message.role === "assistant") return Array.isArray(message.content) && message.content.every((part) => part && typeof part === "object" && ((part as { type?: string }).type === "text" && typeof (part as { text?: unknown }).text === "string" || (part as { type?: string }).type === "thinking" && typeof (part as { thinking?: unknown }).thinking === "string" || (part as { type?: string }).type === "toolCall" && typeof (part as { id?: unknown }).id === "string" && typeof (part as { name?: unknown }).name === "string" && (part as { arguments?: unknown }).arguments !== undefined));
+  if (message.role === "toolResult") return typeof message.toolCallId === "string" && typeof message.toolName === "string" && Array.isArray(message.content);
+  // Pi sends shell history through extension context handlers in this durable
+  // shape. Its later convertToLlm step owns both text conversion and the
+  // excludeFromContext decision, so DCP validates but never normalizes it.
+  if (message.role === "bashExecution") return typeof message.command === "string"
+    && typeof message.output === "string"
+    // Pi's declared type uses undefined, but its runtime converter explicitly
+    // accepts null as the other "no exit status" representation.
+    && (message.exitCode === undefined || message.exitCode === null || typeof message.exitCode === "number")
+    && typeof message.cancelled === "boolean"
+    && typeof message.truncated === "boolean"
+    && (message.fullOutputPath === undefined || typeof message.fullOutputPath === "string")
+    && (message.excludeFromContext === undefined || typeof message.excludeFromContext === "boolean")
+    && typeof message.timestamp === "number";
+  if (message.role === "custom") return typeof message.customType === "string" && (typeof message.content === "string" || Array.isArray(message.content));
+  if (message.role === "compactionSummary") return typeof message.summary === "string";
+  if (message.role === "branchSummary") return typeof message.summary === "string" && typeof message.fromId === "string";
+  return false;
+}
 function toolIds(message: AgentMessage): string[] {
   if (message.role !== "assistant") return message.role === "toolResult" ? [message.toolCallId] : [];
   return message.content.filter((part): part is Extract<typeof part, { type: "toolCall" }> => part.type === "toolCall").map((part) => part.id);
