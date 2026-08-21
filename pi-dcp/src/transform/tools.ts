@@ -22,6 +22,14 @@ export function applyPersistedRedactions(messages: readonly AgentMessage[], stat
  * once in the block replacement that pi-dcp renders. The range labels and the
  * topic are kept because they are small and they tell the model what it did.
  *
+ * The `summary` KEY IS REMOVED, not blanked. An earlier version substituted a
+ * marker sentence as the value, which backfired on 2026-08-19: the model read
+ * its own redacted past calls as a worked example of the call format, copied
+ * the marker into a real compress call, and stored a block whose entire
+ * content was that sentence. A redacted argument must never look like a
+ * plausible value for the field it replaces. Omitting the key leaves nothing
+ * to imitate, and costs the same number of tokens or fewer.
+ *
  * This runs after the baseline snapshot is built, so it cannot influence
  * projection hashes, unit identity, or the join.
  */
@@ -34,7 +42,9 @@ function redactCompressSummaries(argumentsValue: unknown): unknown {
     content: record.content.map((range) => {
       if (!range || typeof range !== "object" || Array.isArray(range)) return range;
       const item = range as Record<string, unknown>;
-      return typeof item.summary === "string" ? { ...item, summary: SUMMARY_MOVED } : item;
+      if (typeof item.summary !== "string") return item;
+      const { summary: _dropped, ...withoutSummary } = item;
+      return withoutSummary;
     }),
   };
 }

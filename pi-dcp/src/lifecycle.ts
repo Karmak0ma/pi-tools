@@ -10,6 +10,7 @@ import { deepClone } from "./util/clone.ts";
 import { transformOutgoingContext } from "./transform/pipeline.ts";
 import { evaluateNudge } from "./transform/metadata.ts";
 import { buildStatusMessage } from "./prompts/status.ts";
+import { stripEchoedLabels } from "./transform/echo.ts";
 import { relocateCacheBreakpoint } from "./transform/cache-breakpoint.ts";
 import { evaluateSettledStrategies } from "./strategies/settle.ts";
 import { createEnvelope, isOperationEnvelope, OPERATION_CUSTOM_TYPE, type OpEnvelope } from "./state/operations.ts";
@@ -45,6 +46,15 @@ export function registerLifecycle(pi: ExtensionAPI, runtime: DcpRuntime): void {
   // The status suffix would otherwise carry the provider's rolling prompt-cache
   // breakpoint, which no later request can ever read back.
   pi.on("before_provider_request", (event) => relocateCacheBreakpoint(event.payload));
+  // Strip label tags the model wrote into its own reply, before that reply is
+  // persisted and becomes context. An echoed tag is indistinguishable from a
+  // real label on the next request and is usually wrong (see transform/echo.ts),
+  // so leaving it in place can steer a later compress range onto the wrong
+  // units. Returning undefined leaves the finalized message untouched.
+  pi.on("message_end", (event) => {
+    const cleaned = stripEchoedLabels(event.message);
+    return cleaned ? { message: cleaned } : undefined;
+  });
   // Capture the host's direct tool-call event because Pi 0.84.1 may invoke it
   // before the producing assistant entry becomes visible in SessionManager.
   pi.on("tool_call", async (event, ctx) => {

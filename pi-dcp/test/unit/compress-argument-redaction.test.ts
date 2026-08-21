@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { emptyState } from "../../src/state/reducer.ts";
 import { applyPersistedRedactions, compressSummaryMarker } from "../../src/transform/tools.ts";
+import { validateSummary } from "../../src/compression/validate.ts";
 
 /**
  * The assistant message that calls compress always sits after the range it
@@ -26,7 +27,23 @@ describe("compress tool-call arguments", () => {
     const part = (message as any).content[0];
 
     expect(part.arguments.topic).toBe("closed work");
-    expect(part.arguments.content[0]).toEqual({ startId: "m0001", endId: "m0004", summary: compressSummaryMarker() });
+    // The key is REMOVED, not blanked. A marker sentence sitting in the summary
+    // slot reads as a worked example of the call format; on 2026-08-19 the model
+    // copied it into a real call and stored a block containing only that line.
+    expect(part.arguments.content[0]).toEqual({ startId: "m0001", endId: "m0004" });
+    expect("summary" in part.arguments.content[0]).toBe(false);
+  });
+
+  it("rejects the redaction marker as a summary", () => {
+    // Backstop for a model that learned the marker in an earlier session.
+    expect(validateSummary(compressSummaryMarker())).toEqual({ ok: false, reason: "summary_invalid" });
+    expect(validateSummary(`  ${compressSummaryMarker()}\n`)).toEqual({ ok: false, reason: "summary_invalid" });
+  });
+
+  it("still accepts a summary that discusses the marker", () => {
+    // Matched on equality, not `includes`, so writing about this redaction is
+    // not itself a validation error.
+    expect(validateSummary(`We changed the redaction: it used to store "${compressSummaryMarker()}" as the value.`)).toEqual({ ok: true });
   });
 
   it("leaves a call that produced no block untouched", () => {
