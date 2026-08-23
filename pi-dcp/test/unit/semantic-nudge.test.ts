@@ -29,7 +29,7 @@ describe("semantic compression nudges", () => {
   it("uses the recommended defaults", () => {
     expect(defaults.nudge.turnNudgeFrequency).toBe(5);
     expect(defaults.nudge.iterationNudgeThreshold).toBe(15);
-    expect(defaults.nudge.minPotentialSavingsTokens).toBe(12000);
+    expect(defaults.nudge.minPotentialSavingsTokens).toBe(32000);
   });
 
   it("counts only eligible visible source and applies the summary reserve", () => {
@@ -85,7 +85,7 @@ describe("semantic compression nudges", () => {
       iterationsSinceUserTurn: 15,
       userTurnsSinceNudge: 5,
       iterationsSinceNudge: 15,
-    }, 11999, config());
+    }, 31999, config());
 
     expect(result.reason).toBe("potential_savings_below_minimum");
     expect(result.decision).toBeUndefined();
@@ -97,7 +97,7 @@ describe("semantic compression nudges", () => {
       iterationsSinceUserTurn: 15,
       userTurnsSinceNudge: 5,
       iterationsSinceNudge: 15,
-    }, 12000, config());
+    }, 32000, config());
 
     expect(result.decision).toMatchObject({ kind: "turn", type: "soft" });
   });
@@ -108,7 +108,7 @@ describe("semantic compression nudges", () => {
       iterationsSinceUserTurn: 15,
       userTurnsSinceNudge: 1,
       iterationsSinceNudge: 15,
-    }, 12000, config());
+    }, 32000, config());
 
     expect(result.decision).toMatchObject({ kind: "iteration", type: "soft" });
   });
@@ -119,7 +119,7 @@ describe("semantic compression nudges", () => {
       iterationsSinceUserTurn: 30,
       userTurnsSinceNudge: 4,
       iterationsSinceNudge: 14,
-    }, 12000, config());
+    }, 32000, config());
 
     expect(result.reason).toBe("semantic_interval_not_elapsed");
     expect(result.decision).toBeUndefined();

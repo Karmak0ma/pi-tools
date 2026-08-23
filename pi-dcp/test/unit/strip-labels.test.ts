@@ -17,6 +17,16 @@ describe("stripLeakedLabelTags", () => {
     expect(stripLeakedLabelTags(leaked)).toBe("First.\nSecond.");
   });
 
+  it("removes truncated tags from a response stopped at a tool call", () => {
+    const leaked = "I will check that.\n\n<pi-dcp-message-id>m0082\n";
+    expect(stripLeakedLabelTags(leaked)).toBe("I will check that.");
+  });
+
+  it("removes a bare opening tag after a truncated label", () => {
+    const leaked = "Working.\n\n<pi-dcp-message-id>m0074\n\n<pi-dcp-message-id>";
+    expect(stripLeakedLabelTags(leaked)).toBe("Working.");
+  });
+
   it("leaves ordinary Markdown untouched", () => {
     const clean = "# Title\n\nSome **bold** text with a <not-a-label>tag</not-a-label>.";
     expect(stripLeakedLabelTags(clean)).toBe(clean);

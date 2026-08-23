@@ -13,7 +13,7 @@ describe("personal DCP settings", () => {
     try {
       await writeFile(settingsPath({ PI_CODING_AGENT_DIR: dir }), JSON.stringify({ nudge: { minContextPercent: 60, maxContextPercent: 70, criticalContextPercent: 90, turnsBetweenNudges: 3 } }));
       const loaded = await loadConfig(join(dir, "project"), false, { PI_CODING_AGENT_DIR: dir });
-      expect(loaded.config.nudge).toEqual({ minContextPercent: 60, maxContextPercent: 70, criticalContextPercent: 90, turnsBetweenNudges: 3, turnNudgeFrequency: 5, iterationNudgeThreshold: 15, minPotentialSavingsTokens: 12000 });
+      expect(loaded.config.nudge).toEqual({ minContextPercent: 60, maxContextPercent: 70, criticalContextPercent: 90, turnsBetweenNudges: 3, turnNudgeFrequency: 5, iterationNudgeThreshold: 15, minPotentialSavingsTokens: 32000 });
       expect(loaded.paths).toContain(join(dir, "dcp_settings.json"));
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
@@ -35,13 +35,13 @@ describe("personal DCP settings", () => {
       const path = join(dir, "dcp_settings.json");
       await writeSettings(defaults as unknown as EffectiveConfig, path);
       const parsed = JSON.parse(await readFile(path, "utf8"));
-      expect(parsed.nudge).toEqual({ minContextPercent: 35, maxContextPercent: 70, criticalContextPercent: 90, turnsBetweenNudges: 5, turnNudgeFrequency: 5, iterationNudgeThreshold: 15, minPotentialSavingsTokens: 12000 });
+      expect(parsed.nudge).toEqual({ minContextPercent: 35, maxContextPercent: 70, criticalContextPercent: 90, turnsBetweenNudges: 5, turnNudgeFrequency: 5, iterationNudgeThreshold: 15, minPotentialSavingsTokens: 32000 });
       expect(parsed.compress.permission).toBe("allow");
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
   it("uses the configured interval between below-maximum nudges and imperative nudges at maximum", () => {
     const config = structuredClone(defaults) as unknown as EffectiveConfig;
-    config.nudge = { minContextPercent: 35, maxContextPercent: 70, criticalContextPercent: 90, turnsBetweenNudges: 3, turnNudgeFrequency: 5, iterationNudgeThreshold: 15, minPotentialSavingsTokens: 12000 };
+    config.nudge = { minContextPercent: 35, maxContextPercent: 70, criticalContextPercent: 90, turnsBetweenNudges: 3, turnNudgeFrequency: 5, iterationNudgeThreshold: 15, minPotentialSavingsTokens: 32000 };
     expect(shouldNudge(300, config, 1000, 3)).toBeUndefined();
     expect(shouldNudge(400, config, 1000, 1)).toBeUndefined();
     expect(shouldNudge(400, config, 1000, 3)?.type).toBe("soft");

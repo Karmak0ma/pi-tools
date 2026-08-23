@@ -2,14 +2,25 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { LABEL_TAG_NAME } from "./labels.ts";
 
 /**
- * Matches one inline label tag exactly as formatLabelTag() writes it, including
- * the leading newline it always prepends. Global, so a reply containing several
- * leaked tags is fully cleaned. Shared with the markdown transformer in
- * ui/strip-labels.ts so what the user sees and what the model sees next turn
- * can never disagree.
+ * Matches one inline label tag as formatLabelTag() writes it, including the
+ * leading newline(s) that surround it. A model can stop generation immediately
+ * after copying the opening tag (or its alias), usually because a tool call
+ * follows. The truncated alternatives are therefore intentional: leaving an
+ * opening-only tag in the transcript leaks bookkeeping into the UI and lets
+ * the next context transform treat model text as a real label.
+ *
+ * The truncated form is restricted to aliases pi-dcp can actually emit and to
+ * whitespace/end-of-input (or the start of another tag). This is important:
+ * `stripLeakedLabelTags()` is also used for ordinary Markdown, and must not
+ * delete arbitrary prose merely because it mentions an opening tag.
+ *
+ * Global, so a reply containing several leaked tags is fully cleaned. Shared
+ * with the markdown transformer in ui/strip-labels.ts so what the user sees
+ * and what the model sees next turn can never disagree.
  */
 export function labelTagPattern(): RegExp {
-  return new RegExp(`\\n?<${LABEL_TAG_NAME}>[^<]*</${LABEL_TAG_NAME}>`, "g");
+  const alias = "(?:m[0-9]{4}|b[0-9]{4}|BLOCKED)";
+  return new RegExp(`\\n*<${LABEL_TAG_NAME}>(?:[^<]*</${LABEL_TAG_NAME}>|${alias}?\\s*(?=<|$))`, "g");
 }
 
 /**

@@ -24,6 +24,12 @@ describe("stripEchoedLabels", () => {
     expect((stripEchoedLabels(message) as any).content).toEqual([{ type: "text", text: "done" }]);
   });
 
+  it("removes a truncated tag from the stored assistant reply", () => {
+    const message = { role: "assistant", content: [{ type: "text", text: "I will check that.\n\n<pi-dcp-message-id>m0082\n" }] } as any;
+
+    expect((stripEchoedLabels(message) as any).content).toEqual([{ type: "text", text: "I will check that." }]);
+  });
+
   it("never edits a thinking part, whose signature covers its exact bytes", () => {
     const message = { role: "assistant", content: [{ type: "thinking", thinking: `reasoning ${TAG}`, thinkingSignature: "sig" }, { type: "text", text: TAG }] } as any;
 

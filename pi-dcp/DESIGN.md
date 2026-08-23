@@ -795,7 +795,7 @@ The proposal intentionally starts with the observed DCP values unless noted.
 | `nudge.turnsBetweenNudges` | 5 | context-pressure reminder cooldown |
 | `nudge.turnNudgeFrequency` | 5 | user turns before semantic reminder |
 | `nudge.iterationNudgeThreshold` | 15 | assistant/tool iterations before semantic reminder |
-| `nudge.minPotentialSavingsTokens` | 12000 | estimated savings floor for semantic reminders |
+| `nudge.minPotentialSavingsTokens` | 32000 | estimated savings floor for semantic reminders |
 | `experimental.allowSubAgents` | false | future protocol only |
 | `experimental.customPrompts` | false | prompt files ignored |
 | `experimental.messageMode` | false | required in addition to mode `message` |

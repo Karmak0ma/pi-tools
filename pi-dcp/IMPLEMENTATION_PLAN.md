@@ -422,7 +422,7 @@ const defaults = {
     turnsBetweenNudges: 5,
     turnNudgeFrequency: 5,
     iterationNudgeThreshold: 15,
-    minPotentialSavingsTokens: 12000
+    minPotentialSavingsTokens: 32000
   },
   protectedFilePatterns: [],
   compress: {

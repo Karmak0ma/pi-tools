@@ -64,7 +64,7 @@ The editable file uses the same shape as the menu. For example:
     "turnsBetweenNudges": 5,
     "turnNudgeFrequency": 5,
     "iterationNudgeThreshold": 15,
-    "minPotentialSavingsTokens": 12000
+    "minPotentialSavingsTokens": 32000
   },
   "compress": { "permission": "allow", "protectUserMessages": false },
   "manualMode": { "automaticStrategies": true },
