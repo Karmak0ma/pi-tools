@@ -440,27 +440,12 @@ export default function (pi: ExtensionAPI) {
 
                 // The RPC request has no toolCallId. Keep a runtime snapshot
                 // of every active call so the broker can show all available
-                // context without claiming a false correlation.
-                if (event.type === "tool_execution_start" && event.toolCallId) {
-                  const activeToolCall: ActiveChildToolCall = {
-                    toolCallId: String(event.toolCallId),
-                    toolName: String(event.toolName || "unknown"),
-                    args: event.args ?? event.arguments,
-                    startedAt: Date.now(),
-                  };
-                  instance.activeToolCalls.set(activeToolCall.toolCallId, activeToolCall);
+                // context without claiming a false correlation. Assistant
+                // messages are processed before the child enters its tool hook,
+                // so this also covers the dialog's pre-execution window.
+                const activeToolCallChanged = trackActiveChildToolCalls(instance.activeToolCalls, event);
+                if (activeToolCallChanged && event.type !== "message_end" && event.type !== "agent_settled") {
                   updater.immediate();
-                }
-                if (event.type === "tool_execution_end" && event.toolCallId) {
-                  instance.activeToolCalls.delete(String(event.toolCallId));
-                  updater.immediate();
-                }
-                if (event.type === "tool_result_end") {
-                  const fallbackToolCallId = event.toolCallId || event.message?.toolCallId;
-                  if (fallbackToolCallId && instance.activeToolCalls.has(String(fallbackToolCallId))) {
-                    instance.activeToolCalls.delete(String(fallbackToolCallId));
-                    updater.immediate();
-                  }
                 }
 
                 if (event.type === "agent_start") {
@@ -514,6 +499,7 @@ export default function (pi: ExtensionAPI) {
                 const presenter = new ExtensionUIDialogPresenter(ctx, {
                   isInspectorActive: () => tuiManager.isActive,
                   isInspectorOverlayFocused: () => tuiManager.isOverlayFocusedVisible,
+                  focusInspectorOverlayForDialog: () => tuiManager.focusInspectorOverlayForDialog(),
                   onDiagnostic: (message) => reportBrokerDiagnostic(message, owner),
                 });
                 executionBroker.enqueue({
@@ -669,6 +655,100 @@ export default function (pi: ExtensionAPI) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Track both the assistant's announced call and the executor's later snapshot
+ * in one map. The shared id makes the executor update replace the provisional
+ * entry instead of making the modal show duplicate calls.
+ *
+ * Arguments are deliberately kept only in this runtime map. They are needed
+ * for the approval modal, but must not enter persisted summaries, diagnostics,
+ * or error text.
+ */
+export function trackActiveChildToolCalls(
+  activeToolCalls: Map<string, ActiveChildToolCall>,
+  event: any,
+): boolean {
+  let changed = false;
+
+  // Current RPC streaming events do not carry a cumulative assistant message.
+  // toolcall_end is the first streaming event with the complete ToolCall shape.
+  if (event.type === "message_update" && event.assistantMessageEvent?.type === "toolcall_end") {
+    changed = announceActiveChildToolCall(activeToolCalls, event.assistantMessageEvent.toolCall) || changed;
+  }
+
+  // message_end is authoritative and carries ToolCall fields as id/name/
+  // arguments, not the tool_execution_* fields used by the executor.
+  if (event.type === "message_end" && event.message?.role === "assistant" && Array.isArray(event.message.content)) {
+    for (const part of event.message.content) {
+      if (part?.type === "toolCall") {
+        changed = announceActiveChildToolCall(activeToolCalls, part) || changed;
+      }
+    }
+  }
+
+  // The executor's event is authoritative when it arrives. Preserve the
+  // announcement timestamp so FIFO presentation order does not jump when the
+  // same call is upgraded in place.
+  if (event.type === "tool_execution_start" && event.toolCallId) {
+    const toolCallId = String(event.toolCallId);
+    const previous = activeToolCalls.get(toolCallId);
+    activeToolCalls.set(toolCallId, {
+      toolCallId,
+      toolName: String(event.toolName || previous?.toolName || "unknown"),
+      args: event.args ?? event.arguments ?? previous?.args,
+      startedAt: previous?.startedAt ?? Date.now(),
+    });
+    changed = true;
+  }
+
+  if (event.type === "tool_execution_end" && event.toolCallId) {
+    changed = activeToolCalls.delete(String(event.toolCallId)) || changed;
+  }
+
+  if (event.type === "tool_result_end") {
+    const fallbackToolCallId = event.toolCallId || event.message?.toolCallId;
+    if (fallbackToolCallId) {
+      changed = activeToolCalls.delete(String(fallbackToolCallId)) || changed;
+    }
+  }
+
+  if (event.type === "agent_end" || event.type === "agent_settled") {
+    // A guardrail can block an announced call before execution events exist.
+    // Clear at the end of that agent run as a terminal fallback; process exit
+    // cleanup remains the protection for an aborted child that emits no end.
+    if (activeToolCalls.size > 0) {
+      activeToolCalls.clear();
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+function announceActiveChildToolCall(
+  activeToolCalls: Map<string, ActiveChildToolCall>,
+  part: any,
+): boolean {
+  if (
+    part?.type !== "toolCall" ||
+    typeof part.id !== "string" ||
+    part.id.length === 0 ||
+    typeof part.name !== "string" ||
+    part.name.length === 0
+  ) {
+    return false;
+  }
+
+  const previous = activeToolCalls.get(part.id);
+  activeToolCalls.set(part.id, {
+    toolCallId: part.id,
+    toolName: part.name,
+    args: part.arguments ?? {},
+    startedAt: previous?.startedAt ?? Date.now(),
+  });
+  return true;
+}
 
 /**
  * Throttled update emitter. Streaming events (text_delta, stderr) are rate-limited

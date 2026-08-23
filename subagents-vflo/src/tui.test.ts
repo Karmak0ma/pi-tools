@@ -76,3 +76,63 @@ describe("SubagentTuiManager page navigation routing", () => {
     expect(manager.isActive).toBe(false);
   });
 });
+
+describe("SubagentTuiManager inspector focus preparation", () => {
+  it("focuses an unfocused visible inspector and restores its previous focus state", async () => {
+    const tracker = new SubagentTracker();
+    tracker.add(
+      createInstance({
+        id: "subagent-focus",
+        agent: "worker",
+        source: "builtin",
+        task: "test focus recovery",
+        cwd: "/tmp",
+      }),
+    );
+
+    const tui = createFakeTui();
+    let focused = false;
+    let focusCalls = 0;
+    let unfocusCalls = 0;
+    const handle = {
+      isFocused: () => focused,
+      isHidden: () => false,
+      focus: () => {
+        focusCalls++;
+        focused = true;
+      },
+      unfocus: () => {
+        unfocusCalls++;
+        focused = false;
+      },
+    };
+    const manager = new SubagentTuiManager(tracker);
+    let close!: () => void;
+    const closed = new Promise<void>((resolve) => {
+      close = resolve;
+    });
+
+    await manager.enter({
+      ui: {
+        custom: async (factory: any, options: any) => {
+          factory(tui, {}, undefined, close);
+          options.onHandle(handle);
+
+          expect(manager.isOverlayFocusedVisible).toBe(false);
+          const restore = manager.focusInspectorOverlayForDialog();
+          expect(manager.isOverlayFocusedVisible).toBe(true);
+          expect(focusCalls).toBe(1);
+
+          restore?.();
+          expect(focused).toBe(false);
+          expect(unfocusCalls).toBe(1);
+
+          close();
+          await closed;
+        },
+      },
+    });
+
+    expect(manager.isActive).toBe(false);
+  });
+});

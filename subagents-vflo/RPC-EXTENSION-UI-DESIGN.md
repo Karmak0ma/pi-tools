@@ -113,7 +113,7 @@ These are implementation requirements, not suggestions.
 2. **No default affirmative choice:** Enter may confirm only the visibly selected choice. Initial selection should prefer a non-destructive option when the component supports explicit initial selection. For guardrails, initialize to `Deny`, not `Allow once`.
 3. **Exact values:** a `select` response must contain exactly one string supplied in the child request's `options` array.
 4. **Visible ownership:** every modal must identify the child agent and task that requested it.
-5. **Visible command:** when an active `bash` tool call is available, render its full command without semantic truncation. A viewport may scroll, but the underlying text must remain available.
+5. **Visible command:** when an active `bash` tool call is available, render its full command without semantic truncation. A viewport may scroll, but the underlying text must remain available. This is why tool calls must be tracked from the assistant's announcement and not only from `tool_execution_start`; see section 8.2. A guardrails prompt is raised from Pi's `tool_call` hook, which runs *before* the tool executes.
 6. **Terminal-safe display:** task text, request strings, paths, tool arguments, and commands are untrusted display data. Escape ANSI, OSC, APC, C0 control characters other than intended newline/tab layout, and other terminal control sequences before rendering. Preserve the original unsanitized option/value only for protocol responses.
 7. **No false attribution:** because the RPC request lacks `toolCallId`, label tool information as `Active child tool calls`, not `Command that caused this prompt`, unless Pi later adds explicit correlation.
 8. **Exactly-once settlement:** user input, timeout, abort, and child exit may race, but at most one response may be written for a request. The child-bound channel is the sole authority for wire writes; the broker is the sole authority for modal/queue settlement.
@@ -360,30 +360,47 @@ Create `src/extension-ui-presenter.ts` for the production TUI presenter.
 
 Use a parent `ctx.ui.custom()` component rather than trying to render the child component factory. Child `custom()` components cannot cross the RPC boundary, and the parent must add ownership and tool context.
 
-Present the dialog immediately. It must not depend on the inspector being active. If the inspector overlay is active, open the approval component as temporary non-overlay custom UI. Before opening, verify the inspector's overlay handle is focused and visible; this is the condition under which Pi documents that it will reclaim input after temporary custom UI closes. The presenter does not manipulate or replace the inspector's overlay handle. Add an integration-style TUI test that opens the inspector, opens and closes a temporary approval component, and verifies inspector input works afterward.
+Present the dialog immediately. It must not depend on the inspector being active. If the inspector overlay is active, open the approval component as temporary non-overlay custom UI. Pi only documents input reclaim for an overlay that is focused and visible, so when the inspector is active but unfocused, ask `SubagentTuiManager` to focus its visible overlay first; the manager returns an opaque restoration callback that the presenter always invokes when the modal closes, whatever the outcome. The presenter never touches Pi's raw overlay handle. If focus cannot be arranged, present anyway and emit a diagnostic — see "Inspector is open but not focused" in section 11. Add an integration-style TUI test that opens the inspector, opens and closes a temporary approval component, and verifies inspector input works afterward.
 
 The component should have these regions:
 
-1. **Risk/interaction header**
+1. **Risk/interaction header** (one row per value, never wrapped)
    - `Subagent requires input`
    - agent name and instance ID
    - cwd
-   - queue count
-2. **Task context**
-   - full task text in a vertically scrollable viewport
-3. **Child request**
+   - queue count, only when other requests are waiting
+2. **Method-specific control**
+   - select list, yes/no confirmation, input, or editor
+3. **Key hints**
+   - navigation, submit, cancel, and context scrolling
+4. **Child request** (start of the scrollable context viewport)
    - title
    - optional confirm message or input placeholder
-4. **Active child tool calls**
+5. **Active child tool calls**
    - tool name and tool-call ID
    - full formatted arguments
    - for `bash`, prominently show the exact `command`
-5. **Method-specific control**
-   - select list, yes/no confirmation, input, or editor
-6. **Key hints**
-   - navigation, submit, cancel, and context scrolling
+6. **Task context**
+   - full task text, last, in the same scrollable viewport
 
 The context area must be scrollable and height-bounded so a large task or multiline command cannot push the decision control off-screen. Width handling must use `wrapTextWithAnsi`, `truncateToWidth`, and `visibleWidth` as appropriate. Visual truncation is acceptable only when the user can scroll to the omitted content.
+
+#### Height budget in Pi's editor dock
+
+This ordering is a safety requirement, not a style choice, and it follows from how Pi hosts the component:
+
+- A non-overlay `ctx.ui.custom()` component is mounted in Pi's `editorContainer`, which lives in the bottom dock together with the transcript, status rows, widgets, and footer. It does **not** own the screen.
+- When a `VStack` child is taller than its allocated height, pi-tui keeps the top rows and drops the rest (`v-stack.ts`: `rendered.slice(0, size)`). In fullscreen mode there is no scrollback, so the dropped rows are unreachable.
+- `Component.render()` receives only a width, so the component can never learn its allocated height.
+
+Therefore the component must:
+
+1. budget its total height as `max(16, terminalRows - 8)` rather than the full terminal height, leaving room for the dock chrome;
+2. draw the header, the control block, and the key hints before any child-supplied text, so clipping can only ever remove context;
+3. bound the control block itself, because a child may send an unlimited number of `select` options or a very long `editor` prefill; the selected option must always stay inside the drawn window;
+4. order the context by decision value: request title, then the active tool command, then the task text last.
+
+A regression here is silent and severe. The observed failure was a screen filled with child task text, no visible option list, and a child blocked until timeout.
 
 #### Safe initial focus
 
@@ -436,12 +453,21 @@ These fields are runtime-only. Do not add them to `PersistedSubagentToolDetails`
 
 In the common child event handler in `src/index.ts`:
 
-- on `tool_execution_start`, add/update `activeToolCalls`;
+- on `message_end` for an assistant message, register every `toolCall` content part in `activeToolCalls`;
+- on a streaming `message_update` whose `assistantMessageEvent.type` is `toolcall_end`, register `assistantMessageEvent.toolCall` the same way;
+- on `tool_execution_start`, replace the entry with the same ID using the executor's authoritative `toolCallId`, `toolName`, and `args`, keeping the original `startedAt`;
 - on `tool_execution_end`, remove that ID;
 - if a final tool-result event is used as a fallback today, remove it there only when still present;
+- on `agent_end` or `agent_settled`, clear the map, because a blocked call never produces execution events;
 - on an extension dialog request, snapshot all active calls into the queued item.
 
+**Why the announcement matters.** Pi runs `tool_call` handlers from `agent.beforeToolCall`, i.e. before the executor emits `tool_execution_start`. `pi-guardrails` opens its approval dialog from that hook, so a parent that only watches `tool_execution_start` has an empty map at exactly the moment the user must judge a command. The assistant message that announces the call is emitted earlier and carries the full arguments.
+
+**Field names differ between the two sources and must be handled explicitly.** An assistant content part is `{ type: "toolCall", id, name, arguments }`, while execution events use `toolCallId`, `toolName`, and `args`.
+
 Snapshot rather than retaining the mutable map. The tool call may finish, abort, or be replaced while its modal waits in the FIFO queue.
+
+These arguments stay in the runtime map only. They must not reach persisted summaries, tool-result details, diagnostics, or error text.
 
 ### 8.3 Correlation limitation
 
@@ -510,6 +536,14 @@ Although the parent extension normally runs in TUI mode, check `ctx.hasUI` and `
 2. record a concise diagnostic on the runtime instance;
 3. continue or abort according to the child extension's response to cancellation;
 4. never approve.
+
+### Inspector is open but not focused
+
+Pi only guarantees that a *focused, visible* overlay reclaims input after temporary non-overlay custom UI closes (`docs/tui.md`, "Overlay Focus"). When the inspector is active but unfocused, ask `SubagentTuiManager` to focus its visible overlay before opening the approval component. The manager returns an opaque restoration callback; the presenter always invokes it after an answer, a cancellation, an abort, or a presenter failure.
+
+If focus cannot be arranged, still present the dialog and emit a diagnostic. **Failure to focus must never cancel a request.** Refusing to ask is not fail-closed behaviour: the child maps a cancellation to `Deny`, so the user's security prompt disappears, the subagent's work is discarded, and nothing on screen explains why.
+
+Inspector focus recovery is best effort. A restore failure is diagnostic-only and must not replace a valid user answer with an error. Parent UI unavailability and abort remain the only cancellation conditions.
 
 ### Child exits while queued
 

@@ -1,3 +1,6 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
@@ -47,6 +50,8 @@ class FakeChild extends EventEmitter {
 describe("runChild extension UI transport", () => {
   it("observes before callback, writes one child-bound response, and keeps it out of command acks", async () => {
     const child = new FakeChild();
+    let spawnedArgs: string[] = [];
+    let spawnedEnv: NodeJS.ProcessEnv | undefined;
     const events: any[] = [];
     const callbackOrder: number[] = [];
     let firstResponse = false;
@@ -58,7 +63,11 @@ describe("runChild extension UI transport", () => {
       agentName: "worker",
       agentPrompt: "",
       taskText: "task",
-      spawnProcess: (() => child) as any,
+      spawnProcess: ((_command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
+        spawnedArgs = args;
+        spawnedEnv = options.env;
+        return child;
+      }) as any,
       onEvent(event) {
         events.push(event);
       },
@@ -71,6 +80,13 @@ describe("runChild extension UI transport", () => {
     });
 
     expect(result.exitCode).toBe(0);
+    expect(spawnedArgs).not.toContain("--no-session");
+    expect(spawnedEnv?.PI_SESSION_FILE).toBeUndefined();
+    const sessionDirFlag = spawnedArgs.indexOf("--session-dir");
+    expect(sessionDirFlag).toBeGreaterThanOrEqual(0);
+    const sessionDir = spawnedArgs[sessionDirFlag + 1];
+    expect(sessionDir.startsWith(path.join(os.tmpdir(), "pi-subagent-"))).toBe(true);
+    fs.rmSync(sessionDir, { recursive: true, force: true });
     expect(callbackOrder).toEqual([1]);
     expect(firstResponse).toBe(true);
     expect(secondResponse).toBe(false);

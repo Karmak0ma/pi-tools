@@ -10,6 +10,7 @@ A pi extension that enables delegating tasks to specialized subagents running in
 - **TUI Inspector** — Visual inspector mode to monitor subagent progress in real-time
 - **Live streaming** — See subagent output as it's generated
 - **Live usage header** — Track input, output, cached tokens, and context-window utilization while each subagent works
+- **Persistent child history** — Store each child session as an isolated JSONL file under `/tmp`
 - **Context-aware abort** — Graceful SIGTERM → SIGKILL escalation with timer cleanup
 - **Agent discovery** — Built-in, user, and project agents with clear override precedence
 - **Child extension UI bridge** — Blocking RPC dialogs are presented as parent-side modals with FIFO ownership and fail-closed cancellation
@@ -85,6 +86,20 @@ reorders select options. Pi remains authoritative for the child RPC timeout.
 The bridge is independent of the subagent inspector, so dialogs appear whether
 the inspector is open or closed. A waiting child is marked `waiting for input`
 in the inspector, but the inspector is not a second response path.
+
+## Child session storage
+
+Each child runs with pi session persistence enabled, using a unique directory under
+`/tmp/pi-subagent-*`. The session JSONL file is normally nested below that
+directory according to pi's working-directory layout, for example:
+
+```text
+/tmp/pi-subagent-AbCd12/--path-to-project--/20260101_120000_uuid.jsonl
+```
+
+The child session directory and JSONL history remain after the child exits so
+they can be inspected. The generated system-prompt file is removed, but the
+session history is left for normal `/tmp` cleanup.
 
 ## Built-in Agents
 

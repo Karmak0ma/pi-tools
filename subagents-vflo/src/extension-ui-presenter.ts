@@ -24,6 +24,8 @@ import type {
 export interface ExtensionUIDialogPresenterOptions {
   isInspectorActive?: () => boolean;
   isInspectorOverlayFocused?: () => boolean;
+  /** Temporarily focus the inspector and return a callback that restores its prior focus state. */
+  focusInspectorOverlayForDialog?: () => (() => void) | undefined;
   onDiagnostic?: (message: string) => void;
   now?: () => number;
 }
@@ -39,6 +41,33 @@ const fallbackTheme: PresenterTheme = {
   bg: (_color, text) => text,
   bold: (text) => text,
 };
+
+/**
+ * Layout budget for the parent-side modal.
+ *
+ * Pi puts a non-overlay `ctx.ui.custom()` component inside the editor dock
+ * (`interactive-mode`: `editorContainer`), NOT on the whole screen. That dock
+ * shares the terminal with the transcript, the status rows, the widgets and
+ * the footer. When the child of a VStack is taller than the height it was
+ * given, pi-tui keeps the TOP and drops the rest (`v-stack`:
+ * `rendered.slice(0, size)`); in fullscreen mode there is no scrollback that
+ * could bring the lost rows back.
+ *
+ * A component only receives a width in `render()`, so it can never learn its
+ * real allocated height. Two rules follow, and both are load-bearing:
+ *
+ *  1. Reserve a chrome allowance instead of claiming the full terminal height.
+ *  2. Draw the decision controls FIRST. Whatever gets clipped must be context,
+ *     never the means to answer the dialog.
+ *
+ * A regression here is silent and severe: the user sees a screen full of child
+ * text with no visible way to allow or deny, and the child blocks until the
+ * request times out.
+ */
+const DOCK_CHROME_ROWS = 8;
+const MIN_DIALOG_ROWS = 16;
+/** Upper bound on simultaneously drawn options; a child may send any number. */
+const MAX_VISIBLE_OPTIONS = 8;
 
 function initialSelectIndex(options: string[]): number {
   const deny = options.indexOf("Deny");
@@ -249,28 +278,25 @@ export class ChildUIDialogComponent implements Component {
     if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
     this.cachedWidth = width;
     const safeWidth = Math.max(12, width);
-    const lines: string[] = [];
-    const add = (text: string, color?: string) => {
-      const rendered = color ? this.theme.fg(color, text) : text;
-      lines.push(...wrapTextWithAnsi(rendered, safeWidth).map((line) => truncateToWidth(line, safeWidth, "")));
-    };
+    const budget = this.rowBudget();
 
-    const bold = (text: string) => this.theme.bold ? this.theme.bold(text) : text;
-    add(bold("Subagent requires input"), "accent");
-    add(`Agent: ${safeDialogText(this.item.owner.agent)}  •  Instance: ${safeDialogText(this.item.owner.instanceId)}`, "dim");
-    add(`cwd: ${safeDialogText(this.item.owner.cwd)}`, "dim");
-    add(`Additional queued requests: ${this.itemQueueDepth()}`, "warning");
-    if (this.item.deadline !== undefined) {
-      const remaining = Math.max(0, this.item.deadline - this.now());
-      add(`Timeout: ${(remaining / 1000).toFixed(1)}s remaining`, remaining < 1000 ? "error" : "dim");
-    }
-    lines.push("");
+    // Order is a safety property, not a style choice. See DOCK_CHROME_ROWS.
+    const header = this.headerLines(safeWidth);
+    const hint = [this.theme.fg("dim", this.hintText())];
+    // Two blank separator rows plus the hint are fixed overhead; the control
+    // block keeps whatever is left after one reserved context row.
+    const controlBudget = Math.max(1, budget - header.length - hint.length - 3);
+    const control = this.controlLines(safeWidth, controlBudget);
 
+    const lines: string[] = [...header, "", ...control, ...hint, ""];
+
+    // The context block is the only clippable region. It holds untrusted child
+    // text (task, request title, tool arguments), so it is bounded and
+    // scrollable rather than truncated.
     const context = this.contextLines(safeWidth);
-    const control = this.controlLines(safeWidth);
-    const termRows = this.tui?.terminal?.rows || 24;
-    const reserved = control.length + 7;
-    const visibleContext = Math.max(1, termRows - reserved);
+    const contextBudget = Math.max(1, budget - lines.length);
+    const scrollable = context.length > contextBudget;
+    const visibleContext = scrollable ? Math.max(1, contextBudget - 1) : contextBudget;
     const maxOffset = Math.max(0, context.length - visibleContext);
     this.contextOffset = Math.min(this.contextOffset, maxOffset);
     if (context.length > 0) {
@@ -280,15 +306,54 @@ export class ChildUIDialogComponent implements Component {
         lines.push(this.theme.fg("dim", `  context ${this.contextOffset + 1}-${contextEnd}/${context.length} • PgUp/PgDn scroll`));
       }
     }
-    lines.push("");
-    lines.push(...control);
-    lines.push(this.theme.fg("dim", "↑↓ choose • Enter submit • Esc cancel • PgUp/PgDn context"));
 
     // Sanitize before width handling: pi-tui may append a cursor or style
     // reset marker when it sees editor output, and escaped controls must count
     // toward the visible width just like any other displayed text.
     this.cachedLines = lines.map((line) => fitSafeLine(line, safeWidth));
     return this.cachedLines;
+  }
+
+  /** Total rows this component may draw. Never the full terminal height. */
+  private rowBudget(): number {
+    const termRows = this.tui?.terminal?.rows || 24;
+    return Math.max(MIN_DIALOG_ROWS, termRows - DOCK_CHROME_ROWS);
+  }
+
+  /**
+   * Ownership header. Every value is drawn on exactly one row so a long cwd,
+   * agent name or instance id can never push the controls out of view.
+   */
+  private headerLines(width: number): string[] {
+    const bold = (text: string) => this.theme.bold ? this.theme.bold(text) : text;
+    const lines = [
+      this.theme.fg("accent", bold(fitSafeLine("Subagent requires input", width))),
+      this.theme.fg("dim", fitSafeLine(`Agent: ${this.item.owner.agent}  •  Instance: ${this.item.owner.instanceId}`, width)),
+      this.theme.fg("dim", fitSafeLine(`cwd: ${this.item.owner.cwd}`, width)),
+    ];
+    const queued = this.itemQueueDepth();
+    if (queued > 0) {
+      lines.push(this.theme.fg("warning", fitSafeLine(`Additional queued requests: ${queued}`, width)));
+    }
+    if (this.item.deadline !== undefined) {
+      const remaining = Math.max(0, this.item.deadline - this.now());
+      lines.push(this.theme.fg(
+        remaining < 1000 ? "error" : "dim",
+        fitSafeLine(`Timeout: ${(remaining / 1000).toFixed(1)}s remaining`, width),
+      ));
+    }
+    return lines;
+  }
+
+  /** Key help for the active method, kept next to the controls it describes. */
+  private hintText(): string {
+    if (this.item.request.method === "select") {
+      return "↑↓ choose • Enter submit • Esc cancel • PgUp/PgDn context";
+    }
+    if (this.item.request.method === "confirm") {
+      return "←→/y/n choose • Enter submit • Esc cancel • PgUp/PgDn context";
+    }
+    return "Enter submit • Esc cancel • PgUp/PgDn context";
   }
 
   private itemQueueDepth(): number {
@@ -310,7 +375,9 @@ export class ChildUIDialogComponent implements Component {
       });
     };
 
-    addWrapped("Task: ", this.item.owner.task);
+    // Ordered by decision value, most important first. The context block is
+    // the region that gets clipped when the dock is short, and the task text
+    // is both the longest and the least useful part for an allow/deny answer.
     addWrapped("Request: ", this.item.request.title, "accent");
     if (this.item.request.method === "confirm" && this.item.request.message !== undefined) {
       addWrapped("Message: ", this.item.request.message);
@@ -329,18 +396,33 @@ export class ChildUIDialogComponent implements Component {
         addWrapped("  Args: ", formatted.arguments);
       }
     }
+    addWrapped("Task: ", this.item.owner.task);
     return lines;
   }
 
-  private controlLines(width: number): string[] {
+  /**
+   * The interactive block. It is capped at `budget` rows because a child can
+   * send any number of options or a very long editor prefill, and an oversized
+   * control block would be clipped by Pi exactly like an oversized dialog.
+   */
+  private controlLines(width: number, budget = Number.MAX_SAFE_INTEGER): string[] {
     const lines: string[] = [];
     const request = this.item.request;
     if (request.method === "select") {
       lines.push(this.theme.fg("accent", "Choose an option:"));
-      request.options.forEach((option, index) => {
+      // Keep the selected option inside the drawn window; a user must always
+      // see what Enter would send.
+      const window = Math.max(1, Math.min(MAX_VISIBLE_OPTIONS, budget - 1));
+      const start = Math.max(0, Math.min(this.selectedIndex - Math.floor(window / 2), request.options.length - window));
+      const end = Math.min(request.options.length, start + window);
+      if (start > 0) lines.push(this.theme.fg("dim", `   ↑ ${start} more`));
+      for (let index = start; index < end; index++) {
         const marker = index === this.selectedIndex ? ">" : " ";
-        lines.push(truncateToWidth(` ${marker} ${safeDialogText(option)}`, width, ""));
-      });
+        lines.push(truncateToWidth(` ${marker} ${safeDialogText(request.options[index])}`, width, ""));
+      }
+      if (end < request.options.length) {
+        lines.push(this.theme.fg("dim", `   ↓ ${request.options.length - end} more`));
+      }
     } else if (request.method === "confirm") {
       lines.push(this.theme.fg("accent", "Confirm:"));
       lines.push(` ${this.confirmValue ? "[Yes]  No" : " Yes   [No]"}`);
@@ -358,7 +440,9 @@ export class ChildUIDialogComponent implements Component {
         lines.push(truncateToWidth(` ${sanitizeTerminalText(line)}`, width, ""));
       }
     }
-    return lines;
+    // Last-resort guard. Every branch above should already fit, but a clipped
+    // control block must not be able to push the key hint off the screen.
+    return lines.length > budget ? lines.slice(0, budget) : lines;
   }
 
   private contextPageSize(): number {
@@ -388,33 +472,74 @@ export class ExtensionUIDialogPresenter implements ChildUIDialogPresenter {
       return { kind: "cancelled", reason: "parent UI unavailable" };
     }
 
-    if (this.options.isInspectorActive?.() && !this.options.isInspectorOverlayFocused?.()) {
-      this.diagnostic("Subagent inspector is not focused; child extension dialog was cancelled");
-      return { kind: "cancelled", reason: "inspector focus unavailable" };
-    }
-
     let finish: ((decision: ChildUIDialogDecision) => void) | null = null;
     let abortedBeforeFactory = false;
+    let settled = false;
+    let restoreInspectorFocus: (() => void) | undefined;
     const abort = () => {
       if (finish) finish({ kind: "cancelled", reason: "aborted" });
       else abortedBeforeFactory = true;
     };
     signal.addEventListener("abort", abort, { once: true });
+    // AbortSignal does not replay an already-fired event to a new listener.
+    if (signal.aborted) abort();
 
     try {
+      if (abortedBeforeFactory || signal.aborted) {
+        return { kind: "cancelled", reason: "aborted" };
+      }
+
+      let inspectorActive = false;
+      let inspectorFocused = true;
+      try {
+        inspectorActive = !!this.options.isInspectorActive?.();
+        inspectorFocused = !!this.options.isInspectorOverlayFocused?.();
+      } catch (error) {
+        // A status callback must not turn a recoverable UI prompt into an
+        // invisible cancellation. Continue with the modal and explain the
+        // lost focus-recovery guarantee to diagnostics.
+        this.diagnostic(
+          `Unable to inspect subagent overlay focus; presenting child extension dialog anyway: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+      if (inspectorActive && !inspectorFocused) {
+        try {
+          restoreInspectorFocus = this.options.focusInspectorOverlayForDialog?.();
+        } catch (error) {
+          this.diagnostic(
+            `Unable to focus subagent inspector; presenting child extension dialog anyway: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        if (!restoreInspectorFocus) {
+          this.diagnostic(
+            "Subagent inspector focus could not be arranged; presenting child extension dialog without focus recovery",
+          );
+        }
+      }
+
+      if (abortedBeforeFactory || signal.aborted) {
+        return { kind: "cancelled", reason: "aborted" };
+      }
+
       const result = await this.ctx.ui.custom(
         (tui: any, theme: PresenterTheme, _keybindings: any, done: (value: ChildUIDialogDecision) => void) => {
+          const settle = (decision: ChildUIDialogDecision): void => {
+            if (settled) return;
+            settled = true;
+            done(decision);
+          };
+          finish = settle;
           const actualTheme = theme || fallbackTheme;
           const itemForPresenter = { ...item, queueDepth };
           const component = new ChildUIDialogComponent(
             itemForPresenter,
             tui,
             actualTheme,
-            (decision) => done(decision),
+            settle,
             this.now,
           );
-          finish = (decision) => done(decision);
-          if (abortedBeforeFactory || signal.aborted) finish({ kind: "cancelled", reason: "aborted" });
+          if (abortedBeforeFactory || signal.aborted) settle({ kind: "cancelled", reason: "aborted" });
           return component;
         },
         // This is intentionally a temporary non-overlay custom UI. The
@@ -422,7 +547,9 @@ export class ExtensionUIDialogPresenter implements ChildUIDialogPresenter {
         // when Pi closes this component.
         { overlay: false },
       );
-      if (!result) return { kind: "cancelled", reason: "closed" };
+      if (!result) {
+        return { kind: "cancelled", reason: signal.aborted ? "aborted" : "closed" };
+      }
       return result as ChildUIDialogDecision;
     } catch (error) {
       this.diagnostic(
@@ -430,6 +557,19 @@ export class ExtensionUIDialogPresenter implements ChildUIDialogPresenter {
       );
       return { kind: "cancelled", reason: "presenter failure" };
     } finally {
+      try {
+        restoreInspectorFocus?.();
+      } catch (error) {
+        // The answer already belongs to the user. A stale or failing overlay
+        // handle must not replace it with a presenter error.
+        try {
+          this.diagnostic(
+            `Unable to restore subagent inspector focus after child extension dialog: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        } catch {
+          // Diagnostics are best-effort during teardown.
+        }
+      }
       signal.removeEventListener("abort", abort);
     }
   }
@@ -441,7 +581,11 @@ export class ExtensionUIDialogPresenter implements ChildUIDialogPresenter {
       // A notification failure must not turn a safe cancellation into a child
       // runner failure.
     }
-    this.options.onDiagnostic?.(message);
+    try {
+      this.options.onDiagnostic?.(message);
+    } catch {
+      // Diagnostics are best-effort and must not change the dialog decision.
+    }
   }
 }
 

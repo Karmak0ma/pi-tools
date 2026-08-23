@@ -97,7 +97,39 @@ export class SubagentTuiManager {
   get isOverlayFocusedVisible(): boolean {
     if (!this._active || !this.overlayHandle) return false;
     if (typeof this.overlayHandle.isFocused !== "function") return false;
+    if (typeof this.overlayHandle.isHidden === "function" && this.overlayHandle.isHidden()) return false;
     return !!this.overlayHandle.isFocused();
+  }
+
+  /**
+   * Temporarily focus the visible inspector overlay for a non-overlay dialog.
+   * The returned callback restores the pre-dialog focus state. Keeping this
+   * operation here prevents presenters from depending on Pi's raw handle or
+   * its overlay stack implementation.
+   */
+  focusInspectorOverlayForDialog(): (() => void) | undefined {
+    const handle = this.overlayHandle;
+    if (!this._active || !handle) return undefined;
+    if (
+      typeof handle.isFocused !== "function" ||
+      typeof handle.focus !== "function" ||
+      typeof handle.unfocus !== "function"
+    ) {
+      return undefined;
+    }
+
+    try {
+      if (typeof handle.isHidden === "function" && handle.isHidden()) return undefined;
+      if (handle.isFocused()) return () => {};
+      handle.focus();
+      // Pi's focus call is synchronous. Verify it so a partial or stale handle
+      // does not claim to protect focus recovery when it did not do so.
+      if (!handle.isFocused()) return undefined;
+    } catch {
+      return undefined;
+    }
+
+    return () => handle.unfocus();
   }
 
   /**

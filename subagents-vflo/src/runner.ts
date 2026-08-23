@@ -40,13 +40,26 @@ export function getPiInvocation(args: string[]): { command: string; args: string
   return { command: "pi", args };
 }
 
-// ─── Temp File Management ────────────────────────────────────────────────────
+// ─── Temp Session Management ─────────────────────────────────────────────────
+
+/**
+ * Create a private session directory for one child.
+ *
+ * Child sessions are intentionally isolated from the parent's normal session
+ * directory, but they are now persisted so their JSONL histories can be
+ * inspected after the child exits. A unique directory also prevents parallel
+ * children from sharing pi's per-working-directory session index.
+ */
+export async function createSubagentSessionDir(): Promise<string> {
+  return fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
+}
 
 export async function writePromptToTempFile(
   agentName: string,
   prompt: string,
+  existingDir?: string,
 ): Promise<{ dir: string; filePath: string }> {
-  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
+  const tmpDir = existingDir || await createSubagentSessionDir();
   const safeName = agentName.replace(/[^\w.-]+/g, "_");
   const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
   await withFileMutationQueue(filePath, async () => {
@@ -135,7 +148,11 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
     onProcessExit,
   } = options;
 
-  const args: string[] = ["--mode", "rpc", "--no-session", "--no-extensions"];
+  // Keep each child history in its own /tmp directory. Do not use
+  // --no-session: the resulting JSONL file is useful for post-run inspection,
+  // while the unique directory keeps it separate from the parent's history.
+  const sessionDir = await createSubagentSessionDir();
+  const args: string[] = ["--mode", "rpc", "--session-dir", sessionDir, "--no-extensions"];
   if (childExtensionPaths && childExtensionPaths.length > 0) {
     for (const extPath of childExtensionPaths) {
       args.push("-e", extPath);
@@ -154,19 +171,24 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
     toolCalls: [],
   };
 
-  let tmpPromptDir: string | null = null;
   let tmpPromptPath: string | null = null;
   if (agentPrompt.trim()) {
-    const tmp = await writePromptToTempFile(agentName, agentPrompt);
-    tmpPromptDir = tmp.dir;
+    const tmp = await writePromptToTempFile(agentName, agentPrompt, sessionDir);
     tmpPromptPath = tmp.filePath;
     args.push("--append-system-prompt", tmpPromptPath);
   }
 
   const invocation = getPiInvocation(args);
+  // The parent pi process may expose its own session path through
+  // PI_SESSION_FILE. If inherited, that environment variable can redirect a
+  // child away from the explicit --session-dir above, so remove it before
+  // spawning. Other environment values remain available to child tools.
+  const childEnv = { ...process.env };
+  delete childEnv.PI_SESSION_FILE;
   const proc = (spawnProcess || spawn)(invocation.command, invocation.args, {
     cwd: resolvedCwd,
     shell: false,
+    env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
 
@@ -497,8 +519,9 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
     await processClosed;
     return result;
   } finally {
+    // Keep the session directory and its JSONL history in /tmp. Only the
+    // generated system-prompt input is disposable after the child exits.
     if (tmpPromptPath) try { fs.unlinkSync(tmpPromptPath); } catch { /* ignore */ }
-    if (tmpPromptDir) try { fs.rmdirSync(tmpPromptDir); } catch { /* ignore */ }
   }
 }
 
