@@ -418,8 +418,19 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
           if (contextTokens > 0) result.usage.contextTokens = contextTokens;
         }
         if (!result.model && msg.model) result.model = msg.model;
-        if (msg.stopReason) result.stopReason = msg.stopReason;
-        if (msg.errorMessage) result.errorMessage = msg.errorMessage;
+        if (msg.stopReason) {
+          result.stopReason = msg.stopReason;
+          if (msg.errorMessage) {
+            result.errorMessage = msg.errorMessage;
+          } else if (msg.stopReason !== "error" && msg.stopReason !== "aborted") {
+            // Pi can retry after a transient transport error. A later normal
+            // assistant completion is the new terminal state, so do not let
+            // the earlier error message make the recovered run fail.
+            result.errorMessage = undefined;
+          }
+        } else if (msg.errorMessage) {
+          result.errorMessage = msg.errorMessage;
+        }
 
         if (Array.isArray(msg.content)) {
           let messageText = "";

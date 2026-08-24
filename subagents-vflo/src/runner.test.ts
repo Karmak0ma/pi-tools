@@ -13,7 +13,18 @@ class FakeChild extends EventEmitter {
   exitCode: number | null = null;
   responses: any[] = [];
 
-  constructor() {
+  constructor(
+    private readonly promptEvents: any[] = [
+      {
+        type: "extension_ui_request",
+        id: "ui-1",
+        method: "select",
+        title: "Danger",
+        options: ["Allow once", "Deny"],
+      },
+      { type: "agent_settled" },
+    ],
+  ) {
     super();
     this.stdin.on("data", (data: Buffer) => {
       for (const line of data.toString().split("\n")) {
@@ -21,14 +32,9 @@ class FakeChild extends EventEmitter {
         const message = JSON.parse(line);
         if (message.type === "prompt") {
           this.stdout.write(JSON.stringify({ type: "response", id: message.id, success: true }) + "\n");
-          this.stdout.write(JSON.stringify({
-            type: "extension_ui_request",
-            id: "ui-1",
-            method: "select",
-            title: "Danger",
-            options: ["Allow once", "Deny"],
-          }) + "\n");
-          this.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\n");
+          for (const event of this.promptEvents) {
+            this.stdout.write(JSON.stringify(event) + "\n");
+          }
           queueMicrotask(() => {
             this.exitCode = 0;
             this.emit("close", 0);
@@ -92,5 +98,91 @@ describe("runChild extension UI transport", () => {
     expect(secondResponse).toBe(false);
     expect(child.responses).toEqual([{ type: "extension_ui_response", id: "ui-1", value: "Deny" }]);
     expect(events.map((event) => event.type)).toContain("extension_ui_request");
+  });
+
+  it("clears a transient WebSocket error after Pi retries and settles successfully", async () => {
+    const child = new FakeChild([
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: "WebSocket error",
+          content: [],
+        },
+      },
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "toolUse",
+          content: [{ type: "toolCall", name: "bash", arguments: { command: "true" } }],
+        },
+      },
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "stop",
+          content: [{ type: "text", text: "Recovered successfully" }],
+        },
+      },
+      { type: "agent_settled" },
+    ]);
+    let sessionDir = "";
+
+    const result = await runChild({
+      resolvedTools: ["bash"],
+      resolvedCwd: "/tmp",
+      agentName: "worker",
+      agentPrompt: "",
+      taskText: "task",
+      spawnProcess: ((_command: string, args: string[], _options: { env?: NodeJS.ProcessEnv }) => {
+        const sessionDirFlag = args.indexOf("--session-dir");
+        sessionDir = args[sessionDirFlag + 1];
+        return child;
+      }) as any,
+    });
+
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    expect(result.exitCode).toBe(0);
+    expect(result.stopReason).toBe("stop");
+    expect(result.errorMessage).toBeUndefined();
+    expect(result.finalOutput).toContain("Recovered successfully");
+    expect(result.toolCalls).toEqual([{ name: "bash", argsPreview: '{"command":"true"}' }]);
+  });
+
+  it("keeps an unrecovered terminal assistant error", async () => {
+    const child = new FakeChild([
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "error",
+          errorMessage: "Provider failed",
+          content: [],
+        },
+      },
+      { type: "agent_settled" },
+    ]);
+    let sessionDir = "";
+
+    const result = await runChild({
+      resolvedTools: ["bash"],
+      resolvedCwd: "/tmp",
+      agentName: "worker",
+      agentPrompt: "",
+      taskText: "task",
+      spawnProcess: ((_command: string, args: string[], _options: { env?: NodeJS.ProcessEnv }) => {
+        const sessionDirFlag = args.indexOf("--session-dir");
+        sessionDir = args[sessionDirFlag + 1];
+        return child;
+      }) as any,
+    });
+
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    expect(result.exitCode).toBe(0);
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toBe("Provider failed");
   });
 });

@@ -7,7 +7,13 @@
 import * as os from "node:os";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
-import type { LiveSubagentToolDetails, PersistedSubagentToolDetails, PersistedTaskSummary, TaskUsage } from "./types.js";
+import {
+  isTaskFailed,
+  type LiveSubagentToolDetails,
+  type PersistedSubagentToolDetails,
+  type PersistedTaskSummary,
+  type TaskUsage,
+} from "./types.js";
 
 // ─── Render Cache ────────────────────────────────────────────────────────────
 
@@ -176,7 +182,6 @@ export function renderResult(result: any, options: { expanded: boolean }, theme:
   const mdTheme = getMarkdownTheme();
 
   // Determine overall status
-  const isTaskFailed = (s: any) => !!(s.errorMessage || s.failed || s.status === "error" || s.status === "aborted" || s.stopReason === "aborted" || s.stopReason === "error");
   const completedCount = summaries.filter((s: any) => !isTaskFailed(s) && s.status !== "running" && s.status !== "queued").length;
   const errorCount = summaries.filter((s: any) => isTaskFailed(s)).length;
   const runningCount = "live" in details && details.live
@@ -211,7 +216,7 @@ export function renderResult(result: any, options: { expanded: boolean }, theme:
     ));
 
     for (const s of summaries as PersistedTaskSummary[]) {
-      const isFailed = !!(s.errorMessage || s.failed || s.stopReason === "aborted" || s.stopReason === "error");
+      const isFailed = isTaskFailed(s);
       const sIcon = s.stopReason === "aborted"
         ? theme.fg("warning", "⊘")
         : isFailed
@@ -287,7 +292,7 @@ export function renderResult(result: any, options: { expanded: boolean }, theme:
   // When live streaming, use a fixed-height compact format to prevent height changes
   if (isLive) {
     for (const s of summaries as any[]) {
-      const isFailed = !!(s.errorMessage || s.failed || s.status === "error" || s.status === "aborted" || s.stopReason === "aborted" || s.stopReason === "error");
+      const isFailed = isTaskFailed(s);
       const sIcon = (s.status === "running")
         ? theme.fg("warning", "⏳")
         : (s.status === "aborted" || s.stopReason === "aborted")
@@ -305,7 +310,7 @@ export function renderResult(result: any, options: { expanded: boolean }, theme:
 
   // Completed/static collapsed view — full detail
   for (const s of summaries as any[]) {
-    const isFailed = !!(s.errorMessage || s.failed || s.status === "error" || s.status === "aborted" || s.stopReason === "aborted" || s.stopReason === "error");
+    const isFailed = isTaskFailed(s);
     const sIcon = (s.status === "running")
       ? theme.fg("warning", "⏳")
       : (s.status === "aborted" || s.stopReason === "aborted")

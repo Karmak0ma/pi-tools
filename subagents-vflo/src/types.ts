@@ -92,6 +92,29 @@ export function contextTokensFromUsage(usage: {
 
 export type TaskStatus = "queued" | "running" | "completed" | "error" | "aborted";
 
+/**
+ * Fields that can describe a task failure at either runtime or persistence
+ * boundaries. Keeping this decision in one place prevents a transient child
+ * error from being treated as success by one consumer and failure by another.
+ */
+export interface TaskFailureState {
+  stopReason?: string;
+  errorMessage?: string;
+  failed?: boolean;
+  status?: TaskStatus;
+}
+
+export function isTaskFailed(task: TaskFailureState): boolean {
+  return !!(
+    task.errorMessage ||
+    task.failed ||
+    task.status === "error" ||
+    task.status === "aborted" ||
+    task.stopReason === "error" ||
+    task.stopReason === "aborted"
+  );
+}
+
 // ─── Runtime Tracker Types ───────────────────────────────────────────────────
 
 export interface LiveTaskSummary {

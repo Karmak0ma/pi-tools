@@ -29,6 +29,7 @@ import {
   THINKING_LEVELS,
   contextTokensFromUsage,
   emptyUsage,
+  isTaskFailed,
 } from "./types.js";
 import { SubagentTuiManager } from "./tui.js";
 import type { ActiveChildToolCall } from "./rpc-extension-ui.js";
@@ -545,10 +546,7 @@ export default function (pi: ExtensionAPI) {
             instance.summary.errorMessage = childResult.errorMessage;
             instance.summary.model = childResult.model || instance.model;
 
-            const isError =
-              childResult.exitCode !== 0 ||
-              childResult.stopReason === "error" ||
-              childResult.stopReason === "aborted";
+            const isError = childResult.exitCode !== 0 || isTaskFailed(childResult);
 
             if (isError) {
               tracker.updateStatus(id, childResult.stopReason === "aborted" ? "aborted" : "error");
@@ -580,9 +578,7 @@ export default function (pi: ExtensionAPI) {
       updater.flush();
 
       // Build final result
-      const successCount = results.filter(
-        (r) => !r.errorMessage && r.stopReason !== "error" && r.stopReason !== "aborted" && !r.failed,
-      ).length;
+      const successCount = results.filter((r) => !isTaskFailed(r)).length;
 
       // Single-task: lean output
       if (results.length === 1) {
@@ -612,7 +608,7 @@ export default function (pi: ExtensionAPI) {
 
       // Multi-task: structured, parent-readable output
       const taskSections = results.map((r) => {
-        const failed = !!(r.errorMessage || r.failed || r.stopReason === "error" || r.stopReason === "aborted");
+        const failed = isTaskFailed(r);
         const status = failed ? "failed" : "completed";
         const parts: string[] = [`[${r.agent}] ${status}`];
         if (r.errorMessage) parts.push(`Error: ${r.errorMessage}`);
@@ -923,7 +919,11 @@ function makePersistedSummary(instance: {
   stderr: string;
   status: TaskStatus;
 }): PersistedTaskSummary {
-  const failed = instance.status === "error" || instance.status === "aborted";
+  const failed = isTaskFailed({
+    status: instance.status,
+    stopReason: instance.summary.stopReason,
+    errorMessage: instance.summary.errorMessage,
+  });
   return {
     agent: instance.agent,
     source: instance.summary.source,
