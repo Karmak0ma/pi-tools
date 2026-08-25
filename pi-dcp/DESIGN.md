@@ -855,7 +855,7 @@ UI behavior:
 - detailed notification: action, block topic, count, estimated before/after/saved, duration, and confidence; summary text only when `showCompression` is true;
 - minimal: action and estimated tokens;
 - off: no UI, but diagnostics remain available;
-- TUI may use `notify` and a status key, not a bespoke component in MVP;
+- Detailed compression feedback uses the registered compression tool result renderer in TUI; it renders the option-3 context strip from Pi `Theme` tokens on every refresh, while `notify` remains the toast/non-TUI delivery path;
 - RPC uses supported notify/status/dialog methods;
 - JSON/print never write decorative UI to stdout from the extension; diagnostics use Pi extension errors or stderr logger as appropriate;
 - optional custom-entry renderer may show audit operations in TUI without placing them in model context.

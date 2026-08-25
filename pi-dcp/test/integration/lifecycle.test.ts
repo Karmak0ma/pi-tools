@@ -163,6 +163,13 @@ describe("extension capability gate", () => {
       if (succeeds) {
         expect(result.content[0].text).toContain("pi-dcp compressed 1 range(s)");
         expect(result.details.reason).toBeUndefined();
+        expect(result.details.notification).toMatchObject({
+          compressionCount: 1,
+          toolCount: 0,
+          messageCount: 2,
+          sessionTotalTokens: expect.any(Number),
+        });
+        expect(registered.renderResult).toEqual(expect.any(Function));
       } else {
         expect(result.content[0].text).toContain("compression_unavailable (extension_disabled)");
         expect(result.content[0].text).toContain("No aliases were published");

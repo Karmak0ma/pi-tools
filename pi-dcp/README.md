@@ -46,11 +46,11 @@ Nudges are scheduled after an agent settles and delivered through the next succe
 
 Notification level controls how much detail is shown (`off`, `minimal`, `summary`, or `detailed`). The notification channel is independent and can be `chat`, `toast`, or `both`:
 
-- `chat` adds a visible `pi-dcp.v2.notification` message to the transcript without triggering an agent turn.
+- `chat` keeps the feedback visible in the transcript without triggering an agent turn. Detailed compression feedback is rendered as a four-line context-reclamation receipt in the compression tool result.
 - `toast` uses Pi's transient UI notification.
 - `both` does both.
 
-Chat notifications are session messages and therefore may contribute to future context; they are not compression nudges and do not request model action.
+The detailed TUI receipt shows the compression number, a before/after context strip, tokens reclaimed and the percentage of the context window reclaimed, tools/messages covered by the call, the topic, and cumulative session savings. Its colors come from Pi's supplied `Theme` on every render, so changing the active theme updates existing receipts. Print/RPC output uses the same layout without ANSI color escapes. Chat notifications are not compression nudges and do not request model action.
 
 The editable file uses the same shape as the menu. For example:
 

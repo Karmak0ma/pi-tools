@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { CompressionParameters, isCompressionParams, normalizeCompressionParams } from "./schema.ts";
 import { buildCompressionEnvelope } from "./service.ts";
 import { modelKey, computeSnapshotHash } from "../identity/snapshot.ts";
@@ -7,15 +8,22 @@ import { projectContextEntries } from "../identity/project.ts";
 import { buildProtocolUnits } from "../identity/protocol.ts";
 import { reduceEnvelope } from "../state/reducer.ts";
 import { OPERATION_CUSTOM_TYPE } from "../state/operations.ts";
-import { formatNotification, notify } from "../ui/notify.ts";
+import { formatNotification, notify, renderCompressionNotification, type CompressionNotification } from "../ui/notify.ts";
 import { hashJson } from "../util/hash.ts";
 import { clearBaselines, findBaselineForParent, latestBaseline, noteSuccessfulCompression, pinBaseline, unpinBaseline, type DcpRuntime } from "../runtime.ts";
 import { persistSavingsBestEffort } from "../stats.ts";
 import { buildErrorText } from "./errors.ts";
 import { selectionRules } from "../prompts/defaults.ts";
 
+export interface CompressionToolResultDetails extends Record<string, unknown> {
+  runId?: string;
+  blockIds?: string[];
+  estimatedDelta?: number;
+  notification?: CompressionNotification;
+}
+
 export function registerCompressionTool(pi: ExtensionAPI, runtime: DcpRuntime): void {
-  const tool: ToolDefinition<typeof CompressionParameters> = {
+  const tool: ToolDefinition<typeof CompressionParameters, CompressionToolResultDetails> = {
     name: "compress",
     label: "Compress context",
     description: `Create faithful, contiguous, model-authored summaries for older resolved context.
@@ -61,6 +69,12 @@ Validation
     async execute(toolCallId, params, _signal, _onUpdate, ctx) {
       return executeCompression(toolCallId, params, ctx, pi, runtime);
     },
+    renderResult(result, _options, theme) {
+      const notification = result.details?.notification;
+      if (notification) return renderCompressionNotification(notification, theme);
+      const text = result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+      return new Text(theme.fg("toolOutput", text), 0, 0);
+    },
   };
   pi.registerTool(tool);
 }
@@ -91,7 +105,7 @@ export async function bindCompressionProvenance(toolCallId: string, ctx: Extensi
   });
 }
 
-async function executeCompression(toolCallId: string, rawParams: unknown, ctx: ExtensionContext, pi: ExtensionAPI, runtime: DcpRuntime): Promise<{ content: [{ type: "text"; text: string }]; details: Record<string, unknown> }> {
+async function executeCompression(toolCallId: string, rawParams: unknown, ctx: ExtensionContext, pi: ExtensionAPI, runtime: DcpRuntime): Promise<{ content: [{ type: "text"; text: string }]; details: CompressionToolResultDetails }> {
   try {
     // A v1 call is rejected before any state lookup. In particular, the model
     // cannot revive a deprecated singleton snapshot by echoing snapshotId.
@@ -182,13 +196,30 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
     runtime.generation++;
     clearBaselines(runtime);
     runtime.lastReadiness = { ready: false, reason: "state_invalidated", generation: runtime.generation };
-    const report = {
+    const estimatedTokens = built.blocks.reduce((sum, block) => sum + (block.estimatedSavingsTokens || 0), 0);
+    const coveredEntryIds = new Set<string>();
+    const coveredToolCallIds = new Set<string>();
+    for (const block of built.blocks) {
+      // Effective coverage includes the raw messages represented by nested
+      // blocks. Counting it here makes a recompression receipt describe the
+      // complete context reclaimed by this call, not only its outer wrapper.
+      for (const entryId of block.coverage.effectiveEntryIds) coveredEntryIds.add(entryId);
+      for (const toolCallId of block.coverage.effectiveToolCallIds) coveredToolCallIds.add(toolCallId);
+    }
+    const contextWindow = ctx.getContextUsage()?.contextWindow || ctx.model?.contextWindow || 0;
+    const contextPercent = contextWindow > 0 ? Math.round((estimatedTokens / contextWindow) * 1000) / 10 : undefined;
+    const report: CompressionNotification = {
       action: "compressed",
       topic: params.topic,
       count: built.blocks.length,
-      estimatedTokens: built.blocks.reduce((sum, block) => sum + (block.estimatedSavingsTokens || 0), 0),
+      estimatedTokens,
       confidence: "heuristic",
-    } as const;
+      compressionCount: dryRun.runs.size,
+      toolCount: coveredToolCallIds.size,
+      messageCount: coveredEntryIds.size,
+      contextPercent,
+      sessionTotalTokens: dryRun.savings.compression.tokens,
+    };
     notify(ctx, runtime.config, report);
     // The statistics belong in the tool result, not in a separate chat message.
     // Pi can only insert an extension message mid-turn with `deliverAs:
@@ -201,6 +232,10 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
         runId: built.envelope.operation.type === "compression.created" ? built.envelope.operation.runId : undefined,
         blockIds: built.blocks.map((block) => block.blockId),
         estimatedDelta: built.blocks.reduce((sum, block) => sum + block.estimatedSummaryTokens, 0),
+        // The rich receipt is the detailed notification surface. Respect the
+        // configured level so `off`, `minimal`, and `summary` keep their
+        // existing compact tool-result behavior.
+        notification: runtime.config.pruneNotification === "detailed" ? report : undefined,
       },
       };
     } finally {
