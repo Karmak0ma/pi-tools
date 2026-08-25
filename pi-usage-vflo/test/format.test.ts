@@ -50,7 +50,7 @@ const codexReport: UsageReport = {
 	buckets: [
 		{
 			id: "codex:primary",
-			label: "Primary limit",
+			label: "5-hour window",
 			groupId: "codex",
 			groupLabel: "Codex",
 			modelKeys: ["codex", "Codex"],
@@ -62,7 +62,7 @@ const codexReport: UsageReport = {
 		},
 		{
 			id: "codex:secondary",
-			label: "Secondary limit",
+			label: "Weekly window",
 			groupId: "codex",
 			groupLabel: "Codex",
 			modelKeys: ["codex", "Codex"],
@@ -108,7 +108,7 @@ describe("formatUsageStatusline", () => {
 				...codexReport.buckets,
 				{
 					id: "gpt-5:primary",
-					label: "Primary limit",
+					label: "5-hour window",
 					groupId: "gpt-5",
 					groupLabel: "GPT-5",
 					modelKeys: ["gpt-5", "GPT-5"],
@@ -120,7 +120,7 @@ describe("formatUsageStatusline", () => {
 				},
 				{
 					id: "gpt-5:secondary",
-					label: "Secondary limit",
+					label: "Weekly window",
 					groupId: "gpt-5",
 					groupLabel: "GPT-5",
 					modelKeys: ["gpt-5", "GPT-5"],

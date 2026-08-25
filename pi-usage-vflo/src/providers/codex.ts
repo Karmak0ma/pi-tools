@@ -105,7 +105,12 @@ function addWindow(
 	const resetsAt = asNumber(value.reset_at);
 	buckets.push({
 		id: `${groupId}:${position}`,
-		label: position === "primary" ? "Primary limit" : "Secondary limit",
+		// OpenAI calls these windows "primary" and "secondary", but those
+		// positions do not explain their duration. Use the same user-facing
+		// names as Anthropic when the API identifies the standard 5-hour and
+		// weekly windows. Keep the provider's positional terms as fallbacks so
+		// a new or omitted duration does not receive a misleading time label.
+		label: windowLabel(position, seconds),
 		groupId,
 		groupLabel,
 		modelKeys: [groupId, groupLabel],
@@ -116,6 +121,12 @@ function addWindow(
 		...(seconds !== undefined && seconds > 0 ? { windowMinutes: Math.ceil(seconds / 60) } : {}),
 		...(resetsAt !== undefined ? { resetsAt } : {}),
 	});
+}
+
+function windowLabel(position: "primary" | "secondary", seconds: number | undefined): string {
+	if (seconds === 5 * 60 * 60) return "5-hour window";
+	if (seconds === 7 * 24 * 60 * 60) return "Weekly window";
+	return position === "primary" ? "Primary limit" : "Secondary limit";
 }
 
 function asObject(value: unknown): Record<string, unknown> | undefined {

@@ -46,7 +46,7 @@ export interface ModelState {
 }
 
 // One consumption bucket reported by a subscription provider (e.g. Anthropic's
-// 5-hour and weekly windows, or Codex's primary/secondary limits). `remaining`
+// 5-hour and weekly windows used by Anthropic and OpenAI Codex). `remaining`
 // is a percentage (0-100) of the bucket left before the limit resets.
 export interface SubscriptionBucket {
 	id: string;

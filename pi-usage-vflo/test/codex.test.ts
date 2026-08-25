@@ -34,7 +34,7 @@ describe("normalizeCodexBackendPayload", () => {
 			buckets: [
 				{
 					id: "codex:primary",
-					label: "Primary limit",
+					label: "5-hour window",
 					groupId: "codex",
 					groupLabel: "Codex",
 					modelKeys: ["codex", "Codex"],
@@ -47,7 +47,7 @@ describe("normalizeCodexBackendPayload", () => {
 				},
 				{
 					id: "codex:secondary",
-					label: "Secondary limit",
+					label: "Weekly window",
 					groupId: "codex",
 					groupLabel: "Codex",
 					modelKeys: ["codex", "Codex"],
@@ -95,6 +95,23 @@ describe("normalizeCodexBackendPayload", () => {
 		]);
 		expect(report.metrics).toEqual([
 			{ id: "credits", label: "Credits", value: 42, unit: "count" },
+		]);
+	});
+
+	it("keeps positional labels when OpenAI omits window durations", () => {
+		const report = normalizeCodexBackendPayload(
+			{
+				rate_limit: {
+					primary_window: { used_percent: 1 },
+					secondary_window: { used_percent: 2 },
+				},
+			},
+			CAPTURED_AT,
+		);
+
+		expect(report.buckets.map((bucket) => bucket.label)).toEqual([
+			"Primary limit",
+			"Secondary limit",
 		]);
 	});
 

@@ -18,7 +18,7 @@ describe("Sidebar VFLO renderer", () => {
 				thinkingLevel: "medium",
 				activity: { state: "ready", label: "Ready", activeTools: [] },
 				context: undefined,
-				limits: { buckets: [{ id: "codex:primary", label: "Primary limit", remaining: 42.5 }] },
+				limits: { buckets: [{ id: "codex:primary", label: "5-hour window", remaining: 42.5 }] },
 				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				todos: [],
 				subagents: [],
@@ -29,6 +29,7 @@ describe("Sidebar VFLO renderer", () => {
 			20,
 		);
 		expect(lines.some((line) => line.includes("LIMITS"))).toBe(true);
+		expect(lines.some((line) => line.includes("5-hour window"))).toBe(true);
 		expect(lines.some((line) => line.includes("42.5%"))).toBe(true);
 	});
 
