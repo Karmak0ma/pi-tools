@@ -6,14 +6,17 @@ import { projectContextEntries } from "../../src/identity/project.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
 
 /**
- * Regression cover for the 2026-08-18 incident (session 01a014a0).
+ * Regression cover for incomplete-turn join incidents: the empty failed turn
+ * in session 01a014a0 (2026-08-18), and the contentful aborted turn in session
+ * 01a02e94 (2026-08-24).
  *
- * A provider 429 makes Pi write an assistant message with no content parts and
- * `stopReason: "error"`. When Pi auto-retries it removes that message from
- * `agent.state.messages` but keeps it in the session file. pi-dcp built its
- * expected list from the session file, so the two lists diverged, the join
- * failed with `join_ambiguous`, and every later request in that process was
- * sent completely uncompressed - the context tripled instead of shrinking.
+ * Pi persists incomplete assistant turns in the session file, but removes
+ * them from the context sent to a provider. This applies to every assistant
+ * turn whose stop reason is `error` or `aborted`, including turns that retain
+ * partial text, reasoning, or tool calls. pi-dcp built its expected list from
+ * the session file, so a retained partial turn made the lists diverge, the
+ * join failed with `join_ambiguous`, and every later request in that process
+ * was sent completely uncompressed.
  */
 
 function entriesFor(messages: AgentMessage[]) {
@@ -44,8 +47,8 @@ const history: AgentMessage[] = [
   { role: "user", content: "latest", timestamp: 4 },
 ];
 
-describe("assistant messages left behind by a failed request", () => {
-  it("is not projected, so a retry-spliced incoming list still joins", () => {
+describe("assistant messages left behind by an incomplete request", () => {
+  it("does not project an empty failed turn, so a retry-spliced incoming list still joins", () => {
     const entries = entriesFor(history);
     const projection = projectContextEntries(entries as any);
     expect(projection.ok).toBe(true);
@@ -65,6 +68,38 @@ describe("assistant messages left behind by a failed request", () => {
     const result = transformOutgoingContext(history, { ctx: ctxFor(entries), sessionId: "s", generation: 1, state: emptyState(), config: structuredClone(defaults) as any });
     expect(result.snapshot).toBeDefined();
     expect(result.messages).toContainEqual(failedRequest);
+  });
+
+  it.each([
+    {
+      name: "aborted tool call",
+      message: {
+        role: "assistant", stopReason: "aborted", timestamp: 2,
+        content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "sleep 10" } }],
+      } as unknown as AgentMessage,
+    },
+    {
+      name: "errored partial text",
+      message: {
+        role: "assistant", stopReason: "error", errorMessage: "connection lost", timestamp: 2,
+        content: [{ type: "text", text: "partial answer" }],
+      } as unknown as AgentMessage,
+    },
+  ])("does not project a contentful $name that Pi removes before dispatch", ({ message }) => {
+    const persisted: AgentMessage[] = [history[0], message, history[2], history[3]];
+    const entries = entriesFor(persisted);
+    const projection = projectContextEntries(entries as any);
+    expect(projection.ok).toBe(true);
+    if (!projection.ok) return;
+    expect(projection.messages).toHaveLength(3);
+    expect(projection.unprojectedEntryIds).toEqual(new Set(["entry-2"]));
+
+    // pi-ai transformMessages removes the incomplete turn based on stopReason,
+    // regardless of retained content. DCP must expect the same input shape.
+    const providerInput = [persisted[0], persisted[2], persisted[3]];
+    const result = transformOutgoingContext(providerInput, { ctx: ctxFor(entries), sessionId: "s", generation: 1, state: emptyState(), config: structuredClone(defaults) as any });
+    expect(result.reason).toBeUndefined();
+    expect(result.snapshot).toBeDefined();
   });
 
   // Blocks created before this rule existed can cover a failed request, or sit

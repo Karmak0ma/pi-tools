@@ -9,7 +9,7 @@ export type ProjectionResult =
     messages: ProjectedMessage[];
     /**
      * Entries on the branch that exist in the session file but are
-     * deliberately not projected (see `isRetryDroppableAssistant`). Callers
+     * deliberately not projected (see `isProviderDroppedAssistant`). Callers
      * that ask "does this entry id still exist on the branch?" - block
      * coverage and block anchors - must treat these as present, otherwise a
      * block created before this rule existed would silently go unavailable
@@ -20,22 +20,29 @@ export type ProjectionResult =
   | { ok: false; reason: "projection_unsupported" };
 
 /**
- * An assistant message with no content parts carries nothing for the provider.
- * Pi writes one for every failed request (rate limit, overload, abort) and then,
- * when it auto-retries, removes it from `agent.state.messages` while keeping it
- * in the session file (see `_prepareRetry` in Pi's agent-session). If we kept
- * projecting it, our "expected" list would permanently contain messages the
- * incoming list no longer has, `joinProjectedMessages` would fail closed with
- * `join_ambiguous`, and every later request in the process would be sent raw.
+ * Pi keeps incomplete assistant turns in the session file, but pi-ai's
+ * `transformMessages` removes every `error` or `aborted` assistant turn before
+ * provider dispatch. The removal depends only on stopReason: a turn can retain
+ * partial text, reasoning, or tool calls and still disappear from the incoming
+ * list DCP receives. Empty assistant turns are also omitted because they carry
+ * no provider-visible content.
  *
- * Dropping it is safe in both directions: when Pi does keep the message, it
- * simply arrives as an unmatched extra and the pipeline passes it through
- * byte-for-byte, so the provider still receives exactly what Pi decided to send.
+ * DCP's expected projection must follow that boundary. Otherwise one persisted
+ * partial turn permanently makes `joinProjectedMessages` fail closed with
+ * `join_ambiguous`, and every later request is sent without compression.
+ *
+ * Omitting these entries is safe if another Pi path keeps one in the incoming
+ * list: the join treats it as an unmatched extra and the pipeline passes it
+ * through byte-for-byte. `unprojectedEntryIds` still preserves its identity for
+ * legacy block coverage and anchors.
  */
-function isRetryDroppableAssistant(entry: SessionEntry): boolean {
+function isProviderDroppedAssistant(entry: SessionEntry): boolean {
   if (entry.type !== "message") return false;
   const message = (entry as SessionMessageEntry).message;
-  return message.role === "assistant" && Array.isArray(message.content) && message.content.length === 0;
+  if (message.role !== "assistant") return false;
+  return message.stopReason === "error"
+    || message.stopReason === "aborted"
+    || (Array.isArray(message.content) && message.content.length === 0);
 }
 
 /** Versioned Pi 0.84.1 projection adapter. Keep this local: private Pi internals are not imported. */
@@ -44,7 +51,7 @@ export function projectContextEntries(entries: readonly SessionEntry[]): Project
   const unprojectedEntryIds = new Set<string>();
   for (const entry of entries) {
     if (typeof entry.id !== "string" || !entry.id || typeof entry.timestamp !== "string" || !Number.isFinite(Date.parse(entry.timestamp))) return { ok: false, reason: "projection_unsupported" };
-    if (isRetryDroppableAssistant(entry)) { unprojectedEntryIds.add(entry.id); continue; }
+    if (isProviderDroppedAssistant(entry)) { unprojectedEntryIds.add(entry.id); continue; }
     let projected: AgentMessage[];
     switch (entry.type) {
       case "message": projected = [(entry as SessionMessageEntry).message]; break;

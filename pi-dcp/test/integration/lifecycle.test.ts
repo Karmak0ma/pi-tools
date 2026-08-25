@@ -337,9 +337,12 @@ describe("extension capability gate", () => {
 
   it("schedules a turn nudge below the context threshold when useful savings exist", async () => {
     const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+    // The heuristic counts roughly one token per four bytes and reserves 25%
+    // for the future summary. 192k bytes therefore yields about 36k tokens of
+    // useful savings, safely above the default 32k semantic-nudge threshold.
     const entries = [
       { type: "message", id: "user-1", parentId: null, timestamp: new Date(1).toISOString(), message: { role: "user", content: "old request", timestamp: 1 } },
-      { type: "message", id: "assistant-1", parentId: "user-1", timestamp: new Date(2).toISOString(), message: { role: "assistant", content: [{ type: "text", text: "x".repeat(64000) }], api: "test", provider: "test", model: "model", stopReason: "stop", timestamp: 2 } },
+      { type: "message", id: "assistant-1", parentId: "user-1", timestamp: new Date(2).toISOString(), message: { role: "assistant", content: [{ type: "text", text: "x".repeat(192000) }], api: "test", provider: "test", model: "model", stopReason: "stop", timestamp: 2 } },
       { type: "message", id: "user-2", parentId: "assistant-1", timestamp: new Date(3).toISOString(), message: { role: "user", content: "current request", timestamp: 3 } },
     ] as any[];
     const appended: any[] = [];
