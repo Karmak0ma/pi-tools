@@ -49,6 +49,8 @@ export interface UsageReport {
 export interface ResolvedUsageAuth {
 	apiKey?: string;
 	headers: Record<string, string>;
+	/** Provider-specific usage endpoint selected from validated credential metadata. */
+	endpointUrl?: string;
 	fingerprint: string;
 	secrets: string[];
 	model: PiModel;
@@ -93,4 +95,13 @@ export type CodexBackendPayload = {
 	additional_rate_limits?: unknown;
 	credits?: unknown;
 	rate_limit_reset_credits?: unknown;
+};
+
+export type GitHubCopilotUsagePayload = {
+	login?: unknown;
+	username?: unknown;
+	copilot_plan?: unknown;
+	quota_reset_date?: unknown;
+	quota_reset_date_utc?: unknown;
+	quota_snapshots?: unknown;
 };

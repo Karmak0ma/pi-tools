@@ -1,14 +1,20 @@
 # pi-usage-vflo
 
-Pi extension showing subscription usage for Claude (claude.ai OAuth) and OpenAI Codex (ChatGPT), as a statusline item and a `/usage` menu.
+Pi extension showing subscription usage for Claude, OpenAI Codex, and GitHub Copilot, as a statusline item and a `/usage` menu.
 
-Replaces `@narumitw/pi-usage` for these two providers: it exposes the same `UsageReport` library API, which `sidebar-vflo` consumes for its Model panel subscription row.
+Replaces `@narumitw/pi-usage` for these providers: it exposes the same `UsageReport` library API, which `sidebar-vflo` consumes for its Limits panel.
 
 ## What it shows
 
-- **Statusline** (provider-bound): `claude 5h 38% · wk 62%` when the current model is `anthropic`, `codex 5h 41% · wk 39%` when it is `openai-codex`. Unsupported providers (e.g. `opencode-cli`) show nothing. Refreshed every 5 minutes while a session is active.
-- **`/usage` menu**: both providers' reports at once — remaining percentage per window, resets-at times, and Codex credits. `Refresh` re-queries both; `Close` exits.
+- **Statusline** (provider-bound): `claude 5h 38% · wk 62%` for `anthropic`, `codex 5h 41% · wk 39%` for `openai-codex`, and `copilot premium 67%` for `github-copilot`. Unsupported providers (e.g. `opencode-cli`) show nothing. Refreshed every 5 minutes while a session is active.
+- **`/usage` menu**: all supported providers' reports at once — remaining percentages, reset times, request counts, and Codex credits. `Refresh` re-queries all providers; `Close` exits.
 - **Fail closed**: missing credential or unverifiable account shows an explicit error (`auth unavailable` / `usage error`), never a guess.
+
+## GitHub Copilot setup
+
+GitHub Copilot is a built-in Pi provider; no `models.json` entry is needed. Run `/login`, select **GitHub Copilot**, complete GitHub's device flow, and then select a `github-copilot` model through `/model`. Pi stores the original GitHub OAuth token and a short-lived Copilot model token in `~/.pi/agent/auth.json`; this extension reads the credential through Pi's public credential API and sends the original OAuth token only to the matching GitHub quota origin.
+
+An environment-only `COPILOT_GITHUB_TOKEN` can authenticate model requests but cannot expose subscription quota. The statusline and sidebar therefore require Pi's OAuth login. GitHub Enterprise credentials use the Enterprise domain already captured by Pi's login flow.
 
 ## Data sources
 
@@ -16,8 +22,9 @@ Replaces `@narumitw/pi-usage` for these two providers: it exposes the same `Usag
 |---|---|---|
 | `anthropic` | `GET https://api.anthropic.com/api/oauth/usage` (undocumented, same as Claude Code `/usage`) | `Bearer sk-ant-oat01-…` OAuth token; API keys are rejected — they cannot report subscription usage |
 | `openai-codex` | `GET https://chatgpt.com/backend-api/wham/usage` (undocumented) | ChatGPT OAuth access token |
+| `github-copilot` | `GET https://api.github.com/copilot_internal/user` (undocumented; enterprise uses the matching `api.<domain>` origin) | GitHub OAuth token from Pi's `/login` flow (select GitHub Copilot) |
 
-Both are queried only when the resolved credential's base URL is the official origin; custom/proxy origins fail closed. Responses are cached 5 minutes per account fingerprint; errors are redacted and back off 30 seconds.
+Each endpoint is queried only when Pi resolves the matching provider through its official origin; custom/proxy origins fail closed. Copilot API-token-only configuration through `COPILOT_GITHUB_TOKEN` cannot report subscription quota because the quota endpoint requires the original GitHub OAuth token. Responses are cached 5 minutes per account fingerprint; errors are redacted and back off 30 seconds.
 
 ## Shared result file
 

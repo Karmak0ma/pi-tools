@@ -79,9 +79,10 @@ afterEach(() => {
 });
 
 describe("adapterForProvider", () => {
-	it("resolves the anthropic and openai-codex adapters", () => {
+	it("resolves all supported subscription adapters", () => {
 		expect(adapterForProvider("anthropic")?.id).toBe("anthropic");
 		expect(adapterForProvider("openai-codex")?.id).toBe("openai-codex");
+		expect(adapterForProvider("github-copilot")?.id).toBe("github-copilot");
 	});
 
 	it("returns undefined for unsupported providers", () => {
@@ -120,12 +121,36 @@ describe("resolveUsageAuth", () => {
 		expect(await resolveUsageAuth(ctx, adapterForProvider("anthropic")!, SALT)).toBeUndefined();
 	});
 
-	it("throws a redacted error when the registry rejects credential resolution", async () => {
+	it("does not expose opaque registry errors when credential resolution fails", async () => {
 		const ctx = mockCtx({
 			apiKeyResult: { ok: false, error: "bad secret sk-ant-oat01-abc" },
 		});
 		await expect(resolveUsageAuth(ctx, adapterForProvider("anthropic")!, SALT)).rejects.toThrow(
-			"bad secret sk-ant-oat01-abc",
+			"Claude credential resolution failed.",
+		);
+	});
+
+	it("sanitizes a rejected model-auth request", async () => {
+		const ctx = mockCtx();
+		(ctx.modelRegistry as unknown as { getApiKeyAndHeaders(): Promise<never> }).getApiKeyAndHeaders =
+			async () => {
+				throw new Error("leaked sk-ant-oat01-abc");
+			};
+
+		await expect(resolveUsageAuth(ctx, adapterForProvider("anthropic")!, SALT)).rejects.toThrow(
+			"Claude credential resolution failed.",
+		);
+	});
+
+	it("sanitizes a rejected provider-auth request", async () => {
+		const ctx = mockCtx();
+		(ctx.modelRegistry as unknown as { getProviderAuth(): Promise<never> }).getProviderAuth =
+			async () => {
+				throw new Error("leaked sk-ant-oat01-abc");
+			};
+
+		await expect(resolveUsageAuth(ctx, adapterForProvider("anthropic")!, SALT)).rejects.toThrow(
+			"Claude credential resolution failed.",
 		);
 	});
 
@@ -145,6 +170,149 @@ describe("resolveUsageAuth", () => {
 		await expect(resolveUsageAuth(ctx, adapterForProvider("anthropic")!, SALT)).rejects.toThrow(
 			/Claude usage requires the claude.ai subscription OAuth credential/,
 		);
+	});
+
+	it("uses Pi's stored GitHub OAuth token for Copilot quota", async () => {
+		const model = mockModel({
+			id: "gpt-5.4",
+			name: "GPT-5.4",
+			provider: "github-copilot",
+			baseUrl: "https://api.individual.githubcopilot.com",
+		});
+		const ctx = mockCtx({
+			model,
+			models: [model],
+			apiKeyResult: { ok: true, apiKey: "short-lived-copilot-token" },
+			providerAuth: {
+				auth: {
+					apiKey: "short-lived-copilot-token",
+					baseUrl: "https://api.individual.githubcopilot.com",
+				},
+			},
+		});
+		const auth = await resolveUsageAuth(
+			ctx,
+			adapterForProvider("github-copilot")!,
+			SALT,
+			() => ({
+				type: "oauth",
+				refresh: "github-oauth-token",
+				access: "short-lived-copilot-token",
+				expires: Date.now() + 60_000,
+			}),
+		);
+
+		expect(auth?.headers).toEqual({
+			Authorization: "Bearer github-oauth-token",
+			Accept: "application/json",
+		});
+		expect(auth?.endpointUrl).toBe("https://api.github.com/copilot_internal/user");
+		expect(auth?.secrets).toContain("github-oauth-token");
+	});
+
+	it("derives the Copilot quota endpoint for GitHub Enterprise", async () => {
+		const model = mockModel({
+			provider: "github-copilot",
+			baseUrl: "https://api.individual.githubcopilot.com",
+		});
+		const auth = await resolveUsageAuth(
+			mockCtx({
+				model,
+				models: [model],
+				apiKeyResult: { ok: true, apiKey: "copilot-token" },
+				providerAuth: {
+					auth: { apiKey: "copilot-token", baseUrl: "https://api.company.ghe.com" },
+				},
+			}),
+			adapterForProvider("github-copilot")!,
+			SALT,
+			() => ({
+				type: "oauth",
+				refresh: "enterprise-github-token",
+				access: "copilot-token",
+				expires: Date.now() + 60_000,
+				enterpriseUrl: "company.ghe.com",
+			}),
+		);
+
+		expect(auth?.endpointUrl).toBe("https://api.company.ghe.com/copilot_internal/user");
+	});
+
+	it("rejects a public Copilot auth origin for an Enterprise credential", async () => {
+		const model = mockModel({
+			provider: "github-copilot",
+			baseUrl: "https://api.individual.githubcopilot.com",
+		});
+		await expect(
+			resolveUsageAuth(
+				mockCtx({
+					model,
+					models: [model],
+					apiKeyResult: { ok: true, apiKey: "copilot-token" },
+					providerAuth: {
+						auth: {
+							apiKey: "copilot-token",
+							baseUrl: "https://api.individual.githubcopilot.com",
+						},
+					},
+				}),
+				adapterForProvider("github-copilot")!,
+				SALT,
+				() => ({
+					type: "oauth",
+					refresh: "enterprise-github-token",
+					access: "copilot-token",
+					expires: Date.now() + 60_000,
+					enterpriseUrl: "company.ghe.com",
+				}),
+			),
+		).rejects.toThrow(/cannot send a proxy-resolved credential/);
+	});
+
+	it("rejects a custom Copilot provider origin", async () => {
+		const model = mockModel({
+			provider: "github-copilot",
+			baseUrl: "https://api.individual.githubcopilot.com",
+		});
+		await expect(
+			resolveUsageAuth(
+				mockCtx({
+					model,
+					models: [model],
+					apiKeyResult: { ok: true, apiKey: "copilot-token" },
+					providerAuth: {
+						auth: { apiKey: "copilot-token", baseUrl: "https://proxy.example.com" },
+					},
+				}),
+				adapterForProvider("github-copilot")!,
+				SALT,
+				() => ({
+					type: "oauth",
+					refresh: "github-token",
+					access: "copilot-token",
+					expires: Date.now() + 60_000,
+				}),
+			),
+		).rejects.toThrow(/cannot send a proxy-resolved credential/);
+	});
+
+	it("rejects Copilot API-token configuration without Pi OAuth", async () => {
+		const model = mockModel({
+			provider: "github-copilot",
+			baseUrl: "https://api.individual.githubcopilot.com",
+		});
+		const ctx = mockCtx({
+			model,
+			models: [model],
+			apiKeyResult: { ok: true, apiKey: "copilot-api-token" },
+			providerAuth: {
+				auth: { apiKey: "copilot-api-token", baseUrl: "https://api.individual.githubcopilot.com" },
+			},
+		});
+
+		await expect(
+			resolveUsageAuth(ctx, adapterForProvider("github-copilot")!, SALT, () => undefined),
+		).rejects.toThrow(/requires Pi's OAuth login/);
 	});
 });
 
@@ -178,6 +346,45 @@ describe("anthropic adapter query", () => {
 		expect(report.buckets).toHaveLength(2);
 		expect(report.buckets[0].remaining).toBe(38);
 		expect(report.buckets[1].remaining).toBe(62);
+	});
+});
+
+describe("github copilot adapter query", () => {
+	it("fetches the Copilot user quota endpoint with GitHub OAuth", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				new Response(
+					JSON.stringify({
+						quota_snapshots: {
+							premium_interactions: { percent_remaining: 67 },
+						},
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				),
+			),
+		);
+		const auth = mockAuth();
+		auth.headers = {
+			Authorization: "Bearer github-oauth-token",
+			Accept: "application/json",
+		};
+		auth.endpointUrl = "https://api.github.com/copilot_internal/user";
+		auth.secrets = ["github-oauth-token"];
+		const report = await queryProviderUsage(
+			adapterForProvider("github-copilot")!,
+			auth,
+			new AbortController().signal,
+			15_000,
+		);
+
+		const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+		expect(String(url)).toBe("https://api.github.com/copilot_internal/user");
+		expect((init as RequestInit).headers).toMatchObject({
+			Authorization: "Bearer github-oauth-token",
+			Accept: "application/json",
+		});
+		expect(report.buckets[0]?.remaining).toBe(67);
 	});
 });
 

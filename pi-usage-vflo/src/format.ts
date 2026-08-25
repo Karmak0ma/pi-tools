@@ -30,6 +30,7 @@ export function formatUsageReport(report: UsageReport, displayState: UsageDispla
 export function formatUsageStatusline(report: UsageReport, model?: UsageModel): string | undefined {
 	if (report.providerId === "anthropic") return formatClaudeStatusline(report);
 	if (report.providerId === "openai-codex") return formatCodexStatusline(report, model);
+	if (report.providerId === "github-copilot") return formatGitHubCopilotStatusline(report);
 	return undefined;
 }
 
@@ -77,6 +78,18 @@ function formatCodexStatusline(report: UsageReport, model?: UsageModel): string 
 		);
 	}
 	return parts.length > 0 ? [prefix, parts.join(" · ")].join(" ") : formatCodexCreditsStatus(report);
+}
+
+function formatGitHubCopilotStatusline(report: UsageReport): string | undefined {
+	const bucket = report.buckets.find((candidate) => candidate.remaining !== undefined);
+	if (bucket?.remaining !== undefined) {
+		const quota = bucket.id.endsWith(":chat") ? "chat" : "premium";
+		return `copilot ${quota} ${clampPercent(bucket.remaining).toFixed(0)}%`;
+	}
+	const unlimited = report.metrics.find(
+		(metric) => metric.id === "quota" && metric.value === "unlimited",
+	);
+	return unlimited ? "copilot unlimited" : undefined;
 }
 
 function formatCodexCreditsStatus(report: UsageReport): string {
@@ -193,9 +206,11 @@ function formatCodexReport(lines: string[], report: UsageReport): void {
 
 function formatGenericReport(lines: string[], report: UsageReport): void {
 	for (const bucket of report.buckets) {
-		lines.push(
-			`${`${bucket.label}:`.padEnd(VALUE_COLUMN)}${formatMetricValue(bucket.remaining ?? bucket.used ?? "unavailable", bucket.unit)}`,
-		);
+		const value =
+			bucket.unit === "percent" && bucket.remaining !== undefined
+				? formatPercentBucket(bucket)
+				: formatMetricValue(bucket.remaining ?? bucket.used ?? "unavailable", bucket.unit);
+		lines.push(`${`${bucket.label}:`.padEnd(VALUE_COLUMN)}${value}`);
 	}
 	for (const metric of report.metrics) {
 		lines.push(

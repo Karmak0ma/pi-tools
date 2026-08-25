@@ -1,7 +1,7 @@
 {
   "name": "pi-usage-vflo",
   "version": "0.1.0",
-  "description": "Pi extension showing subscription usage for Claude (anthropic) and OpenAI Codex",
+  "description": "Pi extension showing subscription usage for Claude, OpenAI Codex, and GitHub Copilot",
   "private": true,
   "type": "module",
   "keywords": [

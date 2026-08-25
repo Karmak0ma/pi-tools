@@ -3,9 +3,11 @@ import { type ExtensionContext, readStoredCredential } from "@earendil-works/pi-
 import { errorMessage, fingerprintResolvedAuth, isAbortError, redactUsageError } from "./core.js";
 import { normalizeAnthropicOauthUsagePayload } from "./providers/anthropic.js";
 import { normalizeCodexBackendPayload } from "./providers/codex.js";
+import { normalizeGitHubCopilotUsagePayload } from "./providers/github-copilot.js";
 import type {
 	AnthropicOauthUsagePayload,
 	CodexBackendPayload,
+	GitHubCopilotUsagePayload,
 	PiModel,
 	ResolvedUsageAuth,
 	UsageProviderAdapter,
@@ -14,6 +16,7 @@ import type {
 
 const ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const GITHUB_COPILOT_USAGE_URL = "https://api.github.com/copilot_internal/user";
 const MAX_SUCCESS_BODY_BYTES = 64 * 1024;
 const MAX_ERROR_BODY_BYTES = 4 * 1024;
 
@@ -59,6 +62,27 @@ export const SUPPORTED_ADAPTERS: readonly UsageProviderAdapter[] = [
 			return normalizeCodexBackendPayload(payload as CodexBackendPayload, Date.now());
 		},
 	},
+	{
+		id: "github-copilot",
+		displayName: "GitHub Copilot",
+		semantics: {
+			kind: "consumer-subscription",
+			label: "GitHub Copilot subscription limits",
+		},
+		async query(auth, signal, timeoutMs) {
+			const payload = await fetchProviderJson(
+				auth.endpointUrl ?? GITHUB_COPILOT_USAGE_URL,
+				auth,
+				signal,
+				timeoutMs,
+				"GitHub Copilot usage endpoint",
+			);
+			return normalizeGitHubCopilotUsagePayload(
+				payload as GitHubCopilotUsagePayload,
+				Date.now(),
+			);
+		},
+	},
 ];
 
 export function adapterForProvider(
@@ -80,30 +104,57 @@ export async function resolveUsageAuth(
 	salt: Uint8Array = AUTH_FINGERPRINT_SALT,
 	credentialReader: StoredCredentialReader = readStoredCredential,
 ): Promise<ResolvedUsageAuth | undefined> {
-	if (ctx.model?.provider === adapter.id && !hasOfficialOrigin(ctx.model, adapter.id)) {
+	// Pi resolves Copilot model calls to a short-lived Copilot API token, but
+	// GitHub's quota endpoint requires the original GitHub OAuth token stored in
+	// the credential's `refresh` field. Read only that provider's canonical
+	// credential; never infer or exchange tokens in this extension.
+	let storedCredential: unknown;
+	try {
+		storedCredential = adapter.id === "github-copilot" ? credentialReader(adapter.id) : undefined;
+	} catch {
+		throw new Error(`${adapter.displayName} credential resolution failed.`);
+	}
+	const enterpriseDomain = githubCopilotEnterpriseDomain(storedCredential);
+	if (
+		ctx.model?.provider === adapter.id &&
+		!hasOfficialOrigin(ctx.model, adapter.id, enterpriseDomain)
+	) {
 		throw new Error(
 			`${adapter.displayName} usage cannot send a custom provider base URL credential to the official usage endpoint.`,
 		);
 	}
 
 	const model = candidateModels(ctx, adapter.id).find((candidate) =>
-		hasOfficialOrigin(candidate, adapter.id),
+		hasOfficialOrigin(candidate, adapter.id, enterpriseDomain),
 	);
 	if (!model) return undefined;
 	const registry = ctx.modelRegistry as unknown as UsageAuthRegistry;
 	let modelAuth: RequestAuth | undefined;
 	if (ctx.model?.provider === adapter.id && typeof registry.getApiKeyAndHeaders === "function") {
-		const result = await registry.getApiKeyAndHeaders(ctx.model);
-		if (!result.ok) throw new Error(redactUsageError(result.error));
+		let result: Awaited<ReturnType<NonNullable<UsageAuthRegistry["getApiKeyAndHeaders"]>>>;
+		try {
+			result = await registry.getApiKeyAndHeaders(ctx.model);
+		} catch {
+			throw new Error(`${adapter.displayName} credential resolution failed.`);
+		}
+		// Registry errors can contain provider command output. Do not publish
+		// that opaque text to the statusline or the cross-process failure file,
+		// where an accidentally echoed credential would persist in plaintext.
+		if (!result.ok) throw new Error(`${adapter.displayName} credential resolution failed.`);
 		if (authorizationFrom(result)) modelAuth = result;
 	}
 	if (typeof registry.getProviderAuth !== "function") {
 		throw new Error("pi-usage-vflo requires Pi 0.81.0 or newer to validate resolved provider auth.");
 	}
-	const providerResult = await registry.getProviderAuth(adapter.id);
+	let providerResult: Awaited<ReturnType<NonNullable<UsageAuthRegistry["getProviderAuth"]>>>;
+	try {
+		providerResult = await registry.getProviderAuth(adapter.id);
+	} catch {
+		throw new Error(`${adapter.displayName} credential resolution failed.`);
+	}
 	if (
 		providerResult?.auth.baseUrl &&
-		!hasOfficialUrlOrigin(providerResult.auth.baseUrl, adapter.id)
+		!hasOfficialResolvedAuthOrigin(providerResult.auth.baseUrl, adapter.id, enterpriseDomain)
 	) {
 		throw new Error(
 			`${adapter.displayName} usage cannot send a proxy-resolved credential to the official usage endpoint.`,
@@ -113,20 +164,38 @@ export async function resolveUsageAuth(
 	if (!auth) return undefined;
 	const authorization = authorizationFrom(auth);
 	if (!authorization) return undefined;
+	const runtimeSecrets = [auth.apiKey, headerValue(auth.headers, "Authorization"), authorization].filter(
+		(value): value is string => Boolean(value),
+	);
+
+	if (adapter.id === "github-copilot") {
+		const githubToken = githubCopilotOAuthToken(storedCredential);
+		if (!githubToken) {
+			throw new Error(
+				"GitHub Copilot usage requires Pi's OAuth login. A COPILOT_GITHUB_TOKEN API token cannot report subscription quota.",
+			);
+		}
+		const headers = { Authorization: `Bearer ${githubToken}`, Accept: "application/json" };
+		return {
+			headers,
+			endpointUrl: githubCopilotUsageUrl(enterpriseDomain),
+			fingerprint: fingerprintResolvedAuth({ headers }, salt),
+			secrets: [...runtimeSecrets, githubToken, `Bearer ${githubToken}`],
+			model,
+		};
+	}
+
 	if (adapter.id === "anthropic" && !/^Bearer\s+sk-ant-oat/u.test(authorization)) {
 		throw new Error(
 			"Claude usage requires the claude.ai subscription OAuth credential (sk-ant-oat…). An API key cannot report subscription usage.",
 		);
 	}
 	const headers = { Authorization: authorization };
-	const secrets = [auth.apiKey, headerValue(auth.headers, "Authorization"), authorization].filter(
-		(value): value is string => Boolean(value),
-	);
 	return {
 		apiKey: auth.apiKey,
 		headers,
 		fingerprint: fingerprintResolvedAuth({ headers }, salt),
-		secrets,
+		secrets: runtimeSecrets,
 		model,
 	};
 }
@@ -307,19 +376,96 @@ function authorizationFrom(auth: RequestAuth): string | undefined {
 	);
 }
 
-function hasOfficialOrigin(model: PiModel, providerId: string): boolean {
-	return hasOfficialUrlOrigin(model.baseUrl, providerId);
+function hasOfficialOrigin(
+	model: PiModel,
+	providerId: string,
+	githubEnterpriseDomain?: string,
+): boolean {
+	return hasOfficialUrlOrigin(model.baseUrl, providerId, githubEnterpriseDomain);
 }
 
-function hasOfficialUrlOrigin(value: string | undefined, providerId: string): boolean {
+function hasOfficialUrlOrigin(
+	value: string | undefined,
+	providerId: string,
+	githubEnterpriseDomain?: string,
+): boolean {
 	try {
 		const url = new URL(value ?? "");
 		if (providerId === "anthropic") return url.origin === "https://api.anthropic.com";
 		if (providerId === "openai-codex") return url.origin === "https://chatgpt.com";
+		if (providerId === "github-copilot") {
+			if (url.protocol !== "https:" || url.port) return false;
+			// Built-in model metadata keeps the public catalog base URL even for
+			// Enterprise accounts. The credential-specific endpoint is available
+			// only from getProviderAuth(), where the stricter check below applies.
+			const publicCopilotApi = /^api\.[a-z0-9-]+\.githubcopilot\.com$/u.test(url.hostname);
+			const enterpriseCopilotApi =
+				githubEnterpriseDomain !== undefined &&
+				(url.hostname === `api.${githubEnterpriseDomain}` ||
+					url.hostname === `copilot-api.${githubEnterpriseDomain}`);
+			return publicCopilotApi || enterpriseCopilotApi;
+		}
 		return false;
 	} catch {
 		return false;
 	}
+}
+
+function hasOfficialResolvedAuthOrigin(
+	value: string | undefined,
+	providerId: string,
+	githubEnterpriseDomain: string | undefined,
+): boolean {
+	if (providerId !== "github-copilot") {
+		return hasOfficialUrlOrigin(value, providerId, githubEnterpriseDomain);
+	}
+	try {
+		const url = new URL(value ?? "");
+		if (url.protocol !== "https:" || url.port) return false;
+		// Pi prefers the `proxy-ep` embedded in the short-lived Copilot token,
+		// converting `proxy.<enterprise>` to `api.<enterprise>`. If that field is
+		// absent, Pi falls back to `copilot-api.<enterprise>`. Accept exactly
+		// those two credential-derived hosts, not an arbitrary custom proxy.
+		if (githubEnterpriseDomain) {
+			return (
+				url.hostname === `api.${githubEnterpriseDomain}` ||
+				url.hostname === `copilot-api.${githubEnterpriseDomain}`
+			);
+		}
+		return /^api\.[a-z0-9-]+\.githubcopilot\.com$/u.test(url.hostname);
+	} catch {
+		return false;
+	}
+}
+
+function githubCopilotOAuthToken(credential: unknown): string | undefined {
+	if (!credential || typeof credential !== "object" || Array.isArray(credential)) return undefined;
+	const value = credential as Record<string, unknown>;
+	return value.type === "oauth" && typeof value.refresh === "string" && value.refresh
+		? value.refresh
+		: undefined;
+}
+
+function githubCopilotEnterpriseDomain(credential: unknown): string | undefined {
+	if (!credential || typeof credential !== "object" || Array.isArray(credential)) return undefined;
+	const raw = (credential as Record<string, unknown>).enterpriseUrl;
+	if (raw === undefined || raw === null || raw === "") return undefined;
+	if (typeof raw !== "string") throw new Error("GitHub Copilot credential has an invalid enterprise URL.");
+	try {
+		const url = new URL(raw.includes("://") ? raw : `https://${raw}`);
+		if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/") {
+			throw new Error("invalid enterprise URL");
+		}
+		return url.hostname;
+	} catch {
+		throw new Error("GitHub Copilot credential has an invalid enterprise URL.");
+	}
+}
+
+function githubCopilotUsageUrl(enterpriseDomain: string | undefined): string {
+	return enterpriseDomain
+		? `https://api.${enterpriseDomain}/copilot_internal/user`
+		: GITHUB_COPILOT_USAGE_URL;
 }
 
 function headerValue(

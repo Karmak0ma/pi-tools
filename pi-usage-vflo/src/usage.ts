@@ -485,7 +485,7 @@ export default function usageExtension(pi: ExtensionAPI): void {
 		}
 	};
 
-	const queryBothProviders = async (
+	const queryAllProviders = async (
 		ctx: ExtensionCommandContext,
 		force: boolean,
 		controller: AbortController,
@@ -548,7 +548,7 @@ export default function usageExtension(pi: ExtensionAPI): void {
 		const controller = new AbortController();
 		activeControllers.add(controller);
 		try {
-			const initialStates = await queryBothProviders(ctx, false, controller);
+			const initialStates = await queryAllProviders(ctx, false, controller);
 			if (!initialStates) return;
 			let visibleStates = initialStates;
 			publishCurrentState(ctx, visibleStates);
@@ -572,7 +572,7 @@ export default function usageExtension(pi: ExtensionAPI): void {
 				},
 				actions: {
 					refresh: async () => {
-						const refreshed = await queryBothProviders(ctx, true, controller);
+						const refreshed = await queryAllProviders(ctx, true, controller);
 						if (!refreshed) return { kind: "stay" };
 						visibleStates = refreshed;
 						publishCurrentState(ctx, visibleStates);

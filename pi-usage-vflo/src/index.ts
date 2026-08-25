@@ -19,6 +19,7 @@ import {
 } from "./query.js";
 import { normalizeAnthropicOauthUsagePayload } from "./providers/anthropic.js";
 import { normalizeCodexBackendPayload } from "./providers/codex.js";
+import { normalizeGitHubCopilotUsagePayload } from "./providers/github-copilot.js";
 import {
 	publishSharedFailure,
 	publishSharedReport,
@@ -37,6 +38,7 @@ export {
 	SUPPORTED_ADAPTERS,
 	normalizeAnthropicOauthUsagePayload,
 	normalizeCodexBackendPayload,
+	normalizeGitHubCopilotUsagePayload,
 	formatProviderStates,
 	formatUsageReport,
 	formatUsageStatusline,
@@ -62,6 +64,7 @@ export type { SharedProviderEntry, SharedReportFile } from "./shared-report.js";
 export type {
 	AnthropicOauthUsagePayload,
 	CodexBackendPayload,
+	GitHubCopilotUsagePayload,
 	PiModel,
 	ProviderUsageState,
 	ResolvedUsageAuth,

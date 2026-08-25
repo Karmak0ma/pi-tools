@@ -80,6 +80,27 @@ const codexReport: UsageReport = {
 	notes: ["Plan: ChatGPT Plus"],
 };
 
+const copilotReport: UsageReport = {
+	providerId: "github-copilot",
+	providerName: "GitHub Copilot",
+	capturedAt: 1_752_888_000_000,
+	source: "github-copilot-user",
+	semantics: { kind: "consumer-subscription", label: "GitHub Copilot subscription limits" },
+	accountLabel: "octocat",
+	buckets: [
+		{
+			id: "github-copilot:premium-interactions",
+			label: "Premium requests",
+			remaining: 67,
+			limit: 100,
+			unit: "percent",
+			period: "monthly",
+		},
+	],
+	metrics: [{ id: "requests-remaining", label: "Premium requests left", value: 201, unit: "count" }],
+	notes: ["Plan: individual_pro"],
+};
+
 afterEach(() => {
 	vi.useRealTimers();
 });
@@ -136,6 +157,20 @@ describe("formatUsageStatusline", () => {
 		expect(formatUsageStatusline(report, model)).toBe("codex gpt 5 5h 95% · wk 93%");
 	});
 
+	it("renders GitHub Copilot premium request quota", () => {
+		expect(formatUsageStatusline(copilotReport)).toBe("copilot premium 67%");
+	});
+
+	it("renders unlimited GitHub Copilot quota", () => {
+		expect(
+			formatUsageStatusline({
+				...copilotReport,
+				buckets: [],
+				metrics: [{ id: "quota", label: "Premium requests", value: "unlimited" }],
+			}),
+		).toBe("copilot unlimited");
+	});
+
 	it("falls back to codex credits status when no bucket has a remaining percent", () => {
 		const report: UsageReport = {
 			...codexReport,
@@ -176,6 +211,20 @@ describe("formatUsageReport", () => {
 				"",
 				"5-hour window:               [████████░░░░░░░░░░░░] 38% left (resets 15:30)",
 				"Weekly window:               [████████████░░░░░░░░] 62% left (resets 12:00 on 19 Aug)",
+			].join("\n"),
+		);
+	});
+
+	it("renders GitHub Copilot details with its account, quota, and plan", () => {
+		expect(formatUsageReport(copilotReport, "current")).toBe(
+			[
+				"GitHub Copilot Usage · Current",
+				"Account: octocat",
+				"Semantics: GitHub Copilot subscription limits",
+				"",
+				`Premium requests:${" ".repeat(12)}[█████████████░░░░░░░] 67% left`,
+				`Premium requests left:${" ".repeat(7)}201`,
+				"Plan: individual_pro",
 			].join("\n"),
 		);
 	});
