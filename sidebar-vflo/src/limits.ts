@@ -68,6 +68,11 @@ export function limitsFromEntry(
 	const failure = entry?.failure;
 
 	if (buckets.length === 0) {
+		// A successful unlimited report has no honest percentage bar to draw.
+		// State that entitlement directly instead of treating valid data as if
+		// the usage extension had not started yet.
+		const unlimited = entry?.report?.metrics.find((metric) => metric.value === "unlimited");
+		if (unlimited) return { buckets: [], note: `${unlimited.label}: unlimited` };
 		// No usable numbers yet. Explain which of the two reasons applies so the
 		// user can tell "still starting up" from "the provider refused us".
 		return { buckets: [], note: failure ? shorten(failure.message) : "Waiting for usage data…" };

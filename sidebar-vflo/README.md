@@ -2,7 +2,7 @@
 
 Configurable Pi right sidebar with model, activity, context, subscription limits, cumulative usage, TODOs, and subagent panels. It intentionally does **not** install a footer.
 
-For supported consumer subscriptions, a dedicated Limits panel shows one meter bar per rate-limit window — for example the separate 5-hour and weekly windows used by Anthropic and OpenAI Codex. Each bar empties as the window's remaining allowance shrinks.
+For supported consumer subscriptions, a dedicated Limits panel shows one meter bar per rate-limit window — for example the separate 5-hour and weekly windows used by Anthropic and OpenAI Codex, or GitHub Copilot's monthly premium-request quota. Each bar empties as the window's remaining allowance shrinks.
 
 The sidebar never calls the provider usage endpoints itself; those endpoints rate limit hard, and a second caller only makes both callers fail. The `pi-usage-vflo` extension owns the request and publishes its results to `~/.pi/agent/usage-vflo-shared.json`; the sidebar reads that file every 30 seconds while it is visible. **`pi-usage-vflo` must be installed and enabled**, otherwise the panel stays empty and says so. When numbers are missing or stale the panel shows a short note (`Waiting for usage data…`, `8m ago`, `refresh failed: …`) instead of disappearing. Unsupported/free providers such as OpenCode show no Limits panel at all.
 

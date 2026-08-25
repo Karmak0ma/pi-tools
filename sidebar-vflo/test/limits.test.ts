@@ -44,6 +44,61 @@ describe("limitsFromEntry", () => {
 		expect(state.buckets[0]?.remaining).toBe(80);
 	});
 
+	it("keeps GitHub Copilot premium-request quota for the sidebar", () => {
+		const copilotEntry: SharedProviderEntry = {
+			capturedAt: NOW,
+			report: {
+				providerId: "github-copilot",
+				providerName: "GitHub Copilot",
+				capturedAt: NOW,
+				source: "github-copilot-user",
+				semantics: {
+					kind: "consumer-subscription",
+					label: "GitHub Copilot subscription limits",
+				},
+				buckets: [
+					{
+						id: "github-copilot:premium-interactions",
+						label: "Premium requests",
+						remaining: 67,
+						limit: 100,
+						unit: "percent",
+						period: "monthly",
+					},
+				],
+				metrics: [],
+			},
+		};
+
+		expect(limitsFromEntry(copilotEntry, true, NOW).buckets).toEqual([
+			{
+				id: "github-copilot:premium-interactions",
+				label: "Premium requests",
+				remaining: 67,
+			},
+		]);
+	});
+
+	it("shows an unlimited subscription without inventing a percentage bar", () => {
+		const baseReport = entry(NOW).report!;
+		const state = limitsFromEntry(
+			{
+				capturedAt: NOW,
+				report: {
+					...baseReport,
+					providerId: "github-copilot",
+					providerName: "GitHub Copilot",
+					buckets: [],
+					metrics: [{ id: "quota", label: "Premium requests", value: "unlimited" }],
+				},
+			},
+			true,
+			NOW,
+		);
+
+		expect(state).toEqual({ buckets: [], note: "Premium requests: unlimited" });
+	});
+
 	it("adds no note while the data is fresh", () => {
 		expect(limitsFromEntry(entry(NOW - 30_000), true, NOW).note).toBeUndefined();
 	});
