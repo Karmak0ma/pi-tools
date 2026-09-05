@@ -44,7 +44,8 @@ Rules:
     name: "build",
     description: "General-purpose agent with coding capabilities",
     tools: [...DEFAULT_BUILD_TOOLS],
-    model: undefined,
+    model: "openai-codex/gpt-5.6-luna",
+    thinking: "xhigh",
     systemPrompt: `You are a build agent. Your job is to implement code changes.
 
 Rules:
