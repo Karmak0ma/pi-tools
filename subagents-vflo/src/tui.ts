@@ -17,6 +17,7 @@
  */
 
 import { isKeyRelease } from "@earendil-works/pi-tui";
+import { closeOverlayCustomUi } from "./overlay-close.js";
 import type { SubagentTracker, RuntimeSubagentInstance } from "./tracker.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -75,6 +76,7 @@ export class SubagentTuiManager {
   private overlayHandle: any = null;
   private inspectorComponent: InstanceType<typeof import("./components/inspector.js").InspectorComponent> | null = null;
   private removePageNavigationListener: (() => void) | null = null;
+  private exitScheduled: boolean = false;
   private readonly abortHandler?: (instance: RuntimeSubagentInstance) => void;
 
   constructor(
@@ -99,6 +101,45 @@ export class SubagentTuiManager {
     if (typeof this.overlayHandle.isFocused !== "function") return false;
     if (typeof this.overlayHandle.isHidden === "function" && this.overlayHandle.isHidden()) return false;
     return !!this.overlayHandle.isFocused();
+  }
+
+  /**
+   * Whether another visible overlay has taken keyboard focus from the inspector.
+   *
+   * `tui.isOverlayFocused()` is true only when the focused component is itself a
+   * visible overlay. A non-overlay dialog — the child extension UI presenter
+   * opens one in place of the editor — leaves it false, so that flow keeps its
+   * existing focus-recovery path through `focusInspectorOverlayForDialog()`.
+   */
+  private isDisplacedByForeignOverlay(): boolean {
+    const handle = this.overlayHandle;
+    const tui = this.tuiRef;
+    if (!this._active || !handle || !tui) return false;
+    if (typeof handle.isFocused !== "function" || typeof tui.isOverlayFocused !== "function") return false;
+    try {
+      if (handle.isFocused()) return false;
+      return !!tui.isOverlayFocused();
+    } catch {
+      // A partial or stale handle must never close the inspector by accident.
+      return false;
+    }
+  }
+
+  /**
+   * Close the inspector after the current render pass finishes.
+   *
+   * The displacement check runs from `render`, and pi-tui is iterating its
+   * overlay stack at that moment. Removing an entry there would corrupt that
+   * iteration, so defer to a microtask: it runs once the whole synchronous
+   * render pass has unwound.
+   */
+  private scheduleExit(): void {
+    if (this.exitScheduled) return;
+    this.exitScheduled = true;
+    queueMicrotask(() => {
+      this.exitScheduled = false;
+      this.exit();
+    });
   }
 
   /**
@@ -232,6 +273,16 @@ export class SubagentTuiManager {
 
         return {
           render: (width: number): string[] => {
+            // A dialog overlay — ask_user_question, for example — has taken
+            // keyboard focus. The user is looking at the main agent view now,
+            // so the inspector leaves instead of lingering invisibly and
+            // competing for focus every time that dialog hides itself. The
+            // user reopens the inspector deliberately with Ctrl+Down once the
+            // dialog is answered or cancelled.
+            if (manager.isDisplacedByForeignOverlay()) {
+              manager.scheduleExit();
+              return [];
+            }
             if (manager.overlayHandle && typeof manager.overlayHandle.isFocused === "function" && !manager.overlayHandle.isFocused()) {
               return [];
             }
@@ -262,6 +313,7 @@ export class SubagentTuiManager {
     } finally {
       this.clearPageNavigationListener();
       this._active = false;
+      this.exitScheduled = false;
       (globalThis as any).__powerlineVflo_yieldScroll = false;
       this.closeCallback = null;
       this.tuiRef = null;
@@ -279,13 +331,19 @@ export class SubagentTuiManager {
     this.clearPageNavigationListener();
     // Release scroll key ownership back to compositor
     (globalThis as any).__powerlineVflo_yieldScroll = false;
-    if (this.closeCallback) {
-      this.closeCallback();
-      this.closeCallback = null;
-    }
+
+    // Capture the teardown inputs before clearing them. The close path below
+    // needs the handle and the TUI, and re-entrant calls must find the manager
+    // already inactive.
+    const tui = this.tuiRef;
+    const handle = this.overlayHandle;
+    const closeCallback = this.closeCallback;
+    this.closeCallback = null;
     this.tuiRef = null;
     this.overlayHandle = null;
     this.inspectorComponent = null;
+
+    if (closeCallback) closeOverlayCustomUi(tui, handle, closeCallback);
   }
 
   private clearPageNavigationListener(): void {

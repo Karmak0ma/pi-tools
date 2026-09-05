@@ -1,6 +1,7 @@
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import type { DcpRuntime } from "../runtime.ts";
+import { closeOverlayCustomUi } from "../ui/overlay-close.ts";
 import { SAVINGS_SOURCES, readSavingsLedger, type SavingsSource, type SavingsTotals } from "../stats.ts";
 
 const SOURCE_LABELS: Record<SavingsSource, string> = {
@@ -23,7 +24,15 @@ export async function statsCommand(ctx: ExtensionCommandContext, runtime: DcpRun
     return;
   }
 
+  // Captured from `onHandle` so this overlay can remove its own entry on close.
+  // Pi's own teardown pops the TOPMOST overlay instead, which destroys another
+  // extension's overlay when one is stacked above this one.
+  let overlayHandle: any;
+  let overlayTui: any;
+
   await (ctx.ui as any).custom((tui: any, theme: any, keybindings: any, done: () => void) => {
+    overlayTui = tui;
+    const close = () => closeOverlayCustomUi(overlayTui, overlayHandle, done);
     let selectedTab = 0;
     const matches = (data: string, binding: string, fallback: string): boolean => !!keybindings?.matches?.(data, binding) || matchesKey(data, fallback as any);
     return {
@@ -56,11 +65,15 @@ export async function statsCommand(ctx: ExtensionCommandContext, runtime: DcpRun
           tui.requestRender?.(true);
           return;
         }
-        if (matches(data, "tui.select.cancel", Key.escape) || matches(data, "app.session.interrupt", "ctrl+up")) done();
+        if (matches(data, "tui.select.cancel", Key.escape) || matches(data, "app.session.interrupt", "ctrl+up")) close();
       },
       invalidate(): void {},
     };
-  }, { overlay: true, overlayOptions: { anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0 } });
+  }, {
+    overlay: true,
+    overlayOptions: { anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0 },
+    onHandle: (handle: any) => { overlayHandle = handle; },
+  });
 }
 
 export function formatStatsTable(totals: SavingsTotals): string[] {

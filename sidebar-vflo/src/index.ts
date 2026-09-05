@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { adapterForProvider, readSharedProviderEntry } from "pi-usage-vflo/src/index.js";
 import { matchesKey, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
+import { closeOverlayCustomUi } from "./overlay-close.js";
 import { limitsFromEntry } from "./limits.js";
 import { renderSidebar, type SidebarTheme } from "./render.js";
 import {
@@ -199,7 +200,13 @@ async function openSettings(runtime: Runtime): Promise<void> {
 		["usage", "Session usage"], ["todos", "Todos"], ["subagents", "Subagents"],
 	];
 	const presets: SidebarConfig["colorPreset"][] = ["monokai", "catppuccin", "dracula"];
+	// Captured from `onHandle` so this dialog can remove its own overlay entry
+	// instead of letting pi pop whichever overlay happens to be on top.
+	let settingsHandle: OverlayHandle | undefined;
+	let settingsTui: TUI | undefined;
 	await runtime.ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+		settingsTui = tui;
+		const close = () => closeOverlayCustomUi(settingsTui, settingsHandle, done);
 		let selected = 0;
 		const items = panelLabels.length + 1;
 		const render = (width: number): string[] => {
@@ -217,7 +224,7 @@ async function openSettings(runtime: Runtime): Promise<void> {
 			render,
 			invalidate() {},
 			handleInput(data: string) {
-				if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) { done(); return; }
+				if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) { close(); return; }
 				if (matchesKey(data, "up") || data === "k") selected = (selected + items - 1) % items;
 				else if (matchesKey(data, "down") || data === "j") selected = (selected + 1) % items;
 				else if (matchesKey(data, "enter") || matchesKey(data, "space")) {
@@ -234,7 +241,11 @@ async function openSettings(runtime: Runtime): Promise<void> {
 				tui.requestRender();
 			},
 		};
-	}, { overlay: true, overlayOptions: { anchor: "center", width: 48, maxHeight: "80%", margin: 2 } });
+	}, {
+		overlay: true,
+		overlayOptions: { anchor: "center", width: 48, maxHeight: "80%", margin: 2 },
+		onHandle: (handle) => { settingsHandle = handle; },
+	});
 }
 
 function setSidebarVisible(runtime: Runtime, visible: boolean): void {
@@ -333,7 +344,9 @@ function startOverlay(runtime: Runtime): void {
 
 function closeOverlay(runtime: Runtime): void {
 	runtime.overlayGeneration += 1;
-	runtime.closeOverlay?.();
+	// Route through the safe teardown: pi's own close pops the topmost overlay,
+	// which would destroy another extension's overlay stacked above the sidebar.
+	if (runtime.closeOverlay) closeOverlayCustomUi(runtime.tui, runtime.overlayHandle, runtime.closeOverlay);
 	runtime.closeOverlay = undefined;
 	runtime.overlayHandle = undefined;
 	runtime.overlayStarting = false;
