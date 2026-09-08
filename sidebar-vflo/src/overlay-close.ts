@@ -65,12 +65,49 @@ export function closeOverlayCustomUi(
     return;
   }
 
-  // `hideOverlay` normally lives on the TUI prototype. Track whether an own
-  // property already existed so the stub is deleted rather than left behind as
-  // a permanent shadow of the prototype method.
+  // ── Why the stub is removed by assignment and never by `delete` ────────────
+  //
+  // `tui` is not the TUI. Pi hands extensions a Proxy wrapped around an EMPTY
+  // object (`createInteractiveTuiReference` in pi's
+  // modes/interactive/tui-renderer.js) so that components keep one stable
+  // reference while pi replaces the real renderer underneath. That Proxy traps
+  // `get`, `set`, `has` and `getPrototypeOf` — and nothing else:
+  //
+  //   * `target.hideOverlay = stub` goes through the `set` trap and becomes an
+  //     OWN property of the REAL TUI object.
+  //   * `delete target.hideOverlay` is NOT trapped. It removes a property from
+  //     the Proxy's empty dummy object, so the real TUI keeps the stub FOREVER.
+  //   * `hasOwnProperty` is NOT trapped either. It reads the dummy object and
+  //     always answers `false`, so a "restore the previous value" branch can
+  //     never run.
+  //
+  // A stub that survives makes pi impossible to exit. `stopInteractiveTui` runs
+  //
+  //     while (renderer.hasOverlayEntries) renderer.hideOverlay();
+  //
+  // With a no-op `hideOverlay` the overlay stack never shrinks. This is a
+  // synchronous infinite loop, so the terminal stops repainting, keys do
+  // nothing, and even SIGTERM cannot be handled because the JavaScript event
+  // loop never runs again. The only escape is `kill -9`.
+  // Observed as: `/new`, then ctrl+d, then a dead session.
+  //
+  // Assignment is therefore the only working restore path, because the `set`
+  // trap does reach the real TUI. The value written back is the prototype
+  // method obtained through `getPrototypeOf`, so the real TUI keeps an own
+  // property that is identical to the method it shadows. Calls behave exactly
+  // as before and no later `delete` is needed.
   const target = tui as Record<string, unknown>;
-  const hadOwnHideOverlay = Object.prototype.hasOwnProperty.call(target, "hideOverlay");
-  const previousOwnHideOverlay = hadOwnHideOverlay ? target.hideOverlay : undefined;
+  const prototype = Object.getPrototypeOf(tui as object) as Record<string, unknown> | null;
+  const prototypeHideOverlay =
+    typeof prototype?.hideOverlay === "function" ? (prototype.hideOverlay as () => void) : undefined;
+
+  if (!prototypeHideOverlay) {
+    // The real method is not reachable on the prototype, so a stub could not be
+    // undone. Never install one: a wrong pop costs one overlay, an unremovable
+    // stub costs the whole session.
+    done();
+    return;
+  }
 
   try {
     // Removes exactly this overlay, retargets other entries that pointed at it
@@ -80,7 +117,6 @@ export function closeOverlayCustomUi(
     target.hideOverlay = () => {};
     done();
   } finally {
-    if (hadOwnHideOverlay) target.hideOverlay = previousOwnHideOverlay;
-    else delete target.hideOverlay;
+    target.hideOverlay = prototypeHideOverlay;
   }
 }

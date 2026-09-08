@@ -91,7 +91,7 @@ describe("SubagentTuiManager overlay teardown", () => {
     );
 
     // Pi keeps `hideOverlay` on the TUI prototype. Mirror that so the test also
-    // proves the stub is deleted afterwards instead of shadowing it forever.
+    // proves the working method is restored afterwards.
     const base = createFakeTui();
     let blindPops = 0;
     const prototype = { hideOverlay: () => { blindPops++; } };
@@ -124,11 +124,71 @@ describe("SubagentTuiManager overlay teardown", () => {
     expect(hideCallsDuringDone).toBe(1);
     // Pi's blind pop is neutralised, so no foreign overlay is destroyed.
     expect(popsDuringDone).toBe(0);
-    // The stub is gone again, so later pops behave normally.
-    expect(Object.prototype.hasOwnProperty.call(tui, "hideOverlay")).toBe(false);
+    // The stub is gone again, so later pops behave normally. The restored value
+    // is written back as an own property on purpose: see overlay-close.ts, a
+    // `delete` cannot pass through pi's Proxy and would strand the stub.
     tui.hideOverlay();
     expect(blindPops).toBe(1);
     expect(manager.isActive).toBe(false);
+  });
+
+  // Regression test for a total session freeze.
+  //
+  // Pi does not hand extensions the TUI itself. It hands a Proxy wrapped around
+  // an EMPTY object, which forwards `get`, `set`, `has` and `getPrototypeOf` and
+  // traps nothing else. The earlier teardown restored its stub with `delete`,
+  // which the Proxy does not forward, so the real TUI kept a no-op
+  // `hideOverlay`. Pi's exit path then spun forever in
+  // `while (renderer.hasOverlayEntries) renderer.hideOverlay()`, which killed
+  // the whole session: no repaint, no keys, not even SIGTERM.
+  it("leaves a working hideOverlay on the real TUI behind pi's Proxy", async () => {
+    const tracker = new SubagentTracker();
+    tracker.add(
+      createInstance({
+        id: "subagent-teardown-proxy",
+        agent: "worker",
+        source: "builtin",
+        task: "test overlay teardown through pi's proxy",
+        cwd: "/tmp",
+      }),
+    );
+
+    const base = createFakeTui();
+    let blindPops = 0;
+    const prototype = { hideOverlay: () => { blindPops++; } };
+    const realTui = Object.assign(Object.create(prototype), base) as typeof base & { hideOverlay: () => void };
+
+    // Same shape as pi's `createInteractiveTuiReference`: a Proxy over `{}`.
+    const proxyTui = new Proxy({} as Record<string | symbol, unknown>, {
+      get: (_target, property) => Reflect.get(realTui, property, realTui),
+      set: (_target, property, value) => Reflect.set(realTui, property, value, realTui),
+      has: (_target, property) => Reflect.has(realTui, property),
+      getPrototypeOf: () => Reflect.getPrototypeOf(realTui),
+    }) as unknown as typeof realTui;
+
+    const handle = { isFocused: () => true, hide: () => {} };
+    const manager = new SubagentTuiManager(tracker);
+    let popsDuringDone = -1;
+
+    await manager.enter({
+      ui: {
+        custom: async (factory: any, options: any) => {
+          const done = () => {
+            proxyTui.hideOverlay();
+            popsDuringDone = blindPops;
+          };
+          factory(proxyTui, {}, undefined, done);
+          options.onHandle(handle);
+          manager.exit();
+        },
+      },
+    });
+
+    // The stub still protected foreign overlays during pi's close().
+    expect(popsDuringDone).toBe(0);
+    // And the real TUI can pop again, so pi's exit loop terminates.
+    realTui.hideOverlay();
+    expect(blindPops).toBe(1);
   });
 
   it("still closes when the host gives no usable overlay handle", async () => {
