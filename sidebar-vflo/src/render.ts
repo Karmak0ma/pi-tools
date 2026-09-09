@@ -74,14 +74,38 @@ export function formatTokens(value: number): string {
 	return `${(count / 1_000_000_000).toFixed(1)}B`;
 }
 
+// pi-tui's truncateToWidth() has a fast path only for pure printable ASCII
+// (see utils.js isPrintableAscii). Every sidebar row carries SGR colour codes,
+// so each call falls into the per-grapheme Intl.Segmenter loop and costs about
+// 26 us, against 0.12 us for the ASCII path. The sidebar re-renders on every
+// keystroke, so ~120 of those calls per frame were ~3.2 ms of input latency.
+//
+// visibleWidth() is cheap on coloured text (~0.04 us), so measure first and
+// only pay for truncation when the text really does not fit. Callers must use
+// fit() instead of truncateToWidth() for anything that may contain colour.
+function fit(text: string, width: number): string {
+	if (width <= 0) return "";
+	return visibleWidth(text) <= width ? text : truncateToWidth(text, width, "");
+}
+
 function pad(text: string, width: number): string {
-	const value = truncateToWidth(text, Math.max(0, width), "");
-	return value + " ".repeat(Math.max(0, width - visibleWidth(value)));
+	const target = Math.max(0, width);
+	// One width measurement serves both the fit test and the padding amount.
+	const textWidth = visibleWidth(text);
+	if (textWidth <= target) return text + " ".repeat(target - textWidth);
+	const value = truncateToWidth(text, target, "");
+	return value + " ".repeat(Math.max(0, target - visibleWidth(value)));
 }
 
 function pair(left: string, right: string, width: number): string {
-	const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
-	return truncateToWidth(`${left}${" ".repeat(gap)}${right}`, width, "");
+	const leftWidth = visibleWidth(left);
+	const rightWidth = visibleWidth(right);
+	const gap = Math.max(1, width - leftWidth - rightWidth);
+	const line = `${left}${" ".repeat(gap)}${right}`;
+	// The gap is sized so the result is exactly `width` whenever the two sides
+	// fit. Only the overflow case (gap clamped to 1) needs real truncation.
+	if (leftWidth + rightWidth + 1 <= width) return line;
+	return truncateToWidth(line, width, "");
 }
 
 function statusRole(status: string): Role {
@@ -94,8 +118,8 @@ function modelRows(snapshot: SidebarSnapshot, theme: SidebarTheme, width: number
 	if (!snapshot.model) return [paint(theme, "dim", "No model selected")];
 	const model = snapshot.model.id || snapshot.model.name || "unknown";
 	return [
-		paint(theme, "text", truncateToWidth(model, width, "")),
-		paint(theme, "muted", truncateToWidth(snapshot.model.provider || "unknown provider", width, "")),
+		paint(theme, "text", fit(model, width)),
+		paint(theme, "muted", fit(snapshot.model.provider || "unknown provider", width)),
 		pair(paint(theme, "muted", "Thinking"), paint(theme, "accent", safe(snapshot.thinkingLevel, "off")), width),
 	];
 }
@@ -110,7 +134,7 @@ function limitsRows(limits: LimitsState, theme: SidebarTheme, width: number): st
 	// The note explains missing or stale data ("Waiting for usage data…",
 	// "refresh failed: …"). It is rendered even when bars exist, so the user can
 	// see that the numbers below are frozen.
-	const noteRows = note === undefined ? [] : [paint(theme, "dim", truncateToWidth(note, width, ""))];
+	const noteRows = note === undefined ? [] : [paint(theme, "dim", fit(note, width))];
 	if (buckets.length === 0) return noteRows.length > 0 ? noteRows : [paint(theme, "dim", "No subscription data")];
 	const meterWidth = Math.max(4, Math.min(18, width - 4));
 	return buckets.flatMap((bucket) => {
@@ -174,7 +198,7 @@ function todoRows(todos: readonly TodoItem[], theme: SidebarTheme, width: number
 	for (const todo of visible) {
 		const role: Role = todo.status === "completed" ? "dim" : todo.status === "in_progress" ? "warning" : "text";
 		const marker = todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "◐" : "○";
-		rows.push(truncateToWidth(`${paint(theme, role, marker)} ${paint(theme, "accent", `#${todo.id}`)} ${paint(theme, role, safe(todo.subject))}`, width, ""));
+		rows.push(fit(`${paint(theme, role, marker)} ${paint(theme, "accent", `#${todo.id}`)} ${paint(theme, role, safe(todo.subject))}`, width));
 	}
 	if (!expanded && todos.length > 8) rows.push(paint(theme, "dim", `… ${todos.length - 8} more (click or alt+t)`));
 	return rows;
@@ -187,7 +211,7 @@ function subagentRows(items: readonly SubagentItem[], theme: SidebarTheme, width
 		const head = `${paint(theme, role, item.status === "done" ? "✓" : item.status === "blocked" ? "✕" : "●")} ${paint(theme, "text", safe(item.agent))}`;
 		const status = paint(theme, role, item.status);
 		const detail = item.task ? paint(theme, "dim", ` · ${safe(item.task)}`) : "";
-		return [truncateToWidth(pair(head + detail, status, width), width, "")];
+		return [fit(pair(head + detail, status, width), width)];
 	});
 }
 
@@ -244,7 +268,20 @@ export function renderSidebar(
 	].filter((definition) => config.panels[definition.id]);
 
 	let selected = [...definitions];
-	const renderedLength = (items: readonly PanelDefinition[]) => items.reduce((total, item) => total + panel(item.title, item.rows, contentWidth, theme).length, 0);
+	// panel() output depends only on (title, rows, contentWidth, theme), all of
+	// which are fixed for the duration of this call. The height-fitting loop used
+	// to re-render every panel on every iteration, and the final flatMap rendered
+	// them all again; memoising makes each panel render exactly once per frame.
+	const renderedPanels = new Map<PanelDefinition, string[]>();
+	const panelLines = (item: PanelDefinition): string[] => {
+		let lines = renderedPanels.get(item);
+		if (!lines) {
+			lines = panel(item.title, item.rows, contentWidth, theme);
+			renderedPanels.set(item, lines);
+		}
+		return lines;
+	};
+	const renderedLength = (items: readonly PanelDefinition[]) => items.reduce((total, item) => total + panelLines(item).length, 0);
 	while (renderedLength(selected) > safeHeight) {
 		const index = [...selected].reverse().findIndex((item) => !item.required);
 		if (index < 0) break;
@@ -253,14 +290,15 @@ export function renderSidebar(
 	let todosRange: [number, number] | undefined;
 	let cursor = 0;
 	const lines = selected.flatMap((item) => {
-		const rendered = panel(item.title, item.rows, contentWidth, theme);
+		const rendered = panelLines(item);
 		if (item.id === "todos") todosRange = [cursor, cursor + rendered.length];
 		cursor += rendered.length;
 		return rendered;
 	});
+	// pad() already truncates when needed, so the separate truncateToWidth() call
+	// that used to sit here was a second full-width scan of every visible line.
 	const padded = Array.from({ length: safeHeight }, (_, index) => {
-		const line = truncateToWidth(lines[index] ?? "", contentWidth, "");
-		return `${paint(theme, "dim", "│")} ${pad(line, contentWidth)}`;
+		return `${paint(theme, "dim", "│")} ${pad(lines[index] ?? "", contentWidth)}`;
 	});
 	// Clip the range to what's actually visible after the final safeHeight cut.
 	if (todosRange && todosRange[0] >= safeHeight) todosRange = undefined;

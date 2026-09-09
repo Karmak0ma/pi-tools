@@ -290,6 +290,13 @@ function startOverlay(runtime: Runtime): void {
 					bold: (text) => theme.bold(text),
 					preset: runtime.config.colorPreset,
 				};
+				// Keyboard input bypasses Pi's frame throttle (TuiBase.handleTerminalInput
+				// calls requestImmediateRender), and Pi rebuilds its layout render cache
+				// on every frame, so this render() runs once per keypress. Rebuilding the
+				// sidebar cost ~3.2 ms of that budget while the sidebar content usually
+				// does not change at all while the user types. Keep the finished frame and
+				// reuse it until one of its inputs really changes.
+				let frame: { key: string; lines: string[]; todosRange?: [number, number] } | undefined;
 				return {
 					render(width: number): string[] {
 						sidebarTheme.preset = runtime.config.colorPreset;
@@ -299,11 +306,26 @@ function startOverlay(runtime: Runtime): void {
 						if (runtime.terminalInputListener) {
 							runtime.inputPriorityReady = prioritizeInputListener(tui, runtime.terminalInputListener);
 						}
-						const { lines, todosRange } = renderSidebar(snapshot(runtime), runtime.config, sidebarTheme, width, tui.terminal.rows, runtime.todosExpanded);
-						runtime.todosRange = todosRange;
-						return lines;
+						const rows = tui.terminal.rows;
+						const state = snapshot(runtime);
+						// The snapshot is a small plain-data object, so serialising it is far
+						// cheaper than rendering, and it compares by value: no missed update
+						// when a nested field (todo status, limit bucket, token counts) moves.
+						// Theme changes do not appear here; Pi calls invalidate() for those.
+						const key = JSON.stringify([width, rows, runtime.todosExpanded, runtime.config, state]);
+						if (frame?.key !== key) {
+							const { lines, todosRange } = renderSidebar(state, runtime.config, sidebarTheme, width, rows, runtime.todosExpanded);
+							frame = { key, lines, todosRange };
+						}
+						// Mouse hit-testing reads this, so it must track the frame on screen.
+						runtime.todosRange = frame.todosRange;
+						return frame.lines;
 					},
-					invalidate() {},
+					// Pi calls this on theme changes and other global invalidations. The
+					// cache key cannot see the theme, so the cached frame must be dropped.
+					invalidate() {
+						frame = undefined;
+					},
 				};
 			},
 			{
