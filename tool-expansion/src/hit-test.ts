@@ -151,16 +151,6 @@ function toolAtRenderedLines(
   return screenRow !== undefined && point.y === screenRow ? component : undefined;
 }
 
-function toolIsVisibleInRenderedSpan(box: RecordLike, sourceStart: number, lineCount: number): boolean {
-  if (lineCount <= 0) return false;
-  const rect = readRect(box.rect);
-  const clip = readRect(box.clip);
-  if (!rect || !clip || !intersects(rect, clip)) return false;
-  const top = rect.y + sourceStart - lineOffset(box);
-  const bottom = top + lineCount;
-  return bottom > clip.y && top < clip.y + clip.height;
-}
-
 function findFlattenedTool(
   box: RecordLike,
   point: TerminalPoint,
@@ -226,70 +216,6 @@ function findFlattenedToolInComponent(
   return undefined;
 }
 
-function collectFlattenedTools(
-  box: RecordLike,
-  result: ToolExecutionComponent[],
-  seenTools: Set<ToolExecutionComponent>,
-  visitedComponents: Set<object>,
-): void {
-  const children = flattenedContainerChildren(box.component);
-  if (!children || !Array.isArray(box.lines)) return;
-  const width = readRect(box.rect)?.width;
-  if (width === undefined) return;
-
-  let sourceStart = 0;
-  for (const child of children) {
-    if (!isRecord(child) || visitedComponents.has(child)) continue;
-    visitedComponents.add(child);
-    const lines = renderLines(child, width);
-    if (lines === undefined) return;
-
-    if (isToolExecutionComponent(child)) {
-      if (toolIsVisibleInRenderedSpan(box, sourceStart, lines.length) && !seenTools.has(child)) {
-        seenTools.add(child);
-        result.push(child);
-      }
-    } else {
-      collectFlattenedToolsInComponent(box, child, lines, sourceStart, result, seenTools, visitedComponents);
-    }
-    sourceStart += lines.length;
-  }
-}
-
-function collectFlattenedToolsInComponent(
-  box: RecordLike,
-  component: unknown,
-  renderedLines: string[],
-  sourceStart: number,
-  result: ToolExecutionComponent[],
-  seenTools: Set<ToolExecutionComponent>,
-  visitedComponents: Set<object>,
-): void {
-  const children = flattenedContainerChildren(component);
-  if (!children) return;
-  const width = readRect(box.rect)?.width;
-  if (width === undefined) return;
-
-  let childStart = sourceStart;
-  for (const child of children) {
-    if (!isRecord(child) || visitedComponents.has(child)) continue;
-    visitedComponents.add(child);
-    const lines = renderLines(child, width);
-    if (lines === undefined) return;
-
-    if (isToolExecutionComponent(child)) {
-      if (toolIsVisibleInRenderedSpan(box, childStart, lines.length) && !seenTools.has(child)) {
-        seenTools.add(child);
-        result.push(child);
-      }
-    } else {
-      collectFlattenedToolsInComponent(box, child, lines, childStart, result, seenTools, visitedComponents);
-    }
-    childStart += lines.length;
-  }
-  void renderedLines;
-}
-
 /**
  * Find the first tool whose first non-empty rendered line contains a point.
  * Layout coordinates are already screen-relative, including scroll translation.
@@ -327,37 +253,4 @@ export function findToolAt(frame: unknown, point: TerminalPoint): ToolExecutionC
   };
 
   return visit(frame.root);
-}
-
-/**
- * Collect visible tool components for state reconciliation. Components are
- * returned once even if a malformed layout repeats a box or creates a cycle.
- */
-export function collectToolComponents(frame: unknown): ToolExecutionComponent[] {
-  if (!isRecord(frame)) return [];
-
-  const visitedBoxes = new Set<object>();
-  const visitedComponents = new Set<object>();
-  const seenTools = new Set<ToolExecutionComponent>();
-  const result: ToolExecutionComponent[] = [];
-  const visit = (value: unknown): void => {
-    if (!isRecord(value) || visitedBoxes.has(value)) return;
-    visitedBoxes.add(value);
-
-    const tool = visibleToolBox(value);
-    if (tool && !seenTools.has(tool.component)) {
-      seenTools.add(tool.component);
-      result.push(tool.component);
-    }
-
-    const children = layoutChildren(value);
-    if (children.length > 0) {
-      for (const child of children) visit(child);
-    } else {
-      collectFlattenedTools(value, result, seenTools, visitedComponents);
-    }
-  };
-
-  visit(frame.root);
-  return result;
 }

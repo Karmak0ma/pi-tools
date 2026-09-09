@@ -44,10 +44,14 @@ describe("per-tool expansion state", () => {
     toggleToolExpansion(state, tool); // local exception: collapse
     tool.calls = [];
 
-    expect(reconcileExpansionState(state, true, [tool])).toBe(false);
+    // The override is already applied, so a pass must be silent. This is what
+    // keeps reconciliation safe to call on every frame and every input byte.
+    expect(reconcileExpansionState(state, true)).toBe(false);
     expect(tool.calls).toEqual([]);
+    // Pi re-created the component state: the override must be reapplied. The
+    // component is found through the tracking set, with no layout involved.
     state.applied = new WeakMap();
-    expect(reconcileExpansionState(state, true, [tool])).toBe(true);
+    expect(reconcileExpansionState(state, true)).toBe(true);
     expect(tool.calls).toEqual([false]);
   });
 
@@ -57,7 +61,7 @@ describe("per-tool expansion state", () => {
     const newTool = new FakeTool();
     toggleToolExpansion(state, clicked);
 
-    expect(reconcileExpansionState(state, true, [clicked, newTool])).toBe(false);
+    expect(reconcileExpansionState(state, true)).toBe(false);
     expect(state.globalExpanded).toBe(true);
     expect(clicked.calls).toEqual([true]);
     expect(state.overrides.has(clicked)).toBe(false);

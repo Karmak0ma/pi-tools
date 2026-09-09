@@ -4,10 +4,7 @@ import type {
   TerminalInputHandler,
 } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import {
-  collectToolComponents,
-  findToolAt,
-} from "./hit-test.js";
+import { findToolAt } from "./hit-test.js";
 import {
   isUnmodifiedPrimaryPress,
   parseSgrMouseEvent,
@@ -65,15 +62,22 @@ function currentLayout(tui: TUI): unknown {
   }
 }
 
+/**
+ * Reapply local overrides and follow Pi's global expansion setting.
+ *
+ * This runs on every frame and every input byte, so it must stay O(number of
+ * tools the user clicked), which is normally zero. It deliberately does not
+ * touch Pi's layout: the earlier version collected tool components from the
+ * private layout tree, and that collection re-rendered every tool block in the
+ * transcript, costing ~87 ms per keystroke on a long session.
+ */
 function reconcileRuntime(runtime: Runtime, tui: TUI): void {
   try {
-    const frame = currentLayout(tui);
-    const tools = frame === undefined ? [] : collectToolComponents(frame);
-    const changed = reconcileExpansionState(runtime.state, readGlobalExpanded(runtime), tools);
+    const changed = reconcileExpansionState(runtime.state, readGlobalExpanded(runtime));
     if (changed) tui.requestRender();
   } catch {
-    // A partially-updated private layout should only disable reconciliation for
-    // this pass; Pi remains responsible for rendering and input handling.
+    // Reconciliation must never break rendering or input handling; a failed
+    // pass is retried on the next frame.
   }
 }
 

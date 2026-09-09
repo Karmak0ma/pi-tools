@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { collectToolComponents, findToolAt } from "../src/hit-test.js";
+import { findToolAt } from "../src/hit-test.js";
 
 // The local class name exercises the strict duplicate-package fallback. In a
 // live Pi process the imported ToolExecutionComponent passes instanceof first.
@@ -81,7 +81,6 @@ describe("fullscreen layout hit testing", () => {
     );
 
     expect(findToolAt(layout, { x: 2, y: 4 })).toBe(tool);
-    expect(collectToolComponents(layout)).toEqual([tool]);
   });
 
   it("finds tools flattened inside a Container layout box", () => {
@@ -93,7 +92,6 @@ describe("fullscreen layout hit testing", () => {
     expect(findToolAt(layout, { x: 2, y: 4 })).toBe(first);
     expect(findToolAt(layout, { x: 2, y: 5 })).toBeUndefined();
     expect(findToolAt(layout, { x: 2, y: 6 })).toBe(second);
-    expect(collectToolComponents(layout)).toEqual([first, second]);
   });
 
   it("returns no target for an empty or missing header", () => {
