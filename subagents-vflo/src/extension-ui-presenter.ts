@@ -151,7 +151,12 @@ export class ChildUIDialogComponent implements Component {
     if (item.request.method === "input" || item.request.method === "editor") {
       this.editor = new Editor(tui, editorTheme(this.theme));
       if (item.request.method === "editor" && item.request.prefill !== undefined) {
-        this.editor.setText(item.request.prefill);
+        // Display a sanitized copy: `prefill` is untrusted, child-supplied
+        // text and must not carry live escape sequences into the editor's
+        // rendered output. The exact, unsanitized `originalPrefill` is kept
+        // separately and is what actually gets sent back to the child on
+        // submit -- see the `decisionValue`/`onSubmit` protocol path below.
+        this.editor.setText(sanitizeTerminalText(item.request.prefill));
         this.editorChanged = false;
       }
       this.editor.onChange = () => {
@@ -307,10 +312,16 @@ export class ChildUIDialogComponent implements Component {
       }
     }
 
-    // Sanitize before width handling: pi-tui may append a cursor or style
-    // reset marker when it sees editor output, and escaped controls must count
-    // toward the visible width just like any other displayed text.
-    this.cachedLines = lines.map((line) => fitSafeLine(line, safeWidth));
+    // Do NOT run `fitSafeLine`/`sanitizeTerminalText` here. Every line already
+    // reached this point through a themed composition: raw child-supplied text
+    // (title, task, tool args, editor prefill) was sanitized at the leaf,
+    // *before* it was wrapped in the theme's own ANSI color codes. Re-running
+    // sanitizeTerminalText on the composed line would treat those legitimate
+    // `\x1b[...m` escape sequences as untrusted control bytes and rewrite them
+    // as literal backslash text -- exactly the "menu renders as ascii with a
+    // lot of backslashes" symptom. Width safety alone is `truncateToWidth`,
+    // which is ANSI-aware and never touches escape bytes.
+    this.cachedLines = lines.map((line) => truncateToWidth(line, safeWidth, ""));
     return this.cachedLines;
   }
 
@@ -433,11 +444,13 @@ export class ChildUIDialogComponent implements Component {
         lines.push(this.theme.fg("muted", ` ${safeDialogText(request.placeholder)}`));
       }
       for (const line of this.editor.render(Math.max(1, width - 2))) {
-        // Editor rendering includes a cursor marker. This modal is also a
-        // security boundary for untrusted child text, so render that marker
-        // (and any data controls) as inert escaped text rather than forwarding
-        // terminal sequences from a child.
-        lines.push(truncateToWidth(` ${sanitizeTerminalText(line)}`, width, ""));
+        // The editor's own rendered output is already safe: local keystrokes
+        // are typed by the trusted operator, any child-supplied prefill was
+        // sanitized before `setText()` above, and the rest of the line is the
+        // editor's own theme ANSI plus its cursor marker. Re-sanitizing here
+        // would mangle that legitimate escape data into literal backslash
+        // text, so only enforce width -- do not touch escape bytes again.
+        lines.push(truncateToWidth(` ${line}`, width, ""));
       }
     }
     // Last-resort guard. Every branch above should already fit, but a clipped

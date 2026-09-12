@@ -84,9 +84,60 @@ describe("child extension UI presenter", () => {
     expect(decisions[0].value).toBe("a  ");
 
     const lines = component.render(50);
+    const rendered = lines.join("\n");
     expect(lines.every((line) => visibleWidth(line) <= 50)).toBe(true);
-    expect(lines.join("\n")).not.toContain("\u001b");
-    expect(lines.join("\n")).toContain("printf");
+    // The untrusted title carried a real ESC byte (`\u001b[31m`). It must be
+    // neutralized into inert, visible backslash text -- never left able to
+    // recolor the terminal. This is the security property under test.
+    expect(rendered).not.toContain("\u001b[31m");
+    expect(rendered).toContain("\\x1b[31m");
+    // Real ANSI bytes are still allowed in the composed output: they come
+    // from the editor's own trusted cursor rendering, not from the child.
+    // Blanket-stripping every ESC byte from the fully composed line is the
+    // regression this test used to encode (see extension-ui-presenter.ts).
+    expect(rendered).toContain("\u001b");
+    expect(rendered).toContain("printf");
+  });
+
+  /**
+   * Regression: a real theme wraps every trusted string (headers, hints,
+   * option markers, "Choose an option:") in genuine `\x1b[...m` SGR codes.
+   * The unit tests elsewhere in this file use an identity `theme` where
+   * `fg()` returns its input unchanged, so a bug that re-sanitizes an already
+   * *themed* line -- turning its legitimate escape codes into literal
+   * backslash text -- stayed invisible there. That is exactly what the user
+   * saw in production: a guardrails menu triggered from inside a subagent
+   * rendered as raw escaped ASCII (lots of `\x1b[...`) instead of a colored
+   * menu, while arrow-key navigation kept working because `handleInput` never
+   * touches `render()` output.
+   */
+  it("does not mangle a themed line's own ANSI codes into literal backslash text", () => {
+    const coloringTheme = {
+      fg: (color: string, text: string) => `\u001b[38;5;1m${text}\u001b[39m`,
+      bg: (_color: string, text: string) => text,
+      bold: (text: string) => `\u001b[1m${text}\u001b[22m`,
+    };
+    const component = new ChildUIDialogComponent(
+      item({
+        type: "extension_ui_request",
+        id: "danger",
+        method: "select",
+        title: "Dangerous command detected",
+        options: ["Allow once", "Allow for session", "Deny", "Decline and stop"],
+      }),
+      tui(),
+      coloringTheme,
+      () => {},
+    );
+
+    const rendered = component.render(60).join("\n");
+
+    // The theme's real escape codes must survive to the final composed
+    // output unchanged -- not be rewritten as visible `\\x1b[...m` text.
+    expect(rendered).toContain("\u001b[38;5;1m");
+    expect(rendered).not.toContain("\\x1b[38;5;1m");
+    expect(rendered).toContain("\u001b[1m");
+    expect(rendered).not.toContain("\\x1b[1m");
   });
 
   /**
