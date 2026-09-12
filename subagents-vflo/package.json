@@ -25,5 +25,8 @@
     "extensions": [
       "./src/index.ts"
     ]
+  },
+  "dependencies": {
+    "typebox": "1.3.7"
   }
 }
