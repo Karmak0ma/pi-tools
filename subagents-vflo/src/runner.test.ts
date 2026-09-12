@@ -3,8 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { describe, expect, it } from "vitest";
-import { runChild } from "./runner.js";
+import { describe, expect, it, vi } from "vitest";
+import { NESTING_DEPTH_ENV, currentNestingDepth, runChild, nestingDepthRefusal } from "./runner.js";
+import { MAX_NESTING_DEPTH } from "./types.js";
 
 class FakeChild extends EventEmitter {
   stdin = new PassThrough();
@@ -53,6 +54,78 @@ class FakeChild extends EventEmitter {
   }
 }
 
+describe("runChild nesting depth guard", () => {
+  it("counts subagent generations from the env marker", () => {
+    expect(currentNestingDepth({})).toBe(0);
+    expect(currentNestingDepth({ [NESTING_DEPTH_ENV]: "1" })).toBe(1);
+    // Corrupted markers degrade to top-level, never to "block everything".
+    expect(currentNestingDepth({ [NESTING_DEPTH_ENV]: "abc" })).toBe(0);
+    expect(currentNestingDepth({ [NESTING_DEPTH_ENV]: "-3" })).toBe(0);
+  });
+
+  it("refuses at the limit and allows below it, as a pure policy check", () => {
+    expect(nestingDepthRefusal("worker", {})).toBeNull();
+    expect(nestingDepthRefusal("worker", { [NESTING_DEPTH_ENV]: "1" })).toBeNull();
+    const refusal = nestingDepthRefusal("worker", { [NESTING_DEPTH_ENV]: String(MAX_NESTING_DEPTH) });
+    expect(refusal?.exitCode).toBe(1);
+    expect(refusal?.errorMessage).toContain("worker");
+  });
+
+  it("refuses to spawn when already at the depth limit", async () => {
+    const refusalEvents: any[] = [];
+    vi.stubEnv(NESTING_DEPTH_ENV, String(MAX_NESTING_DEPTH));
+    try {
+      const result = await runChild({
+        resolvedTools: ["bash"],
+        resolvedCwd: "/tmp",
+        agentName: "worker",
+        agentPrompt: "",
+        taskText: "task",
+        // The guard must fire before any process is created.
+        spawnProcess: () => {
+          throw new Error("must not spawn a child at the depth limit");
+        },
+        onEvent(event) {
+          refusalEvents.push(event);
+        },
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.errorMessage).toContain("nesting depth limit");
+      expect(refusalEvents).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("allows spawns below the depth limit", async () => {
+    vi.stubEnv(NESTING_DEPTH_ENV, String(MAX_NESTING_DEPTH - 1));
+    try {
+      const child = new FakeChild();
+      const childEvents: any[] = [];
+      const result = await runChild({
+        resolvedTools: ["bash"],
+        resolvedCwd: "/tmp",
+        agentName: "worker",
+        agentPrompt: "",
+        taskText: "task",
+        spawnProcess: ((_command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
+          expect(options.env?.[NESTING_DEPTH_ENV]).toBe(String(MAX_NESTING_DEPTH));
+          return child;
+        }) as any,
+        onEvent(event) {
+          childEvents.push(event);
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(childEvents.length).toBeGreaterThan(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
 describe("runChild extension UI transport", () => {
   it("observes before callback, writes one child-bound response, and keeps it out of command acks", async () => {
     const child = new FakeChild();
@@ -88,6 +161,8 @@ describe("runChild extension UI transport", () => {
     expect(result.exitCode).toBe(0);
     expect(spawnedArgs).not.toContain("--no-session");
     expect(spawnedEnv?.PI_SESSION_FILE).toBeUndefined();
+    // A top-level parent (no marker) spawns a first-generation child.
+    expect(spawnedEnv?.[NESTING_DEPTH_ENV]).toBe("1");
     const sessionDirFlag = spawnedArgs.indexOf("--session-dir");
     expect(sessionDirFlag).toBeGreaterThanOrEqual(0);
     const sessionDir = spawnedArgs[sessionDirFlag + 1];

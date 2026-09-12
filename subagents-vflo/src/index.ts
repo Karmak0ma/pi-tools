@@ -10,9 +10,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { discoverAgents, findAgent, formatAgentList } from "./agents.js";
-import { resolveChildExtensions } from "./child-extensions.js";
 import { renderCall, renderResult } from "./render.js";
-import { type ModelRegistry, resolveCwd, resolveModel, resolveTools } from "./resolver.js";
+import { type ModelRegistry, buildToolResolutionOptions, resolveCwd, resolveModel, resolveTools, type ToolResolutionOptions } from "./resolver.js";
 import { mapWithConcurrencyLimit, runChild } from "./runner.js";
 import { ChildExtensionUIBroker } from "./extension-ui-broker.js";
 import { ExtensionUIDialogPresenter } from "./extension-ui-presenter.js";
@@ -275,6 +274,11 @@ export default function (pi: ExtensionAPI) {
       // Get parent active tool names for inheritance from documented ExtensionAPI method.
       const parentActiveToolNames = pi.getActiveTools();
 
+      // Two-key tool model (see ToolResolutionOptions): the settings file
+      // decides which extensions are loaded into children, the agent's
+      // tools: frontmatter decides which of the available tools are active.
+      const toolResolutionOptions: ToolResolutionOptions = buildToolResolutionOptions(pi);
+
       // Generate unique task IDs and create tracker instances immediately
       const batchId = tracker.nextBatchId();
       const taskInstances = tasks.map((task, index) => {
@@ -394,8 +398,8 @@ export default function (pi: ExtensionAPI) {
           );
           instance.contextWindow = resolvedModel?.contextWindow;
 
-          // Resolve tools
-          const toolResult = resolveTools(agent, parentActiveToolNames);
+          // Resolve tools (two-key validation; see ToolResolutionOptions)
+          const toolResult = resolveTools(agent, parentActiveToolNames, toolResolutionOptions);
           instance.warnings.push(...toolResult.warnings);
           instance.summary.warnings = [...instance.warnings];
 
@@ -425,7 +429,6 @@ export default function (pi: ExtensionAPI) {
 
           // Run child process
           try {
-            const childExtensions = resolveChildExtensions();
             const childResult = await runChild({
               resolvedModel: modelResult.model,
               resolvedTools: toolResult.tools,
@@ -434,7 +437,7 @@ export default function (pi: ExtensionAPI) {
               agentPrompt: agent.systemPrompt,
               taskText: task.task,
               thinking: instance.thinking,
-              childExtensionPaths: childExtensions.paths,
+              childExtensionPaths: toolResolutionOptions.childExtensionPaths,
               signal,
               onEvent(event) {
                 instance.events.push(event);

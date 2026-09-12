@@ -59,7 +59,12 @@ The extension registers a `subagent` tool that accepts a `tasks` array:
 
 ### Allowed Tools
 
-Child subagents can only use built-in tools:
+What a child subagent can actually use is decided by two independent keys, both of which must match:
+
+1. **Extension pool** — packages listed in `~/.pi/agent/subagents-vflo_settings.json` are loaded into every child process (`--no-extensions` plus one `-e` per package). A tool that no loaded package registers does not exist in the child at all.
+2. **Agent declaration** — the agent's `tools:` frontmatter becomes the child's `--tools` allowlist. pi core applies this allowlist to extension tools as well as built-ins.
+
+Built-in tools a child may declare:
 - `read` — Read files
 - `bash` — Execute shell commands
 - `edit` — Edit files with precise replacements
@@ -68,7 +73,16 @@ Child subagents can only use built-in tools:
 - `find` — Find files
 - `ls` — List directory contents
 
-Extension tools (including `subagent` itself) are **never** forwarded to children.
+Extension tools (including `subagent` itself, for recursive dispatch) are usable when the providing package is listed in `subagents-vflo_settings.json` **and** the agent declares the tool in `tools:`. For example, an orchestrator agent declares `tools: read, bash, edit, write, subagent` and the settings file lists this extension — the child then gets a working `subagent` tool.
+
+Two failure modes are distinguished at spawn time:
+
+- Declaring a tool that is neither a built-in nor active in the parent session is a hard error; the child is not spawned.
+- Declaring an extension tool whose providing package is missing from the settings file spawns the child **with a warning**: the tool is silently absent there, and calling it fails with an unknown-tool error.
+
+Agents that declare no `tools:` inherit built-in tools only. Extension tools stay off unless an agent explicitly declares them, so default and specialist agents keep least-privilege toolsets and their prompts stay free of unrelated extension tool guidelines.
+
+**Recursion is bounded.** An agent that declares `subagent` (like an orchestrator) can dispatch subagents of its own — including one named like itself, because every child discovers the same user/project agent files. runChild stamps each child with a generation counter (`PI_SUBAGENTS_VFLO_DEPTH` environment variable) and refuses to spawn at nesting level `MAX_NESTING_DEPTH` (2): one orchestrator layer with its specialists works, deeper self-dispatch chains return a child error instead of forking pi processes without bound.
 
 ## Child extension dialogs
 
@@ -196,7 +210,7 @@ The inspector shows:
 
 ## Model Resolution
 
-Models are resolved against the models that are actually available in the current pi session. Provider extensions needed by child processes can be listed in `~/.pi/agent/subagents-vflo_settings.json`; for example, add `npm:opencode-pi` when using the `opencode-cli` models.
+Models are resolved against the models that are actually available in the current pi session. Provider extensions needed by child processes can be listed in `~/.pi/agent/subagents-vflo_settings.json`; for example, add `npm:opencode-pi` when using the `opencode-cli` models. The same file is also the extension pool that decides which extension tools children can use — see [Allowed Tools](#allowed-tools).
 
 Resolution order is:
 
@@ -226,7 +240,7 @@ Tasks beyond the concurrent limit are queued and spawned as earlier tasks comple
 ## Error Handling
 
 - **Invalid agent name** — Task fails immediately with clear error message
-- **Invalid tools** — Tools not in the allowed list are rejected pre-spawn
+- **Invalid tools** — Declared tools must be built-ins or parent-active extension tools; unknown names are rejected pre-spawn. Declared extension tools without a backing package in `subagents-vflo_settings.json` spawn with a warning and are absent in the child
 - **Invalid CWD** — Non-existent or non-directory paths rejected pre-spawn
 - **Non-zero exit** — Task marked as failed, stderr preview included
 - **Abort** — SIGTERM sent, SIGKILL after 5 seconds if not exited
@@ -270,7 +284,7 @@ npx tsc --noEmit
 
 ### Test Coverage
 
-- **185 tests** across 10 test files
+- **54 tests** across 10 test files
 - Unit tests per module (types, resolver, tracker, agents, runner, render)
 - Integration tests for the full execution flow
 - Validation matrix for all error scenarios

@@ -20,7 +20,47 @@ import {
   type ChildExtensionUIDialogRequest,
   type ChildExtensionUIResponse,
 } from "./rpc-extension-ui.js";
-import { contextTokensFromUsage, emptyUsage, type TaskUsage, type ThinkingLevel } from "./types.js";
+import { contextTokensFromUsage, emptyUsage, MAX_NESTING_DEPTH, type TaskUsage, type ThinkingLevel } from "./types.js";
+
+/**
+ * Env marker recording how many subagent generations a process sits below
+ * the top-level session. Absent in a normal parent (depth 0); runChild writes
+ * depth+1 into every spawned child so the nesting guard in runChild can
+ * refuse spawns beyond MAX_NESTING_DEPTH without any in-band coordination.
+ */
+export const NESTING_DEPTH_ENV = "PI_SUBAGENTS_VFLO_DEPTH";
+
+/**
+ * Read the current nesting generation from the given environment.
+ * Absent, non-numeric, or negative values count as depth 0 (top-level
+ * session) so a corrupted marker degrades to "allow spawning", never to
+ * "block everything".
+ */
+export function currentNestingDepth(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number.parseInt(env[NESTING_DEPTH_ENV] ?? "", 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return parsed;
+}
+
+/**
+ * Recursion guard: the failed ChildRunResult when spawning is not allowed at
+ * this process's nesting generation, or null when spawning is fine. Kept as a
+ * pure helper so the refusal policy is unit-testable without faking a child.
+ */
+export function nestingDepthRefusal(
+  agentName: string,
+  env: NodeJS.ProcessEnv = process.env,
+): ChildRunResult | null {
+  const nestingDepth = currentNestingDepth(env);
+  if (nestingDepth < MAX_NESTING_DEPTH) return null;
+  return {
+    exitCode: 1,
+    usage: emptyUsage(),
+    finalOutput: "",
+    toolCalls: [],
+    errorMessage: `Subagent nesting depth limit reached: refusing to spawn "${agentName}" at nesting level ${nestingDepth + 1} (max ${MAX_NESTING_DEPTH})`,
+  };
+}
 
 // ─── Pi Invocation ───────────────────────────────────────────────────────────
 
@@ -124,6 +164,26 @@ function commandName(delivery: ChildMessageDelivery): "prompt" | "steer" {
 }
 
 /**
+ * Build the child process environment: the parent's environment flows through
+ * so child tools keep working, with only session plumbing scrubbed and the
+ * nesting generation stamped.
+ *
+ * The parent pi process may expose its own session path through
+ * PI_SESSION_FILE. If inherited, that environment variable can redirect a
+ * child away from the explicit --session-dir the spawn passes, so remove it
+ * before spawning. Other environment values remain available to child tools.
+ *
+ * The generation marker (see MAX_NESTING_DEPTH) bounds recursive self-dispatch:
+ * top-level parents have no marker and count as 0, so the first child is 1.
+ */
+function buildChildEnv(): NodeJS.ProcessEnv {
+  const childEnv = { ...process.env };
+  delete childEnv.PI_SESSION_FILE;
+  childEnv[NESTING_DEPTH_ENV] = String(currentNestingDepth() + 1);
+  return childEnv;
+}
+
+/**
  * Spawn a child pi process and wait for its first agent run to settle.
  *
  * The returned promise resolves after `agent_settled` and the RPC child has
@@ -147,6 +207,14 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
     onProcessReady,
     onProcessExit,
   } = options;
+
+  // Recursion guard (see MAX_NESTING_DEPTH): refuse to spawn when this
+  // process is already at the depth limit. Returned as a normal failed
+  // ChildRunResult so the caller reports it like any other child failure;
+  // placed before any session dir or process creation, so a refused spawn
+  // has zero side effects.
+  const refusal = nestingDepthRefusal(agentName);
+  if (refusal) return refusal;
 
   // Keep each child history in its own /tmp directory. Do not use
   // --no-session: the resulting JSONL file is useful for post-run inspection,
@@ -179,12 +247,7 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
   }
 
   const invocation = getPiInvocation(args);
-  // The parent pi process may expose its own session path through
-  // PI_SESSION_FILE. If inherited, that environment variable can redirect a
-  // child away from the explicit --session-dir above, so remove it before
-  // spawning. Other environment values remain available to child tools.
-  const childEnv = { ...process.env };
-  delete childEnv.PI_SESSION_FILE;
+  const childEnv = buildChildEnv();
   const proc = (spawnProcess || spawn)(invocation.command, invocation.args, {
     cwd: resolvedCwd,
     shell: false,

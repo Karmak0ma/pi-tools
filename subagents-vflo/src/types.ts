@@ -7,6 +7,22 @@
 export const MAX_TOTAL_TASKS = 8;
 export const MAX_CONCURRENT = 4;
 
+/**
+ * Maximum number of subagent-vflo generations below a top-level pi session.
+ *
+ * Declaring `subagent` in an agent's tools: now reaches the child's --tools
+ * allowlist (two-key model), so an agent can dispatch subagents of its own —
+ * including one named like itself, and every agent file is visible to every
+ * child because discovery scans the same user/project directories. Without a
+ * bound, a self-dispatching agent could fork pi processes until the machine
+ * grinds. Depth 0 is the top-level session; each child carries depth+1 via
+ * the NESTING_DEPTH_ENV marker that runChild writes into the child env, so
+ * runaway recursion self-terminates at the spawn boundary. Two levels allow
+ * one orchestrator layer (wp-owner → specialists) while refusing deeper
+ * self-dispatch chains.
+ */
+export const MAX_NESTING_DEPTH = 2;
+
 export const ALLOWED_CHILD_BUILTINS = [
   "read",
   "bash",
