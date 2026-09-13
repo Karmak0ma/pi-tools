@@ -29,7 +29,7 @@ describe("transient nudge message", () => {
 
     const first = buildNudgeMessage(runtime) as any;
     expect(first.customType).toBe("pi-dcp.v2.nudge");
-    expect(first.content).toBe("[pi-dcp nudge] Before starting the next substantial work unit, use pi-dcp compress for at least one useful older closed range. If the current work is still active, finish only that atomic operation first. Continue without compression only if no safe closed range is visible. Select older, resolved conversation whose work is finished or no longer needed immediately. Keep active work, unresolved questions, exact details still needed, pending tool exchanges, and protected content out of the range. Use contiguous complete protocol units and write a faithful summary.");
+    expect(first.content).toBe("[pi-dcp nudge] Before starting the next substantial work unit, use pi-dcp compress for at least one useful older closed range. If the current work is still active, finish only that atomic operation first. Continue without compression only if no safe closed range is visible. Select older, resolved conversation whose work is finished or no longer needed immediately. Keep active work, unresolved questions, exact details still needed, pending tool exchanges, and protected content out of the range. Use contiguous complete protocol units and write a faithful summary. Do not compress when the task is complete and only the final user-facing summary remains; deliver that summary first. Compression only pays off when more work will follow in this session.");
     expect(runtime.pendingNudge).toBeUndefined();
     // Deterministic: no timestamp, no session-varying text, so an identical
     // nudge produces identical bytes.

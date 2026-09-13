@@ -59,6 +59,7 @@ Validation
     promptSnippet: "compress older resolved context ranges",
     promptGuidelines: [
       "After substantial work is finished and verified, use compress proactively before beginning a different substantial work phase when a useful safe range is visible.",
+      "Never use compress to prepare the final answer: when the task is complete and only the user-facing summary remains, deliver it without compressing; compress only when more work will follow in this session.",
       "Use compress only for older closed work and complete protocol units.",
       "Use compress only with current visible mNNNN or bNNNN labels; never invent labels.",
       "Never pass compress a BLOCKED unit or a still-live recent user turn.",

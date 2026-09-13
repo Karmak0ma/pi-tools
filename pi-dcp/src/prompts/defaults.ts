@@ -65,6 +65,8 @@ After you finish and verify a substantial research, design, implementation, debu
 2. Compress at least one useful closed range before starting a different substantial phase.
 3. Do not wait for the user to request compression or for context pressure.
 
+Never compress to prepare the final answer: when the task is complete and only the final user-facing summary remains, deliver it first; compression only pays off when more work will follow in this session.
+
 A pi-dcp nudge is an action request. Follow it at the next safe boundary. Continue without compression only when no safe closed range is visible. Never interrupt an active tool exchange or compress details needed for the next immediate edit, test, or decision.
 
 COMPRESS WHEN
@@ -74,6 +76,7 @@ COMPRESS WHEN
 - Dead-end noise can be discarded without waiting for a whole chapter to close.
 
 DO NOT COMPRESS IF
+- The session is ending: only the final user-facing summary remains.
 - Raw context is still relevant and needed for edits or precise references.
 - The target content is still actively in progress.
 - You may need exact code, error messages, or file contents in the immediate next steps.

@@ -28,9 +28,15 @@ export interface NudgeEvaluation {
 /**
  * Stable model-visible guidance. Exact usage belongs in diagnostics, not in
  * the prompt, because a changing measurement would rewrite the cache prefix.
+ *
+ * The closing rule exists because a nudge is often scheduled on the very
+ * settle that produced the final answer. Without it, the agent compresses
+ * right before the session ends: the summarization call is pure waste and
+ * the user-facing summary is authored from compressed context. Compression
+ * only pays off when more work will follow (2026-09-13 user report).
  */
 export function stableNudgeText(type: NudgeType, kind: NudgeKind = "context"): string {
-  const definition = "Select older, resolved conversation whose work is finished or no longer needed immediately. Keep active work, unresolved questions, exact details still needed, pending tool exchanges, and protected content out of the range. Use contiguous complete protocol units and write a faithful summary.";
+  const definition = "Select older, resolved conversation whose work is finished or no longer needed immediately. Keep active work, unresolved questions, exact details still needed, pending tool exchanges, and protected content out of the range. Use contiguous complete protocol units and write a faithful summary. Do not compress when the task is complete and only the final user-facing summary remains; deliver that summary first. Compression only pays off when more work will follow in this session.";
   if (type === "critical") return `CRITICAL: context recovery is required. Finish the current atomic operation, then use pi-dcp compress before any other work. Compress all useful safe closed ranges available in one pass. Do not begin a new work phase first. ${definition}`;
   if (type === "imperative") return `Use pi-dcp compress as your next tool call before beginning or continuing non-atomic work. Compress at least one useful older closed range. Continue without compression only if no safe closed range is visible. ${definition}`;
   if (kind === "iteration") return `This task has accumulated many assistant/tool iterations. Before continuing the next substantial work unit, use pi-dcp compress for at least one useful older closed range. Continue without compression only if no safe closed range is visible. ${definition}`;
