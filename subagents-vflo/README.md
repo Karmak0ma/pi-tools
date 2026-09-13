@@ -90,7 +90,9 @@ Children run in Pi RPC mode. When a configured child extension requests `select`
 `confirm`, `input`, or `editor`, the request is bridged to an immediate parent
 modal. Requests from concurrent children are serialized globally in FIFO order;
 the modal identifies the agent, task, working directory, and active child tool
-calls (including the full `bash` command when available).
+calls (including the full `bash` command when available). Herdr-hosted children
+are interactive sessions instead — their dialogs render directly in the child
+pane, where the user answers them.
 
 Responses stay bound to the originating child and are sent exactly once. Escape,
 abort, child exit, session shutdown, malformed known requests, and conservative
@@ -114,6 +116,44 @@ directory according to pi's working-directory layout, for example:
 The child session directory and JSONL history remain after the child exits so
 they can be inspected. The generated system-prompt file is removed, but the
 session history is left for normal `/tmp` cleanup.
+
+## Herdr execution backend
+
+When the parent Pi session runs inside a [Herdr](https://herdr.dev/)
+workspace (`HERDR_ENV=1` plus `HERDR_PANE_ID`), spawned subagents become real,
+interactive Pi sessions instead of headless RPC children:
+
+- Each subagent gets its **own pane** in the current Herdr workspace, created
+  with `herdr pane split --current --no-focus` so it never steals keyboard
+  focus. The first task of a batch splits right; later tasks split down (and a
+  narrow parent always splits down).
+- The child is launched with `herdr agent start <name> --kind pi` and receives
+  the task as its first prompt. Model, tools, thinking level, cwd, agent
+  system prompt, and child extensions are preserved exactly as in RPC mode;
+  the nesting-depth marker is injected into the pane env.
+- The extension's subagent inspector does **not** auto-open (it never did);
+  the pane itself is the live view. `/subagents` still lists Herdr instances
+  for status, abort, and steering.
+
+The parent observes the child through its **session JSONL** — never through
+Herdr's `idle`/`done` pane status, which is a UI-seen state, not task semantics:
+
+- A turn that settles normally (`stop`) completes the task and delivers the
+  result to the parent, exactly like the RPC path.
+- An **interrupted turn** (Escape inside the child pane) does not complete the
+  task. The pane and session stay alive for manual/corrective input; a later
+  normal turn still completes the task automatically.
+- Pane death is classified by the last observed turn state: aborted → aborted,
+  errored → error, otherwise error ("closed before completing"). A dead pane
+  is never reported as a successful completion.
+- Parent abort (Escape or the inspector's `x`) closes the pane and resolves
+  the task as aborted.
+- Session shutdown closes every Herdr child pane, so no child process
+  outlives its parent session.
+
+The RPC runner stays the fallback outside Herdr and is unchanged. Backend
+selection lives in `src/herdr.ts`; the two implementations share one contract
+in `src/backends.ts`.
 
 ## Built-in Agents
 
@@ -284,24 +324,31 @@ npx tsc --noEmit
 
 ### Test Coverage
 
-- **54 tests** across 10 test files
+- **91 tests** across 14 test files
 - Unit tests per module (types, resolver, tracker, agents, runner, render)
 - Integration tests for the full execution flow
 - Validation matrix for all error scenarios
 - TUI component tests with mock theme/tracker
+- Backend tests: Herdr detection, CLI parsing, session watching, pane
+  lifecycle (completion, interruption, death, startup failures), and the
+  non-Herdr fallback path
 
 ## Architecture
 
 ```
 src/
-├── index.ts      — Tool registration, execution orchestration, lifecycle hooks
-├── types.ts      — Constants, interfaces, type definitions
-├── agents.ts     — Agent discovery (builtin, user, project) with precedence
-├── resolver.ts   — Model, tool, and CWD resolution with validation
-├── runner.ts     — Subprocess spawning, process management, event streaming
-├── tracker.ts    — SubagentTracker class, runtime instance management
-├── render.ts     — Tool-row rendering (renderCall/renderResult, formatUsage)
-└── tui.ts        — TUI inspector mode (component, manager, keyboard handling)
+├── index.ts           — Tool registration, execution orchestration, lifecycle hooks
+├── types.ts           — Constants, interfaces, type definitions
+├── agents.ts          — Agent discovery (builtin, user, project) with precedence
+├── resolver.ts        — Model, tool, and CWD resolution with validation
+├── backends.ts        — SubagentBackend contract, default (RPC) backend, selection
+├── runner.ts          — RPC subprocess spawning, process management, event streaming
+├── herdr.ts           — Herdr detection + CLI client (the only Herdr-aware module)
+├── herdr-backend.ts   — Herdr pane backend (spawn, JSONL observation, lifecycle)
+├── session-watcher.ts — Incremental session-JSONL scanner used by the Herdr backend
+├── tracker.ts         — SubagentTracker class, runtime instance management
+├── render.ts          — Tool-row rendering (renderCall/renderResult, formatUsage)
+└── tui.ts             — TUI inspector mode (component, manager, keyboard handling)
 ```
 
 ## License

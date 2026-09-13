@@ -367,7 +367,10 @@ export class SubagentTuiManager {
     instance: RuntimeSubagentInstance,
     text: string,
   ): Promise<void> {
-    if (instance.status !== "running" || !instance.control || !instance.process || instance.process.exitCode !== null) {
+    const processGone = instance.process !== undefined && instance.process.exitCode !== null;
+    // RPC children carry a process handle; pane-hosted children (Herdr) do
+    // not and stay steerable through control while the pane lives.
+    if (instance.status !== "running" || !instance.control || processGone) {
       instance.summary.errorMessage = "Subagent process is no longer available";
       instance.status = "error";
       instance.summary.status = "error";

@@ -23,6 +23,41 @@ export interface SubagentProcessControl {
   abort(): void;
 }
 
+// ─── Subagent Tracker ────────────────────────────────────────────────────────
+
+/**
+ * Kill one live RPC child process and report completion via `done`.
+ *
+ * Abort flows through control (which cancels pending dialogs first); a child
+ * without control is signalled directly. SIGTERM escalates to SIGKILL after
+ * 5s so shutdown always terminates, and `done` fires exactly once.
+ */
+function killChildProcess(proc: ChildProcess, control: SubagentProcessControl | undefined, done: () => void): void {
+  let exited = false;
+  let resolved = false;
+  const doneOnce = () => {
+    if (resolved) return;
+    resolved = true;
+    done();
+  };
+  const onExit = () => {
+    exited = true;
+    doneOnce();
+  };
+  proc.once("close", onExit);
+  proc.once("error", onExit);
+
+  control?.abort();
+  if (!control) proc.kill("SIGTERM");
+  setTimeout(() => {
+    if (!exited) {
+      proc.kill("SIGKILL");
+      // Give SIGKILL a moment to land, then resolve regardless
+      setTimeout(doneOnce, 500);
+    }
+  }, 5000);
+}
+
 // ─── Runtime Instance ────────────────────────────────────────────────────────
 
 export interface RuntimeSubagentInstance {
@@ -90,8 +125,12 @@ export class SubagentTracker {
   killAll(): Promise<void> {
     // Shut down every live child during session cleanup, including children
     // that are between an agent-settled event and their RPC process close.
+    // RPC children are killed only while their process is live; pane-hosted
+    // children (Herdr) have no process handle — the child lives in its pane
+    // even after the task settles, so pane close applies whenever control
+    // exists.
     const liveInstances = Array.from(this.instances.values()).filter(
-      (i) => (i.control || i.process) && i.process?.exitCode === null,
+      (i) => (i.process ? i.process.exitCode === null : !!i.control),
     );
     if (liveInstances.length === 0) return Promise.resolve();
 
@@ -102,33 +141,14 @@ export class SubagentTracker {
       for (const instance of liveInstances) {
         const proc = instance.process;
         if (!proc) {
+          // Pane-hosted child (Herdr): abort closes the pane, killing the
+          // child. Fire-and-forget — the Herdr server completes the close
+          // even if this process exits right after.
+          instance.control?.abort();
           done();
           continue;
         }
-
-        let exited = false;
-        let resolved = false;
-        const doneOnce = () => {
-          if (resolved) return;
-          resolved = true;
-          done();
-        };
-        const onExit = () => {
-          exited = true;
-          doneOnce();
-        };
-        proc.once("close", onExit);
-        proc.once("error", onExit);
-
-        instance.control?.abort();
-        if (!instance.control) proc.kill("SIGTERM");
-        setTimeout(() => {
-          if (!exited) {
-            proc.kill("SIGKILL");
-            // Give SIGKILL a moment to land, then resolve regardless
-            setTimeout(doneOnce, 500);
-          }
-        }, 5000);
+        killChildProcess(proc, instance.control, done);
       }
     });
   }

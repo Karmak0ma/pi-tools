@@ -84,6 +84,17 @@ export function emptyUsage(): TaskUsage {
 }
 
 /**
+ * Clear one pending Node timer and return the value to store back into the
+ * owning field. Guard-and-clear lives here once because several components
+ * own exactly one cancellable timer each. clearTimeout and clearInterval are
+ * interchangeable in Node (both clear entries from the same timer list).
+ */
+export function clearPendingTimer(timer: NodeJS.Timeout | undefined): undefined {
+  if (timer) clearTimeout(timer);
+  return undefined;
+}
+
+/**
  * Return the context size reported for an assistant response.
  *
  * Providers normally populate `totalTokens`, but the component-level fields

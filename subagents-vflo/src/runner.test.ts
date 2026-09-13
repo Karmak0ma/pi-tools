@@ -1,58 +1,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { NESTING_DEPTH_ENV, currentNestingDepth, runChild, nestingDepthRefusal } from "./runner.js";
+import { FakeRpcChild as FakeChild } from "./fake-rpc-child.js";
 import { MAX_NESTING_DEPTH } from "./types.js";
-
-class FakeChild extends EventEmitter {
-  stdin = new PassThrough();
-  stdout = new PassThrough();
-  stderr = new PassThrough();
-  exitCode: number | null = null;
-  responses: any[] = [];
-
-  constructor(
-    private readonly promptEvents: any[] = [
-      {
-        type: "extension_ui_request",
-        id: "ui-1",
-        method: "select",
-        title: "Danger",
-        options: ["Allow once", "Deny"],
-      },
-      { type: "agent_settled" },
-    ],
-  ) {
-    super();
-    this.stdin.on("data", (data: Buffer) => {
-      for (const line of data.toString().split("\n")) {
-        if (!line) continue;
-        const message = JSON.parse(line);
-        if (message.type === "prompt") {
-          this.stdout.write(JSON.stringify({ type: "response", id: message.id, success: true }) + "\n");
-          for (const event of this.promptEvents) {
-            this.stdout.write(JSON.stringify(event) + "\n");
-          }
-          queueMicrotask(() => {
-            this.exitCode = 0;
-            this.emit("close", 0);
-          });
-        } else if (message.type === "extension_ui_response") {
-          this.responses.push(message);
-        }
-      }
-    });
-  }
-
-  kill(): boolean {
-    this.exitCode = 143;
-    this.emit("close", this.exitCode);
-    return true;
-  }
-}
 
 describe("runChild nesting depth guard", () => {
   it("counts subagent generations from the env marker", () => {

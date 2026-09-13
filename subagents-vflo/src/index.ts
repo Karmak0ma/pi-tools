@@ -12,7 +12,8 @@ import { Type } from "typebox";
 import { discoverAgents, findAgent, formatAgentList } from "./agents.js";
 import { renderCall, renderResult } from "./render.js";
 import { type ModelRegistry, buildToolResolutionOptions, resolveCwd, resolveModel, resolveTools, type ToolResolutionOptions } from "./resolver.js";
-import { mapWithConcurrencyLimit, runChild } from "./runner.js";
+import { mapWithConcurrencyLimit } from "./runner.js";
+import { createBackend } from "./backends.js";
 import { ChildExtensionUIBroker } from "./extension-ui-broker.js";
 import { ExtensionUIDialogPresenter } from "./extension-ui-presenter.js";
 import { SubagentTracker, createInstance, type RuntimeSubagentInstance } from "./tracker.js";
@@ -97,6 +98,13 @@ export default function (pi: ExtensionAPI) {
 
   broker = createBroker();
   tuiManager = new SubagentTuiManager(tracker, (instance) => abortInstanceForManager(instance));
+
+  // One execution backend per extension runtime. Herdr detection happens once
+  // (see selectBackendKind): inside a Herdr workspace subagents spawn as real
+  // pi sessions in new panes; otherwise the original RPC runner is used. All
+  // session-scoped state (watchers, panes, processes) is disposed through
+  // tracker.killAll on shutdown/switch, so nothing is re-created here.
+  const backend = createBackend();
 
   abortInstanceForManager = (instance) => {
     if (instance.status !== "running") return;
@@ -427,9 +435,11 @@ export default function (pi: ExtensionAPI) {
           // Emit streaming update (immediate — status transition)
           updater.immediate();
 
-          // Run child process
+          // Run the child through the selected execution backend (Herdr pane
+          // or RPC subprocess). Spawn resolves once runtime handles exist;
+          // handle.result carries the terminal child semantics.
           try {
-            const childResult = await runChild({
+            const handle = await backend.spawn({
               resolvedModel: modelResult.model,
               resolvedTools: toolResult.tools,
               resolvedCwd: cwdResult.cwd,
@@ -439,6 +449,10 @@ export default function (pi: ExtensionAPI) {
               thinking: instance.thinking,
               childExtensionPaths: toolResolutionOptions.childExtensionPaths,
               signal,
+              // Pane geometry hint (Herdr only): first task right, the rest
+              // stacked down so a concurrent batch cannot shrink the parent
+              // pane into a sliver.
+              splitDirection: index === 0 ? "right" : "down",
               onEvent(event) {
                 instance.events.push(event);
 
@@ -492,6 +506,13 @@ export default function (pi: ExtensionAPI) {
                   tracker.updateStatus(id, "completed", { isPartial: false });
                   updater.immediate();
                 }
+                if (event.type === "subagent_turn_aborted") {
+                  // Herdr: the child's turn was interrupted (Escape in its
+                  // pane) but the session lives — an interrupted turn is
+                  // never a completion; the final result decides the outcome.
+                  tracker.updateStatus(id, "running", { isPartial: false, stopReason: "aborted" });
+                  updater.immediate();
+                }
               },
               onExtensionUIRequest(request, channel) {
                 const owner = {
@@ -521,25 +542,15 @@ export default function (pi: ExtensionAPI) {
                 instance.summary.stderrPreview = instance.stderr.slice(0, 500);
                 updater.throttled();
               },
-              onProcessReady(proc, control) {
-                instance.process = proc;
-                instance.control = control;
-              },
-              onProcessExit(code) {
-                executionBroker.cancelOwner(instance.id, "exit");
-                instance.activeToolCalls.clear();
-                instance.pendingUIRequestCount = 0;
-                instance.process = undefined;
-                instance.control = undefined;
-                if (instance.status === "running") {
-                  tracker.updateStatus(id, code === 0 ? "completed" : "error", code === 0 ? undefined : {
-                    errorMessage: instance.summary.errorMessage || `Subagent exited with code ${code ?? 1}`,
-                    isPartial: false,
-                  });
-                  updater.immediate();
-                }
-              },
             });
+
+            // Herdr instances carry no process (the pane hosts the child);
+            // control still routes abort/steer through the backend.
+            instance.process = handle.process;
+            instance.control = handle.control;
+
+            const childResult = await handle.result;
+            releaseChildRuntime(executionBroker, instance);
 
             // Update instance with results
             instance.summary.usage = childResult.usage;
@@ -568,8 +579,9 @@ export default function (pi: ExtensionAPI) {
             updater.immediate();
             return makeErrorSummaryFromInstance(instance, err.message || "Unknown error");
           } finally {
-            // runChild closes the RPC child after the agent settles; the
-            // process/control references are cleared by onProcessExit.
+            // handle.result has settled; releaseChildRuntime cleared the
+            // steering handles. Backends own child teardown (RPC: stdin close
+            // + signals; Herdr: pane lifecycle) — nothing left to clean up.
           }
           },
         );
@@ -909,6 +921,23 @@ function updateLiveUsage(instance: { summary: LiveTaskSummary }, message: any): 
 
   const contextTokens = contextTokensFromUsage(usage);
   if (contextTokens > 0) current.contextTokens = contextTokens;
+}
+
+/**
+ * Release a child's runtime handles once its backend result has settled:
+ * cancel any dialog still queued for it and drop the steering references.
+ * (Replaces the old onProcessReady/onProcessExit callbacks; the backend
+ * guarantees the result resolves exactly once per child.)
+ */
+function releaseChildRuntime(
+  broker: ChildExtensionUIBroker,
+  instance: RuntimeSubagentInstance,
+): void {
+  broker.cancelOwner(instance.id, "exit");
+  instance.activeToolCalls.clear();
+  instance.pendingUIRequestCount = 0;
+  instance.process = undefined;
+  instance.control = undefined;
 }
 
 function makePersistedSummary(instance: {
