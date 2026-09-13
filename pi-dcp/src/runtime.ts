@@ -184,6 +184,14 @@ export function noteSuccessfulCompression(runtime: DcpRuntime): void {
   runtime.semanticUserTurnsSinceNudge = 0;
   runtime.semanticIterationsSinceNudge = 0;
   runtime.pendingNudge = undefined;
+  // A compression IS the response to pressure, so it must arm the soft
+  // context-band cooldown just like a delivered nudge does. Without this, a
+  // compression only reset the semantic counters and the soft band re-fired
+  // at the very next settle (lastNudgeTurn still pointed at some old turn),
+  // asking the model to compress again immediately after it just did. The
+  // strong bands (imperative/critical) bypass the interval by design and
+  // still fire on later turns when usage stays above their thresholds.
+  runtime.lastNudgeTurn = runtime.turnCount;
 }
 
 /** Reset ephemeral semantic counters when branch/config identity changes. */
@@ -200,6 +208,12 @@ export function invalidateSnapshot(runtime: DcpRuntime, increment = true): void 
   clearBaselines(runtime);
   if (increment) runtime.generation++;
   runtime.lastReadiness = { ready: false, reason: "state_invalidated", generation: runtime.generation };
+  // A pending nudge was evaluated against the invalidated snapshot. Delivering
+  // it after a model/branch change would ship an envelope tagged with the old
+  // generation and re-use token thresholds that may no longer mean anything
+  // under the new model or window, so it is dropped here and re-derived from
+  // the next settle instead.
+  runtime.pendingNudge = undefined;
 }
 
 export function disableRuntime(runtime: DcpRuntime, reason: string): void {

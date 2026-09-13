@@ -2,7 +2,10 @@ import type { EffectiveConfig } from "../config/defaults.ts";
 
 export type NudgeType = "soft" | "imperative" | "critical";
 export type NudgeKind = "context" | "turn" | "iteration";
-export type NudgeReason = "ready" | "usage_unavailable" | "already_nudged_this_turn" | "below_minimum" | "interval_not_elapsed" | "potential_savings_below_minimum" | "semantic_interval_not_elapsed";
+// "nothing_compressible" marks a context-pressure decision dropped because the
+// request it would ship with offers no compressible protocol unit at all - the
+// nudge would contradict its own tags (see lifecycle.ts onSettled gate).
+export type NudgeReason = "ready" | "usage_unavailable" | "already_nudged_this_turn" | "below_minimum" | "interval_not_elapsed" | "nothing_compressible" | "potential_savings_below_minimum" | "semantic_interval_not_elapsed";
 export interface NudgeDecision { kind: NudgeKind; type: NudgeType; force: "soft" | "strong"; }
 export interface NudgeEvaluation {
   decision?: NudgeDecision;
@@ -55,4 +58,19 @@ export function evaluateNudge(tokens: number | null | undefined, config: Effecti
 }
 export function shouldNudge(tokens: number | null | undefined, config: EffectiveConfig, contextWindow: number, turnsSinceNudge = Number.POSITIVE_INFINITY, alreadyNudgedThisTurn = false, modelId?: string): NudgeDecision | undefined {
   return evaluateNudge(tokens, config, contextWindow, turnsSinceNudge, alreadyNudgedThisTurn, modelId).decision;
+}
+
+/**
+ * A context-pressure nudge must not ask the model to compress when the request
+ * it ships with offers nothing compressible: every visible label BLOCKED or
+ * user-protected makes the instruction contradict its own tags and invites a
+ * guaranteed-failing compress call (2026-09-13 nudge/tag mismatch report).
+ * Soft and imperative therefore require a nonzero estimated-savings inventory
+ * from the settled index; the critical band is exempt by design - at >=90%
+ * recovery pressure outranks eligibility bookkeeping. Semantic decisions
+ * (turn/iteration) already gate on savings inside evaluateSemanticNudge.
+ */
+export function gateContextNudgeOnEligibility(evaluation: NudgeEvaluation, potentialSavingsTokens: number): NudgeEvaluation {
+  if (evaluation.decision?.kind !== "context" || evaluation.decision.type === "critical" || potentialSavingsTokens > 0) return evaluation;
+  return { ...evaluation, decision: undefined, reason: "nothing_compressible" };
 }

@@ -8,7 +8,7 @@ import { buildProtocolUnits } from "./identity/protocol.ts";
 import { hashJson } from "./util/hash.ts";
 import { deepClone } from "./util/clone.ts";
 import { transformOutgoingContext } from "./transform/pipeline.ts";
-import { evaluateNudge } from "./transform/metadata.ts";
+import { evaluateNudge, gateContextNudgeOnEligibility } from "./transform/metadata.ts";
 import { buildNudgeMessage } from "./prompts/nudge.ts";
 import { stripEchoedLabels } from "./transform/echo.ts";
 import { relocateCacheBreakpoint } from "./transform/cache-breakpoint.ts";
@@ -360,9 +360,9 @@ async function onSettled(ctx: ExtensionContext, runtime: DcpRuntime, pi: Extensi
         userTurnsSinceNudge: runtime.semanticUserTurnsSinceNudge,
         iterationsSinceNudge: runtime.semanticIterationsSinceNudge,
       }, potential.estimatedSavingsTokens, runtime.config, runtime.lastNudgeTurn === runtime.turnCount);
-      const evaluation = contextEvaluation.decision
+      const evaluation = gateContextNudgeOnEligibility(contextEvaluation.decision
         ? { ...contextEvaluation, potentialSavingsTokens: potential.estimatedSavingsTokens }
-        : { ...semanticEvaluation, tokens: usage?.tokens, contextWindow: usage?.contextWindow || ctx.model?.contextWindow || 0, modelId: ctx.model?.id, min: contextEvaluation.min, max: contextEvaluation.max, critical: contextEvaluation.critical, turnsSinceNudge: contextEvaluation.turnsSinceNudge, potentialSavingsTokens: potential.estimatedSavingsTokens };
+        : { ...semanticEvaluation, tokens: usage?.tokens, contextWindow: usage?.contextWindow || ctx.model?.contextWindow || 0, modelId: ctx.model?.id, min: contextEvaluation.min, max: contextEvaluation.max, critical: contextEvaluation.critical, turnsSinceNudge: contextEvaluation.turnsSinceNudge, potentialSavingsTokens: potential.estimatedSavingsTokens }, potential.estimatedSavingsTokens);
       runtime.lastNudgeEvaluation = evaluation;
       const automaticNudgesAllowed = runtime.lastReadiness?.ready
         && runtime.config.compress.permission !== "deny"

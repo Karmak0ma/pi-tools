@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { loadConfig } from "../../src/config/load.ts";
 import { settingsPath, writeSettings } from "../../src/config/settings.ts";
 import { defaults, type EffectiveConfig } from "../../src/config/defaults.ts";
-import { evaluateNudge, shouldNudge } from "../../src/transform/metadata.ts";
+import { evaluateNudge, gateContextNudgeOnEligibility, shouldNudge } from "../../src/transform/metadata.ts";
 
 describe("personal DCP settings", () => {
   it("loads dcp_settings.json after normal configuration layers", async () => {
@@ -50,5 +50,24 @@ describe("personal DCP settings", () => {
     expect(evaluateNudge(400, config, 1000, 1).reason).toBe("interval_not_elapsed");
     expect(evaluateNudge(null, config, 1000).reason).toBe("usage_unavailable");
     expect(evaluateNudge(400, config, 1000, 3, true).reason).toBe("already_nudged_this_turn");
+  });
+  it("drops soft/imperative context nudges when nothing is compressible, keeping critical", () => {
+    const config = structuredClone(defaults) as unknown as EffectiveConfig;
+    config.nudge = { minContextPercent: 35, maxContextPercent: 70, criticalContextPercent: 90, turnsBetweenNudges: 3, turnNudgeFrequency: 5, iterationNudgeThreshold: 15, minPotentialSavingsTokens: 32000 };
+    const soft = evaluateNudge(400, config, 1000, 3);
+    const imperative = evaluateNudge(700, config, 1000);
+    const critical = evaluateNudge(900, config, 1000);
+    // Zero eligibility: the nudge would contradict its own request tags.
+    expect(gateContextNudgeOnEligibility(soft, 0).decision).toBeUndefined();
+    expect(gateContextNudgeOnEligibility(soft, 0).reason).toBe("nothing_compressible");
+    expect(gateContextNudgeOnEligibility(imperative, 0).decision).toBeUndefined();
+    // The critical band is exempt: recovery pressure always fires.
+    expect(gateContextNudgeOnEligibility(critical, 0).decision).toMatchObject({ type: "critical" });
+    // With savings available nothing is dropped.
+    expect(gateContextNudgeOnEligibility(soft, 5000).decision).toMatchObject({ type: "soft" });
+    // Semantic decisions (turn/iteration) are untouched - evaluateSemanticNudge
+    // applies its own savings floor.
+    const turn = evaluateNudge(400, config, 1000, 3);
+    expect(gateContextNudgeOnEligibility({ ...turn, decision: { kind: "turn", type: "soft", force: "soft" } }, 0).decision).toMatchObject({ kind: "turn" });
   });
 });

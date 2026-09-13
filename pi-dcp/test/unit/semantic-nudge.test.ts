@@ -69,6 +69,7 @@ describe("semantic compression nudges", () => {
     runtime.semanticUserTurnsSinceNudge = 5;
     runtime.semanticIterationsSinceNudge = 15;
     runtime.pendingNudge = { band: "soft", kind: "turn", nudgeKey: "nudge" };
+    runtime.turnCount = 42;
 
     noteSuccessfulCompression(runtime);
 
@@ -77,6 +78,9 @@ describe("semantic compression nudges", () => {
     expect(runtime.semanticUserTurnsSinceNudge).toBe(0);
     expect(runtime.semanticIterationsSinceNudge).toBe(0);
     expect(runtime.pendingNudge).toBeUndefined();
+    // A compression IS the pressure response, so it must arm the soft
+    // context-band cooldown exactly like a delivered nudge does.
+    expect(runtime.lastNudgeTurn).toBe(42);
   });
 
   it("does not schedule below the potential-savings floor", () => {
