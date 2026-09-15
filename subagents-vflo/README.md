@@ -129,8 +129,11 @@ interactive Pi sessions instead of headless RPC children:
   narrow parent always splits down).
 - The child is launched with `herdr agent start <name> --kind pi` and receives
   the task as its first prompt. Model, tools, thinking level, cwd, agent
-  system prompt, and child extensions are preserved exactly as in RPC mode;
-  the nesting-depth marker is injected into the pane env.
+  system prompt, and configured child extensions are preserved from RPC mode;
+  the nesting-depth marker is injected into the pane env. Herdr also loads its
+  managed `herdr-agent-state.ts` lifecycle extension when it is installed, even
+  though unrelated extensions remain disabled by `--no-extensions`, so the
+  Herdr agents view can show working, idle, and blocked states accurately.
 - The extension's subagent inspector does **not** auto-open (it never did);
   the pane itself is the live view. `/subagents` still lists Herdr instances
   for status, abort, and steering.
@@ -140,20 +143,28 @@ Herdr's `idle`/`done` pane status, which is a UI-seen state, not task semantics:
 
 - A turn that settles normally (`stop`) completes the task and delivers the
   result to the parent, exactly like the RPC path.
-- An **interrupted turn** (Escape inside the child pane) does not complete the
-  task. The pane and session stay alive for manual/corrective input; a later
-  normal turn still completes the task automatically.
-- Pane death is classified by the last observed turn state: aborted → aborted,
-  errored → error, otherwise error ("closed before completing"). A dead pane
-  is never reported as a successful completion.
-- Parent abort (Escape or the inspector's `x`) closes the pane and resolves
-  the task as aborted.
+- An **interrupted turn** (Escape inside the child pane) does not complete or
+  fail the task. Its lifecycle becomes `interrupted`; the pane, session,
+  watcher, and parent request stay alive for manual/corrective input. A later
+  normal turn returns the same task to `running` and still completes it
+  automatically. Only the final normal `stop` message supplies the parent
+  result; partial text from the aborted turn is discarded.
+- Pane death is a terminal task event, distinct from a turn interruption. An
+  interrupted task becomes `closed`, an errored task becomes `failed`, and an
+  otherwise active task becomes `closed`; a dead pane is never reported as a
+  successful completion.
+- Parent cancellation (or the inspector's `x`) closes the pane and resolves
+  the task as `closed` (shown as aborted by the compatibility UI status).
+  Escape pressed inside the child pane is different: it interrupts only the
+  current child turn and is non-terminal.
 - Session shutdown closes every Herdr child pane, so no child process
   outlives its parent session.
 
-The RPC runner stays the fallback outside Herdr and is unchanged. Backend
-selection lives in `src/herdr.ts`; the two implementations share one contract
-in `src/backends.ts`.
+The RPC runner stays the fallback outside Herdr and keeps its existing
+process/turn protocol. Both backends now expose the same explicit delegated
+lifecycle and final-output classification. Backend selection lives in
+`src/herdr.ts`; the two implementations share one contract in
+`src/backends.ts`.
 
 ## Built-in Agents
 
@@ -343,7 +354,8 @@ src/
 ├── resolver.ts        — Model, tool, and CWD resolution with validation
 ├── backends.ts        — SubagentBackend contract, default (RPC) backend, selection
 ├── runner.ts          — RPC subprocess spawning, process management, event streaming
-├── herdr.ts           — Herdr detection + CLI client (the only Herdr-aware module)
+├── herdr.ts           — Herdr detection + CLI client
+├── path-utils.ts      — Shared filesystem-path canonicalization helpers
 ├── herdr-backend.ts   — Herdr pane backend (spawn, JSONL observation, lifecycle)
 ├── session-watcher.ts — Incremental session-JSONL scanner used by the Herdr backend
 ├── tracker.ts         — SubagentTracker class, runtime instance management

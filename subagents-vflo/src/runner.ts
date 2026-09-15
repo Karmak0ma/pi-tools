@@ -20,7 +20,14 @@ import {
   type ChildExtensionUIDialogRequest,
   type ChildExtensionUIResponse,
 } from "./rpc-extension-ui.js";
-import { contextTokensFromUsage, emptyUsage, MAX_NESTING_DEPTH, type TaskUsage, type ThinkingLevel } from "./types.js";
+import {
+  contextTokensFromUsage,
+  emptyUsage,
+  MAX_NESTING_DEPTH,
+  type SubagentLifecycleState,
+  type TaskUsage,
+  type ThinkingLevel,
+} from "./types.js";
 
 /**
  * Env marker recording how many subagent generations a process sits below
@@ -58,6 +65,7 @@ export function nestingDepthRefusal(
     usage: emptyUsage(),
     finalOutput: "",
     toolCalls: [],
+    lifecycle: "failed",
     errorMessage: `Subagent nesting depth limit reached: refusing to spawn "${agentName}" at nesting level ${nestingDepth + 1} (max ${MAX_NESTING_DEPTH})`,
   };
 }
@@ -112,12 +120,45 @@ export async function writePromptToTempFile(
 
 export interface ChildRunResult {
   exitCode: number;
+  /** Final delegated-task state; a turn-level `aborted` is not terminal. */
+  lifecycle: SubagentLifecycleState;
   usage: TaskUsage;
   finalOutput: string;
   stopReason?: string;
   errorMessage?: string;
   model?: string;
   toolCalls: Array<{ name: string; argsPreview: string }>;
+}
+
+/**
+ * Convert process-close observations into the terminal delegated-task state.
+ * A normal stop is authoritative even when the transport closes noisily;
+ * without that stop, an aborted/cancelled child is closed and other abnormal
+ * exits are failed.
+ */
+function finalizeChildResult(
+  result: ChildRunResult,
+  wasAborted: boolean,
+  collectedStderr: string,
+): void {
+  if (wasAborted) result.stopReason = "aborted";
+  const validCompletion = !wasAborted && result.stopReason === "stop";
+  if (!wasAborted && result.stopReason === "aborted" && !result.errorMessage) {
+    result.errorMessage = "Subagent turn was interrupted before the child process closed";
+  }
+  if (!validCompletion && result.exitCode !== 0 && !result.errorMessage) {
+    const stderrSnippet = collectedStderr.trim().slice(0, 300);
+    result.errorMessage = stderrSnippet
+      ? `Child exited with code ${result.exitCode}: ${stderrSnippet}`
+      : `Child exited with code ${result.exitCode}`;
+  }
+  result.lifecycle = validCompletion
+    ? "completed"
+    : wasAborted || result.stopReason === "aborted"
+      ? "closed"
+      : result.stopReason === "error" || result.exitCode !== 0 || !!result.errorMessage
+        ? "failed"
+        : "closed";
 }
 
 export interface RunChildOptions {
@@ -234,6 +275,7 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
 
   const result: ChildRunResult = {
     exitCode: 0,
+    lifecycle: "running",
     usage: emptyUsage(),
     finalOutput: "",
     toolCalls: [],
@@ -509,11 +551,10 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
               });
             }
           }
-          if (messageText) {
-            result.finalOutput = result.finalOutput
-              ? `${result.finalOutput}\n\n${messageText}`
-              : messageText;
-          }
+          // Only a normal final stop is a delegated-task result. Text from
+          // an aborted assistant response is an incomplete turn and must not
+          // leak into the result if the child later resumes or closes.
+          if (msg.stopReason === "stop") result.finalOutput = messageText;
         }
       }
     }
@@ -544,14 +585,11 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
     closeExtensionUIChannel();
     if (buffer.trim()) processLine(buffer);
     result.exitCode = code ?? 0;
-    if (wasAborted) {
-      result.stopReason = "aborted";
-    } else if (result.exitCode !== 0 && !result.errorMessage) {
-      const stderrSnippet = collectedStderr.trim().slice(0, 300);
-      result.errorMessage = stderrSnippet
-        ? `Child exited with code ${result.exitCode}: ${stderrSnippet}`
-        : `Child exited with code ${result.exitCode}`;
-    }
+    // Process lifetime is separate from assistant-turn lifetime. Once a
+    // normal stop has been observed, the task is complete even if the
+    // transport closes noisily. Otherwise this records terminal closure or
+    // failure instead of leaving the parent request pending.
+    finalizeChildResult(result, wasAborted, collectedStderr);
     rejectPending(new Error(result.errorMessage || "Subagent process exited"));
     onProcessExit?.(code);
     resolveClosed();
@@ -560,6 +598,7 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
 
   proc.on("error", (err) => {
     if (!result.errorMessage) result.errorMessage = `Spawn error: ${err.message}`;
+    result.lifecycle = "failed";
     if (!processExited) {
       processExited = true;
       closeExtensionUIChannel();

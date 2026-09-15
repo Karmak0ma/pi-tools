@@ -14,6 +14,9 @@
  *   success for an already-closed pane.
  */
 
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { spawn } from "node:child_process";
 
 // ─── Detection ───────────────────────────────────────────────────────────────
@@ -23,6 +26,62 @@ export const HERDR_ENV_VAR = "HERDR_ENV";
 
 /** Env var naming the pane a process runs in; required to anchor pane splits. */
 export const HERDR_PANE_ID_VAR = "HERDR_PANE_ID";
+
+/** Pi's override for the directory that contains its extensions and settings. */
+export const PI_CODING_AGENT_DIR_VAR = "PI_CODING_AGENT_DIR";
+
+const HERDR_AGENT_STATE_EXTENSION = path.join("extensions", "herdr-agent-state.ts");
+
+/**
+ * Match Pi's agent-directory resolution, including its documented `~/...`
+ * expansion for PI_CODING_AGENT_DIR. Keeping this small rule local prevents a
+ * custom directory written the same way for Pi from silently disabling Herdr's
+ * lifecycle reporting in the child. Relative overrides are anchored at the
+ * child's cwd because that is where the explicitly launched Pi resolves them.
+ */
+function resolvePiAgentDir(env: NodeJS.ProcessEnv, baseDir: string): string {
+  const configuredDir = env[PI_CODING_AGENT_DIR_VAR];
+  if (!configuredDir) return path.join(os.homedir(), ".pi", "agent");
+  if (configuredDir === "~") return os.homedir();
+  if (configuredDir.startsWith("~/") || (process.platform === "win32" && configuredDir.startsWith("~\\"))) {
+    return path.join(os.homedir(), configuredDir.slice(2));
+  }
+  return path.isAbsolute(configuredDir) ? configuredDir : path.resolve(baseDir, configuredDir);
+}
+
+/**
+ * Resolve Herdr's managed Pi lifecycle extension for an explicitly launched
+ * child session.
+ *
+ * Herdr can infer an agent's state from terminal output, but that fallback is
+ * intentionally weaker than the lifecycle reports sent by this extension. A
+ * child started with `--no-extensions` does not load the managed integration,
+ * so Herdr sees the Pi prompt's ready/idle screen even while the model is
+ * working. The child argv must therefore opt this one integration back in.
+ *
+ * The path follows Pi's own configuration contract: use
+ * PI_CODING_AGENT_DIR when it is set, otherwise use Pi's default
+ * ~/.pi/agent directory. Returning null when the file is unavailable is
+ * deliberate. A package can run without Herdr's optional integration, while
+ * passing a nonexistent `-e` path would prevent the child from starting.
+ */
+export function resolveHerdrAgentStateExtension(
+  env: NodeJS.ProcessEnv = process.env,
+  baseDir: string = process.cwd(),
+): string | null {
+  const candidate = path.join(resolvePiAgentDir(env, baseDir), HERDR_AGENT_STATE_EXTENSION);
+
+  try {
+    if (!fs.statSync(candidate).isFile()) return null;
+    // Canonicalizing makes the result stable and lets the backend avoid loading
+    // the same integration twice when user configuration names a symlink.
+    return fs.realpathSync.native(candidate);
+  } catch {
+    // The integration is optional: an incomplete Herdr installation must not
+    // turn an otherwise valid subagent spawn into a hard startup failure.
+    return null;
+  }
+}
 
 /**
  * Whether this process appears to run inside a Herdr workspace.
@@ -148,6 +207,17 @@ function isHerdrNotFound(error: unknown): boolean {
   return HERDR_NOT_FOUND_CODES.has((error as any)?.herdrCode);
 }
 
+/**
+ * Whether a confirmed agentPrompt failed because Herdr never observed the
+ * pane leave idle within its submission-stall window. This is Herdr's own
+ * documented signal for a possibly-lost submission (e.g. the trailing Enter
+ * keystroke swallowed by a still-initializing child) — not proof that
+ * nothing was sent, which is why callers must not resubmit blindly.
+ */
+export function isHerdrPromptStalled(error: unknown): boolean {
+  return (error as any)?.herdrCode === "agent_prompt_stalled";
+}
+
 // ─── Client ──────────────────────────────────────────────────────────────────
 
 /**
@@ -165,8 +235,24 @@ export interface HerdrClient {
    * Rejects if the agent never becomes ready (the pane stays usable for cleanup).
    */
   agentStart(name: string, paneId: string, agentArgs: string[], timeoutMs: number): Promise<void>;
-  /** Type a prompt into the agent's terminal and press Enter. Returns immediately. */
-  agentPrompt(target: string, text: string): Promise<void>;
+  /**
+   * Type a prompt into the agent's terminal and press Enter.
+   *
+   * Without `options.confirmWithinMs`, this returns as soon as Herdr accepts
+   * the command — the fire-and-forget mode used for mid-task steering, where
+   * the child is already running and the submission race below cannot occur.
+   *
+   * With `options.confirmWithinMs`, waits for Herdr to observe the agent
+   * leave `idle` (into `working` or `blocked`) within that many
+   * milliseconds, confirming the submission actually took effect. Rejects
+   * with `herdrCode: "agent_prompt_stalled"` when it does not — Herdr's own
+   * signal that the text may have landed without the trailing Enter taking
+   * effect. Herdr's docs are explicit that this does not prove nothing was
+   * sent, so callers must not resubmit blindly.
+   */
+  agentPrompt(target: string, text: string, options?: { confirmWithinMs?: number }): Promise<void>;
+  /** Send raw terminal keys (e.g. "enter") into an agent's interactive UI, bypassing bracketed-paste typing. */
+  agentSendKeys(target: string, keys: string[]): Promise<void>;
   /** Pane state including agent_status (idle/working/blocked); throws on unexpected errors. */
   paneGet(paneId: string): Promise<{ state: "exists" | "gone"; agentStatus?: string }>;
   /** Close a pane (kills its process). Tolerates an already-closed pane. */
@@ -210,11 +296,27 @@ export class HerdrCli implements HerdrClient {
     if (!result?.agent) throw new Error("herdr agent start returned no agent");
   }
 
-  async agentPrompt(target: string, text: string): Promise<void> {
-    // No --wait: completion is decided by the session watcher, not by Herdr's
-    // idle/done status, which is a UI-seen state rather than task semantics.
-    // parseCliResult surfaces agent_blocked and other server errors.
-    parseCliResult("agent prompt", await this.run(["agent", "prompt", target, text], DEFAULT_COMMAND_TIMEOUT_MS));
+  async agentPrompt(target: string, text: string, options?: { confirmWithinMs?: number }): Promise<void> {
+    // Fire-and-forget mode: completion is decided by the session watcher, not
+    // by Herdr's idle/done status, which is a UI-seen state rather than task
+    // semantics. parseCliResult surfaces agent_blocked and other server errors.
+    const args = ["agent", "prompt", target, text];
+    let timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
+    if (options?.confirmWithinMs) {
+      // Confirm mode: ask Herdr itself to verify the pane left idle. This is
+      // narrowly about "did the submission take effect", not about task
+      // completion — --until stops the wait the moment the turn begins,
+      // instead of waiting for the whole turn to settle.
+      args.push("--wait", "--until", "working", "--until", "blocked", "--timeout", String(options.confirmWithinMs));
+      // The CLI's own --timeout bounds the wait; the runner timeout adds
+      // slack for process startup and transport, matching agentStart's pattern.
+      timeoutMs = options.confirmWithinMs + DEFAULT_COMMAND_TIMEOUT_MS;
+    }
+    parseCliResult("agent prompt", await this.run(args, timeoutMs));
+  }
+
+  async agentSendKeys(target: string, keys: string[]): Promise<void> {
+    parseCliResult("agent send-keys", await this.run(["agent", "send-keys", target, ...keys], DEFAULT_COMMAND_TIMEOUT_MS));
   }
 
   async paneGet(paneId: string): Promise<{ state: "exists" | "gone"; agentStatus?: string }> {

@@ -1,10 +1,11 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHerdrBackend } from "./herdr-backend.js";
 import { NESTING_DEPTH_ENV, currentNestingDepth } from "./runner.js";
 import { MAX_NESTING_DEPTH } from "./types.js";
+import { PI_CODING_AGENT_DIR_VAR } from "./herdr.js";
 import type { HerdrClient } from "./herdr.js";
 import type { SubagentSpec } from "./backends.js";
 
@@ -25,10 +26,16 @@ class FakeHerdr implements HerdrClient {
   closedPanes: string[] = [];
   paneExists = new Map<string, boolean>();
   paneGetCalls = 0;
+  paneGetDelayMs = 0;
+  paneGetResults: Array<{ state: "exists" | "gone"; agentStatus?: string }> = [];
   layoutForPane = "";
   layoutWidth = 216;
   agentStartError: Error | undefined;
+  agentPromptError: Error | undefined;
   failPaneClose = false;
+  sendKeysCalls: Array<{ target: string; keys: string[] }> = [];
+  /** How many upcoming confirm-mode agentPrompt calls should report agent_prompt_stalled before succeeding. */
+  stallPromptConfirmations = 0;
 
   async paneSplit(options: { direction: "right" | "down"; cwd: string; env: Record<string, string> }) {
     this.splits.push(options);
@@ -43,14 +50,28 @@ class FakeHerdr implements HerdrClient {
     this.started.push({ name, paneId, args, timeoutMs });
   }
 
-  async agentPrompt(target: string, text: string) {
+  async agentPrompt(target: string, text: string, options?: { confirmWithinMs?: number }) {
+    if (this.agentPromptError) throw this.agentPromptError;
     this.prompts.push({ target, text });
+    if (options?.confirmWithinMs && this.stallPromptConfirmations > 0) {
+      this.stallPromptConfirmations--;
+      const error = new Error("herdr agent prompt failed: agent_prompt_stalled");
+      (error as any).herdrCode = "agent_prompt_stalled";
+      throw error;
+    }
+  }
+
+  async agentSendKeys(target: string, keys: string[]) {
+    this.sendKeysCalls.push({ target, keys });
   }
 
   async paneGet(paneId: string): Promise<{ state: "exists" | "gone"; agentStatus?: string }> {
     this.paneGetCalls++;
-    const exists = this.paneExists.get(paneId) !== false;
-    return exists ? { state: "exists", agentStatus: "working" } : { state: "gone" };
+    const result = this.paneGetResults.shift() ?? (
+      this.paneExists.get(paneId) !== false ? { state: "exists", agentStatus: "working" } : { state: "gone" }
+    );
+    if (this.paneGetDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.paneGetDelayMs));
+    return result;
   }
 
   async paneClose(paneId: string) {
@@ -73,6 +94,16 @@ class FakeHerdr implements HerdrClient {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const tempDirs: string[] = [];
+
+beforeEach(() => {
+  // Keep every child-argv assertion independent of the developer's real Pi
+  // installation. The production resolver intentionally checks the default
+  // ~/.pi/agent path when this variable is absent, so a local managed hook
+  // must not silently change unrelated test expectations.
+  const isolatedAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-herdr-test-"));
+  tempDirs.push(isolatedAgentDir);
+  vi.stubEnv(PI_CODING_AGENT_DIR_VAR, isolatedAgentDir);
+});
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -128,6 +159,79 @@ async function until(fn: () => boolean, ms = 500): Promise<void> {
   }
 }
 
+// ─── Herdr child extensions ─────────────────────────────────────────────────
+
+describe("Herdr child extension wiring", () => {
+  it("explicitly loads the managed lifecycle integration alongside configured extensions", async () => {
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-herdr-"));
+    tempDirs.push(agentDir);
+    const integrationPath = path.join(agentDir, "extensions", "herdr-agent-state.ts");
+    fs.mkdirSync(path.dirname(integrationPath), { recursive: true });
+    fs.writeFileSync(integrationPath, "// test integration");
+    vi.stubEnv(PI_CODING_AGENT_DIR_VAR, agentDir);
+
+    const fake = new FakeHerdr();
+    const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
+    const args = fake.started[0].args;
+    const canonicalIntegrationPath = fs.realpathSync.native(integrationPath);
+
+    // --no-extensions keeps unrelated parent extensions out of the isolated
+    // child; the managed Herdr hook is the one deliberate exception.
+    expect(args).toContain("--no-extensions");
+    expect(args).toContain("-e");
+    expect(args).toContain("/ext/a.ts");
+    expect(args).toContain(canonicalIntegrationPath);
+    expect(args.filter((arg) => arg === "-e")).toHaveLength(2);
+
+    appendAssistant(sessionDirOf(fake), { content: [{ type: "text", text: "done" }], stopReason: "stop" });
+    await handle.result;
+  });
+
+  it("does not add the integration when the configured Pi directory has no managed hook", async () => {
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-herdr-"));
+    tempDirs.push(agentDir);
+    vi.stubEnv(PI_CODING_AGENT_DIR_VAR, agentDir);
+
+    const fake = new FakeHerdr();
+    const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
+    const args = fake.started[0].args;
+
+    expect(args).not.toContain("herdr-agent-state.ts");
+    expect(args.filter((arg) => arg === "-e")).toHaveLength(1);
+
+    appendAssistant(sessionDirOf(fake), { content: [{ type: "text", text: "done" }], stopReason: "stop" });
+    await handle.result;
+  });
+
+  it("does not load the same integration twice when configuration uses a symlink", async () => {
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-herdr-"));
+    tempDirs.push(agentDir);
+    const integrationPath = path.join(agentDir, "extensions", "herdr-agent-state.ts");
+    const configuredLink = path.join(agentDir, "configured-herdr-state.ts");
+    fs.mkdirSync(path.dirname(integrationPath), { recursive: true });
+    fs.writeFileSync(integrationPath, "// test integration");
+    fs.symlinkSync(integrationPath, configuredLink);
+    vi.stubEnv(PI_CODING_AGENT_DIR_VAR, agentDir);
+
+    const fake = new FakeHerdr();
+    const handle = await makeBackend(fake).spawn(makeSpec({
+      agentPrompt: "",
+      childExtensionPaths: [configuredLink],
+    }));
+    const args = fake.started[0].args;
+    const extensionValues = args
+      .map((arg, index) => arg === "-e" ? args[index + 1] : undefined)
+      .filter((value): value is string => value !== undefined);
+
+    // The configured spelling remains in argv and is enough; canonical path
+    // comparison prevents the backend from appending a second spelling.
+    expect(extensionValues).toEqual([configuredLink]);
+
+    appendAssistant(sessionDirOf(fake), { content: [{ type: "text", text: "done" }], stopReason: "stop" });
+    await handle.result;
+  });
+});
+
 // ─── Happy path ──────────────────────────────────────────────────────────────
 
 describe("HerdrBackend happy path", () => {
@@ -176,6 +280,7 @@ describe("HerdrBackend happy path", () => {
 
     const result = await handle.result;
     expect(result.exitCode).toBe(0);
+    expect(result.lifecycle).toBe("completed");
     expect(result.stopReason).toBe("stop");
     expect(result.errorMessage).toBeUndefined();
     expect(result.finalOutput).toBe("All done.");
@@ -222,19 +327,34 @@ describe("HerdrBackend happy path", () => {
 describe("HerdrBackend interruption semantics", () => {
   it("does not complete on an interrupted turn, and completes after a later normal turn", async () => {
     const fake = new FakeHerdr();
-    const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
+    const events: any[] = [];
+    const handle = await makeBackend(fake).spawn(makeSpec({
+      agentPrompt: "",
+      onEvent: (event) => events.push(event),
+    }));
     const sessionDir = sessionDirOf(fake);
 
     // User presses Escape inside the pane: the turn aborts, the task must not.
-    appendAssistant(sessionDir, { content: [], stopReason: "aborted" });
+    appendAssistant(sessionDir, {
+      content: [{ type: "text", text: "partial work that must be discarded" }],
+      stopReason: "aborted",
+    });
+    await until(() => events.some((event) => event.type === "subagent_turn_aborted"));
+
+    // The result remains pending and the logical task is interrupted, not
+    // failed. The pane and its watcher are still available for guidance.
+    expect(fake.closedPanes).toEqual([]);
     await expect(settleRace(handle, 100)).resolves.toBe("pending");
 
     // User gives corrective input in the pane; the child completes a turn.
     appendAssistant(sessionDir, { content: [{ type: "text", text: "recovered and finished" }], stopReason: "stop" });
     const result = await handle.result;
+    expect(events.filter((event) => event.type === "agent_start").length).toBeGreaterThanOrEqual(1);
+    expect(result.lifecycle).toBe("completed");
     expect(result.stopReason).toBe("stop");
     expect(result.exitCode).toBe(0);
     expect(result.finalOutput).toBe("recovered and finished");
+    expect(result.finalOutput).not.toContain("partial work");
   });
 
   it("keeps the pane alive and keeps polling while the task is interrupted", async () => {
@@ -249,6 +369,77 @@ describe("HerdrBackend interruption semantics", () => {
     await expect(settleRace(handle, 20)).resolves.toBe("pending");
   });
 
+  it("survives multiple interrupted turns and returns exactly the final successful turn", async () => {
+    const fake = new FakeHerdr();
+    const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
+    const sessionDir = sessionDirOf(fake);
+
+    appendAssistant(sessionDir, { content: [{ type: "text", text: "first partial" }], stopReason: "aborted" });
+    await until(() => fake.paneGetCalls > 0 && fake.prompts.length === 1);
+    await handle.control!.sendMessage("first correction", "steer");
+    appendAssistant(sessionDir, { content: [{ type: "text", text: "second partial" }], stopReason: "aborted" });
+    await until(() => fake.prompts.length === 2);
+    await handle.control!.sendMessage("second correction", "steer");
+    appendAssistant(sessionDir, { content: [{ type: "text", text: "final successful answer" }], stopReason: "stop" });
+
+    const result = await handle.result;
+    expect(result.lifecycle).toBe("completed");
+    expect(result.finalOutput).toBe("final successful answer");
+    expect(result.finalOutput).not.toContain("first partial");
+    expect(result.finalOutput).not.toContain("second partial");
+    expect(fake.prompts.map((prompt) => prompt.text)).toEqual(["map the repo", "first correction", "second correction"]);
+  });
+
+  it("ignores a stale pane-death observation when guidance starts a newer turn", async () => {
+    const fake = new FakeHerdr();
+    fake.paneGetDelayMs = 40;
+    fake.paneGetResults.push({ state: "gone" });
+    const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
+    const sessionDir = sessionDirOf(fake);
+
+    // Let a poll for the old turn enter paneGet, then interrupt and resume
+    // before its deliberately stale "gone" response returns.
+    await until(() => fake.paneGetCalls > 0);
+    appendAssistant(sessionDir, { content: [], stopReason: "aborted" });
+    await handle.control!.sendMessage("continue with the corrected plan", "steer");
+    appendAssistant(sessionDir, { content: [{ type: "text", text: "completed after guidance" }], stopReason: "stop" });
+
+    const result = await handle.result;
+    expect(result.lifecycle).toBe("completed");
+    expect(result.finalOutput).toBe("completed after guidance");
+  });
+
+  it("terminates an interrupted task when the parent explicitly cancels it", async () => {
+    const fake = new FakeHerdr();
+    const events: any[] = [];
+    const handle = await makeBackend(fake).spawn(makeSpec({
+      agentPrompt: "",
+      onEvent: (event) => events.push(event),
+    }));
+    appendAssistant(sessionDirOf(fake), { content: [], stopReason: "aborted" });
+    await until(() => events.some((event) => event.type === "subagent_turn_aborted"));
+
+    handle.control!.abort();
+    const result = await handle.result;
+
+    expect(result.lifecycle).toBe("closed");
+    expect(result.stopReason).toBe("aborted");
+    expect(fake.closedPanes).toHaveLength(1);
+  });
+
+  it("does not leave the parent pending forever when a steering command fails", async () => {
+    const fake = new FakeHerdr();
+    const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
+    fake.agentPromptError = new Error("agent prompt transport failed");
+
+    await expect(handle.control!.sendMessage("guidance", "steer")).rejects.toThrow("transport failed");
+    const result = await handle.result;
+
+    expect(result.lifecycle).toBe("failed");
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("transport failed");
+  });
+
   it("resolves aborted — never completed — when the parent aborts a running child", async () => {
     const fake = new FakeHerdr();
     const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
@@ -257,6 +448,7 @@ describe("HerdrBackend interruption semantics", () => {
     handle.control!.abort();
     const result = await handle.result;
 
+    expect(result.lifecycle).toBe("closed");
     expect(result.stopReason).toBe("aborted");
     expect(result.exitCode).toBe(0);
     expect(fake.closedPanes).toContain(paneId);
@@ -276,6 +468,7 @@ describe("HerdrBackend interruption semantics", () => {
 
     // paneClose reported an error, but the poll loop observes the pane as
     // gone; either way a parent-requested close is an abort, not a success.
+    expect(result.lifecycle).toBe("closed");
     expect(result.stopReason).toBe("aborted");
   });
 });
@@ -304,6 +497,7 @@ describe("HerdrBackend failure handling", () => {
     fake.paneExists.set(fake.started[0].paneId, false);
     const result = await handle.result;
 
+    expect(result.lifecycle).toBe("closed");
     expect(result.stopReason).toBe("aborted");
     expect(result.exitCode).toBe(0);
   });
@@ -316,6 +510,7 @@ describe("HerdrBackend failure handling", () => {
     fake.paneExists.set(fake.started[0].paneId, false);
     const result = await handle.result;
 
+    expect(result.lifecycle).toBe("failed");
     expect(result.stopReason).toBe("error");
     expect(result.exitCode).toBe(1);
     expect(result.errorMessage).toContain("Provider exploded");
@@ -327,6 +522,7 @@ describe("HerdrBackend failure handling", () => {
     appendAssistant(sessionDirOf(fake), { content: [], stopReason: "error", errorMessage: "Provider failed" });
 
     const result = await handle.result;
+    expect(result.lifecycle).toBe("failed");
     expect(result.stopReason).toBe("error");
     expect(result.errorMessage).toContain("Provider failed");
     expect(fake.closedPanes).toEqual([]);
@@ -443,3 +639,41 @@ describe("HerdrBackend failure handling", () => {
     expect(fake.splits[0].env[NESTING_DEPTH_ENV]).toBe("2");
   });
 });
+
+// ─── Initial prompt submission race ────────────────────────────────────────
+
+describe("HerdrBackend initial prompt submission race", () => {
+  it("confirms the first prompt with --wait semantics and needs no recovery on the happy path", async () => {
+    const fake = new FakeHerdr();
+    await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
+
+    expect(fake.prompts).toEqual([{ target: fake.started[0].name, text: "map the repo" }]);
+    expect(fake.sendKeysCalls).toEqual([]);
+  });
+
+  it("sends a corrective Enter when the confirmed submission stalls, without retyping the task", async () => {
+    const fake = new FakeHerdr();
+    fake.stallPromptConfirmations = 1;
+
+    const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
+
+    // Exactly one prompt submission: recovery must not resend the text, only
+    // nudge the terminating Enter that was (assumed) lost.
+    expect(fake.prompts).toEqual([{ target: fake.started[0].name, text: "map the repo" }]);
+    expect(fake.sendKeysCalls).toEqual([{ target: fake.started[0].name, keys: ["enter"] }]);
+
+    appendAssistant(sessionDirOf(fake), { content: [{ type: "text", text: "done" }], stopReason: "stop" });
+    const result = await handle.result;
+    expect(result.lifecycle).toBe("completed");
+  });
+
+  it("propagates non-stall agentPrompt errors without attempting recovery", async () => {
+    const fake = new FakeHerdr();
+    fake.agentPromptError = new Error("herdr agent prompt failed: agent_blocked");
+
+    await expect(makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }))).rejects.toThrow("agent_blocked");
+    expect(fake.sendKeysCalls).toEqual([]);
+    expect(fake.closedPanes).toHaveLength(1);
+  });
+});
+

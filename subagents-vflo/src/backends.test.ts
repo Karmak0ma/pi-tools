@@ -129,7 +129,8 @@ describe("createBackend selection", () => {
       paneSplit: async () => ({ paneId: "wJ:p1" }),
       agentStart: async () => {},
       agentPrompt: async () => {},
-      paneGet: async () => "exists",
+      agentSendKeys: async () => {},
+      paneGet: async () => ({ state: "exists" as const }),
       paneClose: async () => {},
       paneLayout: async () => [{ paneId: "wJ:pH", width: 216 }],
     };

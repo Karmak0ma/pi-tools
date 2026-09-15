@@ -1,10 +1,16 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   HERDR_ENV_VAR,
   HERDR_PANE_ID_VAR,
   HerdrCli,
+  PI_CODING_AGENT_DIR_VAR,
+  resolveHerdrAgentStateExtension,
   type HerdrCommandResult,
   isHerdrEnvironment,
+  isHerdrPromptStalled,
   selectBackendKind,
 } from "./herdr.js";
 
@@ -44,8 +50,90 @@ function makeRunner(
   return { runner, calls };
 }
 
+const tempDirs: string[] = [];
+
 afterEach(() => {
   vi.unstubAllEnvs();
+  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
+
+describe("Herdr lifecycle integration resolution", () => {
+  it("resolves the managed extension from Pi's default directory", () => {
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-home-"));
+    tempDirs.push(homeDir);
+    const extensionPath = path.join(homeDir, ".pi", "agent", "extensions", "herdr-agent-state.ts");
+    fs.mkdirSync(path.dirname(extensionPath), { recursive: true });
+    fs.writeFileSync(extensionPath, "// test integration");
+    // Node's os.homedir() follows HOME on POSIX and USERPROFILE on Windows.
+    // Stubbing both keeps the production default branch under test without
+    // changing the resolver's public API or relying on the real home directory.
+    vi.stubEnv("HOME", homeDir);
+    vi.stubEnv("USERPROFILE", homeDir);
+    const expected = fs.realpathSync.native(extensionPath);
+    expect(resolveHerdrAgentStateExtension({})).toBe(expected);
+    // An empty override has the same meaning as an unset override in Pi's
+    // environment contract and must not produce a relative `extensions/...`
+    // lookup from the test process's current working directory.
+    expect(resolveHerdrAgentStateExtension({ [PI_CODING_AGENT_DIR_VAR]: "" })).toBe(expected);
+    // Pi also expands a leading tilde in an explicit override.
+    expect(resolveHerdrAgentStateExtension({ [PI_CODING_AGENT_DIR_VAR]: "~/.pi/agent" })).toBe(expected);
+
+    const bareTildeExtension = path.join(homeDir, "extensions", "herdr-agent-state.ts");
+    fs.mkdirSync(path.dirname(bareTildeExtension), { recursive: true });
+    fs.writeFileSync(bareTildeExtension, "// test integration");
+    expect(resolveHerdrAgentStateExtension({ [PI_CODING_AGENT_DIR_VAR]: "~" }))
+      .toBe(fs.realpathSync.native(bareTildeExtension));
+  });
+
+  it("resolves the managed extension from PI_CODING_AGENT_DIR", () => {
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-herdr-"));
+    tempDirs.push(agentDir);
+    const extensionPath = path.join(agentDir, "extensions", "herdr-agent-state.ts");
+    fs.mkdirSync(path.dirname(extensionPath), { recursive: true });
+    fs.writeFileSync(extensionPath, "// test integration");
+
+    expect(resolveHerdrAgentStateExtension({ [PI_CODING_AGENT_DIR_VAR]: agentDir }))
+      .toBe(fs.realpathSync.native(extensionPath));
+  });
+
+  it("resolves a relative override against the child working directory", () => {
+    const childCwd = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-child-cwd-"));
+    tempDirs.push(childCwd);
+    const extensionPath = path.join(childCwd, "relative-agent", "extensions", "herdr-agent-state.ts");
+    fs.mkdirSync(path.dirname(extensionPath), { recursive: true });
+    fs.writeFileSync(extensionPath, "// test integration");
+
+    expect(resolveHerdrAgentStateExtension(
+      { [PI_CODING_AGENT_DIR_VAR]: "relative-agent" },
+      childCwd,
+    )).toBe(fs.realpathSync.native(extensionPath));
+  });
+
+  it("returns null instead of injecting a missing integration path", () => {
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-herdr-"));
+    tempDirs.push(agentDir);
+
+    expect(resolveHerdrAgentStateExtension({ [PI_CODING_AGENT_DIR_VAR]: agentDir })).toBeNull();
+  });
+
+  it("returns null when the managed extension path is a directory", () => {
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-herdr-"));
+    tempDirs.push(agentDir);
+    const extensionPath = path.join(agentDir, "extensions", "herdr-agent-state.ts");
+    fs.mkdirSync(extensionPath, { recursive: true });
+
+    expect(resolveHerdrAgentStateExtension({ [PI_CODING_AGENT_DIR_VAR]: agentDir })).toBeNull();
+  });
+
+  it("returns null for a broken managed-extension symlink", () => {
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-herdr-"));
+    tempDirs.push(agentDir);
+    const extensionPath = path.join(agentDir, "extensions", "herdr-agent-state.ts");
+    fs.mkdirSync(path.dirname(extensionPath), { recursive: true });
+    fs.symlinkSync(path.join(agentDir, "missing-herdr-agent-state.ts"), extensionPath);
+
+    expect(resolveHerdrAgentStateExtension({ [PI_CODING_AGENT_DIR_VAR]: agentDir })).toBeNull();
+  });
 });
 
 describe("HerdrCli", () => {
@@ -121,6 +209,53 @@ describe("HerdrCli", () => {
     const cli = new HerdrCli(runner as any);
     await expect(cli.agentPrompt("sa-x", "hello")).rejects.toThrow("agent_blocked");
   });
+
+  it("adds --wait/--until/--timeout only when a confirmation window is requested", async () => {
+    const { runner, calls } = makeRunner(() => ({
+      exitCode: 0,
+      stdout: JSON.stringify({ result: { type: "ok" } }),
+      stderr: "",
+    }));
+    const cli = new HerdrCli(runner);
+
+    await cli.agentPrompt("sa-x", "map the repo", { confirmWithinMs: 8_000 });
+
+    expect(calls[0].args).toEqual([
+      "agent", "prompt", "sa-x", "map the repo",
+      "--wait", "--until", "working", "--until", "blocked", "--timeout", "8000",
+    ]);
+    // Runner timeout leaves slack over the CLI's own confirmation window.
+    expect(calls[0].timeoutMs).toBe(18_000);
+  });
+
+  it("surfaces a stalled confirmed submission as agent_prompt_stalled", async () => {
+    const runner = async (): Promise<HerdrCommandResult> => ({
+      exitCode: 1,
+      stdout: JSON.stringify({ error: { code: "agent_prompt_stalled", message: "no state change observed" } }),
+      stderr: "",
+    });
+    const cli = new HerdrCli(runner as any);
+
+    const failure = await cli.agentPrompt("sa-x", "map the repo", { confirmWithinMs: 8_000 }).catch((e) => e);
+    expect(failure).toBeInstanceOf(Error);
+    expect(isHerdrPromptStalled(failure)).toBe(true);
+    expect(isHerdrPromptStalled(new Error("unrelated"))).toBe(false);
+  });
+
+  it("sends raw terminal keys to an agent", async () => {
+    const { runner, calls } = makeRunner(() => ({
+      exitCode: 0,
+      stdout: JSON.stringify({ result: { type: "ok" } }),
+      stderr: "",
+    }));
+    const cli = new HerdrCli(runner);
+
+    await cli.agentSendKeys("sa-x", ["enter"]);
+
+    expect(calls[0].args).toEqual(["agent", "send-keys", "sa-x", "enter"]);
+  });
+
+
 
   it("returns agent_status from pane get result", async () => {
     const runner = async (): Promise<HerdrCommandResult> => ({

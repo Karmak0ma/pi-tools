@@ -179,6 +179,102 @@ describe("runChild extension UI transport", () => {
     expect(result.toolCalls).toEqual([{ name: "bash", argsPreview: '{"command":"true"}' }]);
   });
 
+  it("uses only the final normal stop text after an aborted assistant turn", async () => {
+    const child = new FakeChild([
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "aborted",
+          content: [{ type: "text", text: "discarded partial answer" }],
+        },
+      },
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "stop",
+          content: [{ type: "text", text: "final answer after guidance" }],
+        },
+      },
+      { type: "agent_settled" },
+    ], { closeCode: 1, stderr: "late transport close" });
+    let sessionDir = "";
+
+    const result = await runChild({
+      resolvedTools: ["bash"],
+      resolvedCwd: "/tmp",
+      agentName: "worker",
+      agentPrompt: "",
+      taskText: "task",
+      spawnProcess: ((_command: string, args: string[], _options: { env?: NodeJS.ProcessEnv }) => {
+        const sessionDirFlag = args.indexOf("--session-dir");
+        sessionDir = args[sessionDirFlag + 1];
+        return child;
+      }) as any,
+    });
+
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    expect(result.lifecycle).toBe("completed");
+    expect(result.finalOutput).toBe("final answer after guidance");
+    expect(result.finalOutput).not.toContain("discarded partial");
+  });
+
+  it("reports an unrecovered aborted turn as closed with a useful reason", async () => {
+    const child = new FakeChild([
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason: "aborted",
+          content: [{ type: "text", text: "partial work" }],
+        },
+      },
+      { type: "agent_settled" },
+    ]);
+    let sessionDir = "";
+
+    const result = await runChild({
+      resolvedTools: ["bash"],
+      resolvedCwd: "/tmp",
+      agentName: "worker",
+      agentPrompt: "",
+      taskText: "task",
+      spawnProcess: ((_command: string, args: string[], _options: { env?: NodeJS.ProcessEnv }) => {
+        const sessionDirFlag = args.indexOf("--session-dir");
+        sessionDir = args[sessionDirFlag + 1];
+        return child;
+      }) as any,
+    });
+
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    expect(result.lifecycle).toBe("closed");
+    expect(result.errorMessage).toContain("interrupted");
+    expect(result.finalOutput).toBe("");
+  });
+
+  it("reports an unexpected child process exit as a terminal failure", async () => {
+    const child = new FakeChild([{ type: "agent_settled" }], { closeCode: 1, stderr: "child crashed" });
+    let sessionDir = "";
+
+    const result = await runChild({
+      resolvedTools: ["bash"],
+      resolvedCwd: "/tmp",
+      agentName: "worker",
+      agentPrompt: "",
+      taskText: "task",
+      spawnProcess: ((_command: string, args: string[], _options: { env?: NodeJS.ProcessEnv }) => {
+        const sessionDirFlag = args.indexOf("--session-dir");
+        sessionDir = args[sessionDirFlag + 1];
+        return child;
+      }) as any,
+    });
+
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    expect(result.lifecycle).toBe("failed");
+    expect(result.errorMessage).toContain("child crashed");
+  });
+
   it("keeps an unrecovered terminal assistant error", async () => {
     const child = new FakeChild([
       {

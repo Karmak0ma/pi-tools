@@ -11,8 +11,10 @@
  *   pane and observes it through its session JSONL.
  *
  * Both backends deliver the same ChildRunResult semantics: the promise
- * resolves exactly once, terminal, and never reports a crashed, closed, or
- * interrupted child as a successful completion.
+ * resolves exactly once, only at a terminal delegated-task state, and carries
+ * an explicit lifecycle. A Herdr turn interrupted by Escape does not resolve
+ * this promise; a crashed, closed, or unrecovered child never becomes a
+ * successful completion.
  */
 
 import type { ChildProcess } from "node:child_process";

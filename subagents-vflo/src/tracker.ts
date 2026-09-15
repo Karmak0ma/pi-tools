@@ -192,6 +192,7 @@ export function createInstance(opts: {
     model: opts.model,
     warnings: opts.warnings || [],
     status: "queued",
+    lifecycle: "starting",
     isPartial: false,
     toolCalls: [],
     latestOutput: "",

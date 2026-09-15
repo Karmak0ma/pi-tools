@@ -1,8 +1,16 @@
 /**
  * Live smoke test for the exact Herdr argv sequences the Herdr backend sends.
- * Run from inside a Herdr pane only. Creates one pane, boots a bare pi TUI
- * (no prompt, no model call), verifies Herdr sees it, then closes the pane
- * and verifies the child is gone. Cleans up after itself.
+ * Run from inside a Herdr pane only. Creates one pane, boots a bare pi TUI,
+ * confirms a real prompt submission (the same `--wait` confirm mode used for
+ * the child's first task prompt in submitInitialPrompt()), exercises the
+ * corrective `agent send-keys enter` nudge so its argv shape is proven
+ * against the real binary, then closes the pane and verifies the child is
+ * gone. Cleans up after itself.
+ *
+ * This issues one real model call, so it is not network/cost-free. The pane
+ * is closed right after send-keys, typically mid-turn (the child's own
+ * response is still in flight) — this script checks argv acceptance and
+ * cleanup, not turn completion.
  */
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -44,6 +52,21 @@ try {
 
   const state = await herdr(["pane", "get", paneId]);
   console.log("pane state ok, agent_status:", state.result.pane.agent_status);
+
+  // Mirrors HerdrCli.agentPrompt's confirm mode (submitInitialPrompt's
+  // submission): submit and wait for the pane to leave idle. On a healthy
+  // run this should NOT stall.
+  const prompted = await herdr([
+    "agent", "prompt", name, "reply with exactly: smoke ok",
+    "--wait", "--until", "working", "--until", "blocked", "--timeout", "8000",
+  ]);
+  console.log("prompt confirmed, agent_status:", prompted.result.agent.agent_status);
+
+  // Mirrors HerdrCli.agentSendKeys (submitInitialPrompt's corrective nudge
+  // on a stall). Not expected to change anything here since the prompt
+  // above already confirmed; this just proves the argv shape is accepted.
+  await herdr(["agent", "send-keys", name, "enter"]);
+  console.log("send-keys ok");
 } finally {
   if (paneId) {
     await herdr(["pane", "close", paneId]);

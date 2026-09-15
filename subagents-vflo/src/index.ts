@@ -24,6 +24,7 @@ import {
   MAX_TOTAL_TASKS,
   type PersistedSubagentToolDetails,
   type PersistedTaskSummary,
+  type SubagentLifecycleState,
   type TaskItem,
   type TaskStatus,
   THINKING_LEVELS,
@@ -112,6 +113,7 @@ export default function (pi: ExtensionAPI) {
     instance.control?.abort();
     instance.status = "aborted";
     instance.summary.status = "aborted";
+    instance.summary.lifecycle = "closed";
     instance.summary.isPartial = false;
     tuiManager.requestRender();
   };
@@ -363,7 +365,7 @@ export default function (pi: ExtensionAPI) {
           async ({ id, task, instance }, index) => {
           // Check if abort was signaled before starting this queued task
           if (signal?.aborted) {
-            tracker.updateStatus(id, "aborted", { errorMessage: "Aborted before start" });
+            tracker.updateStatus(id, "aborted", { lifecycle: "closed", errorMessage: "Aborted before start" });
             updater.immediate();
             return makeErrorSummaryFromInstance(instance, "Aborted before start");
           }
@@ -373,7 +375,7 @@ export default function (pi: ExtensionAPI) {
             // Pre-validated failure
             const err = validationErrors.find((e) => e.index === index);
             const errorMsg = err?.error || "Agent not found";
-            tracker.updateStatus(id, "error", { errorMessage: errorMsg });
+            tracker.updateStatus(id, "error", { lifecycle: "failed", errorMessage: errorMsg });
             updater.immediate();
             return makeErrorSummary(id, task, errorMsg);
           }
@@ -389,6 +391,7 @@ export default function (pi: ExtensionAPI) {
 
           if (!modelResult.model) {
             tracker.updateStatus(id, "error", {
+              lifecycle: "failed",
               errorMessage: "No model available",
             });
             updater.immediate();
@@ -412,7 +415,7 @@ export default function (pi: ExtensionAPI) {
           instance.summary.warnings = [...instance.warnings];
 
           if (toolResult.error) {
-            tracker.updateStatus(id, "error", { errorMessage: toolResult.error });
+            tracker.updateStatus(id, "error", { lifecycle: "failed", errorMessage: toolResult.error });
             updater.immediate();
             return makeErrorSummaryFromInstance(instance, toolResult.error);
           }
@@ -420,7 +423,7 @@ export default function (pi: ExtensionAPI) {
           // Resolve cwd
           const cwdResult = resolveCwd(task, ctx.cwd);
           if (cwdResult.error) {
-            tracker.updateStatus(id, "error", { errorMessage: cwdResult.error });
+            tracker.updateStatus(id, "error", { lifecycle: "failed", errorMessage: cwdResult.error });
             updater.immediate();
             return makeErrorSummaryFromInstance(instance, cwdResult.error);
           }
@@ -429,8 +432,11 @@ export default function (pi: ExtensionAPI) {
           instance.thinking = task.thinking ?? agent.thinking;
           instance.tools = [...toolResult.tools];
 
-          // Mark as running
-          tracker.updateStatus(id, "running");
+          // Mark the delegated task as live. This compatibility status stays
+          // `running` even when its current Pi turn later becomes
+          // `interrupted`; the separate lifecycle field carries that detail
+          // without disabling inspector steering.
+          tracker.updateStatus(id, "running", { lifecycle: "running" });
 
           // Emit streaming update (immediate — status transition)
           updater.immediate();
@@ -467,7 +473,12 @@ export default function (pi: ExtensionAPI) {
                 }
 
                 if (event.type === "agent_start") {
-                  tracker.updateStatus(id, "running", { isPartial: true, errorMessage: undefined });
+                  tracker.updateStatus(id, "running", {
+                    lifecycle: "running",
+                    isPartial: true,
+                    errorMessage: undefined,
+                    stopReason: undefined,
+                  });
                   updater.immediate();
                 }
 
@@ -485,6 +496,10 @@ export default function (pi: ExtensionAPI) {
                 if (event.type === "message_end" && event.message?.role === "assistant") {
                   const msg = event.message;
                   updateLiveUsage(instance, msg);
+                  instance.summary.lifecycle = lifecycleAfterAssistantMessage(
+                    instance.summary.lifecycle,
+                    msg.stopReason,
+                  );
                   let messageText = "";
                   if (Array.isArray(msg.content)) {
                     for (const part of msg.content) {
@@ -498,19 +513,32 @@ export default function (pi: ExtensionAPI) {
                       }
                     }
                   }
+                  // The live view may show an interrupted turn's partial
+                  // transcript. The terminal result overwrites this field
+                  // with the final normal stop text before persistence, so
+                  // incomplete text cannot become the parent result.
                   if (messageText) instance.summary.latestOutput = messageText;
                   instance.summary.isPartial = false;
                   updater.immediate();
                 }
                 if (event.type === "agent_settled") {
-                  tracker.updateStatus(id, "completed", { isPartial: false });
+                  // `agent_settled` is a Pi turn boundary, not the shared
+                  // delegated-task terminal signal. Herdr can emit the same
+                  // shape for a turn that was interrupted, and the RPC
+                  // backend still performs process-close classification after
+                  // this event. The awaited handle.result is authoritative.
+                  tracker.updateStatus(id, "running", { isPartial: false });
                   updater.immediate();
                 }
                 if (event.type === "subagent_turn_aborted") {
                   // Herdr: the child's turn was interrupted (Escape in its
                   // pane) but the session lives — an interrupted turn is
                   // never a completion; the final result decides the outcome.
-                  tracker.updateStatus(id, "running", { isPartial: false, stopReason: "aborted" });
+                  tracker.updateStatus(id, "running", {
+                    lifecycle: "interrupted",
+                    isPartial: false,
+                    stopReason: "aborted",
+                  });
                   updater.immediate();
                 }
               },
@@ -556,16 +584,22 @@ export default function (pi: ExtensionAPI) {
             instance.summary.usage = childResult.usage;
             instance.summary.latestOutput = childResult.finalOutput;
             instance.summary.toolCalls = childResult.toolCalls;
+            instance.summary.lifecycle = childResult.lifecycle;
             instance.summary.stopReason = childResult.stopReason;
             instance.summary.errorMessage = childResult.errorMessage;
             instance.summary.model = childResult.model || instance.model;
 
-            const isError = childResult.exitCode !== 0 || isTaskFailed(childResult);
+            // Lifecycle is the logical task contract. A raw process exit code
+            // is not enough: the child may close noisily after a valid final
+            // stop, while a closed task may have exit code zero.
+            const isError = childResult.lifecycle !== "completed" || isTaskFailed(childResult);
 
             if (isError) {
-              tracker.updateStatus(id, childResult.stopReason === "aborted" ? "aborted" : "error");
+              tracker.updateStatus(id, childResult.stopReason === "aborted" ? "aborted" : "error", {
+                lifecycle: childResult.lifecycle,
+              });
             } else {
-              tracker.updateStatus(id, "completed");
+              tracker.updateStatus(id, "completed", { lifecycle: "completed" });
             }
 
             // Emit update after completion (immediate — status transition)
@@ -574,6 +608,7 @@ export default function (pi: ExtensionAPI) {
             return makePersistedSummary(instance);
           } catch (err: any) {
             tracker.updateStatus(id, "error", {
+              lifecycle: "failed",
               errorMessage: err.message || "Unknown error",
             });
             updater.immediate();
@@ -899,6 +934,26 @@ function emitUpdate(
   }
 }
 
+/** Map one assistant message boundary to the live delegated-task lifecycle. */
+function lifecycleAfterAssistantMessage(
+  current: SubagentLifecycleState,
+  stopReason: string | undefined,
+): SubagentLifecycleState {
+  switch (stopReason) {
+    case "aborted":
+      return "interrupted";
+    case "error":
+    case "toolUse":
+      return "waiting";
+    case "stop":
+      return "completed";
+    case undefined:
+      return "running";
+    default:
+      return current;
+  }
+}
+
 /**
  * Copy usage from each completed assistant response into the live summary.
  *
@@ -953,6 +1008,7 @@ function makePersistedSummary(instance: {
 }): PersistedTaskSummary {
   const failed = isTaskFailed({
     status: instance.status,
+    lifecycle: instance.summary.lifecycle,
     stopReason: instance.summary.stopReason,
     errorMessage: instance.summary.errorMessage,
   });
@@ -963,6 +1019,7 @@ function makePersistedSummary(instance: {
     cwd: instance.cwd,
     model: instance.summary.model || instance.model,
     warnings: [...instance.warnings],
+    lifecycle: instance.summary.lifecycle,
     stopReason: instance.summary.stopReason,
     errorMessage: instance.summary.errorMessage,
     stderrPreview: instance.stderr ? instance.stderr.slice(0, 500) : undefined,
@@ -980,6 +1037,7 @@ function makeErrorSummary(_id: string, task: TaskItem, error: string): Persisted
     task: task.task,
     cwd: "",
     warnings: [],
+    lifecycle: "failed",
     errorMessage: error,
     toolCalls: [],
     finalOutput: "",
@@ -998,6 +1056,7 @@ function makeErrorSummaryFromInstance(
     task: instance.task,
     cwd: instance.cwd,
     warnings: [...instance.warnings],
+    lifecycle: "failed",
     errorMessage: error,
     toolCalls: [...instance.summary.toolCalls],
     finalOutput: instance.summary.latestOutput || "",

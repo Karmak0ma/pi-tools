@@ -18,6 +18,7 @@ import {
   type TaskItem,
   type ToolResolutionResult,
 } from "./types.js";
+import { canonicalEntryPath } from "./path-utils.js";
 
 // ─── Model Resolution ────────────────────────────────────────────────────────
 
@@ -198,16 +199,6 @@ function warnOnUnbackedExtensionTools(
         `Tool "${tool}" is provided by ${sourcePath}, which is not listed in ${getChildExtensionConfigPath()}; the child will not have it`,
       );
     }
-  }
-}
-
-/** Best-effort canonicalization for entry-point path comparison. */
-function canonicalEntryPath(entryPath: string): string {
-  try {
-    return fs.realpathSync.native(entryPath);
-  } catch {
-    // Non-existent or inaccessible path: keep the resolved spelling.
-    return path.resolve(entryPath);
   }
 }
 

@@ -120,11 +120,30 @@ export function contextTokensFromUsage(usage: {
 export type TaskStatus = "queued" | "running" | "completed" | "error" | "aborted";
 
 /**
+ * Logical lifecycle of one delegated task.
+ *
+ * `TaskStatus` is retained as the small compatibility/UI status used by the
+ * inspector and renderer. It cannot represent a live task whose current Pi
+ * turn was interrupted, so runtime and result boundaries use this separate
+ * state. In particular, `interrupted` is not terminal: the same child
+ * process, session, pane, and parent-side request remain alive.
+ */
+export type SubagentLifecycleState =
+  | "starting"
+  | "running"
+  | "waiting"
+  | "interrupted"
+  | "completed"
+  | "failed"
+  | "closed";
+
+/**
  * Fields that can describe a task failure at either runtime or persistence
  * boundaries. Keeping this decision in one place prevents a transient child
  * error from being treated as success by one consumer and failure by another.
  */
 export interface TaskFailureState {
+  lifecycle?: SubagentLifecycleState;
   stopReason?: string;
   errorMessage?: string;
   failed?: boolean;
@@ -132,12 +151,31 @@ export interface TaskFailureState {
 }
 
 export function isTaskFailed(task: TaskFailureState): boolean {
+  if (
+    task.lifecycle === "interrupted" ||
+    task.lifecycle === "starting" ||
+    task.lifecycle === "running" ||
+    task.lifecycle === "waiting"
+  ) {
+    return !!(
+      task.errorMessage ||
+      task.failed ||
+      task.status === "error" ||
+      task.status === "aborted" ||
+      task.stopReason === "error"
+    );
+  }
+
   return !!(
+    task.lifecycle === "failed" ||
+    task.lifecycle === "closed" ||
     task.errorMessage ||
     task.failed ||
     task.status === "error" ||
     task.status === "aborted" ||
     task.stopReason === "error" ||
+    // Compatibility for summaries produced before the lifecycle field was
+    // introduced. New terminal results always carry `closed` or `failed`.
     task.stopReason === "aborted"
   );
 }
@@ -153,6 +191,7 @@ export interface LiveTaskSummary {
   model?: string;
   warnings: string[];
   status: TaskStatus;
+  lifecycle: SubagentLifecycleState;
   isPartial: boolean;
   stopReason?: string;
   errorMessage?: string;
@@ -171,6 +210,7 @@ export interface PersistedTaskSummary {
   cwd: string;
   model?: string;
   warnings: string[];
+  lifecycle: SubagentLifecycleState;
   stopReason?: string;
   errorMessage?: string;
   stderrPreview?: string;

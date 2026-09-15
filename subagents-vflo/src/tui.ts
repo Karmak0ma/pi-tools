@@ -374,6 +374,7 @@ export class SubagentTuiManager {
       instance.summary.errorMessage = "Subagent process is no longer available";
       instance.status = "error";
       instance.summary.status = "error";
+      instance.summary.lifecycle = "failed";
       this.requestRender();
       return;
     }
@@ -387,6 +388,7 @@ export class SubagentTuiManager {
     } catch (error) {
       instance.status = "error";
       instance.summary.status = "error";
+      instance.summary.lifecycle = "failed";
       instance.summary.isPartial = false;
       instance.summary.errorMessage = error instanceof Error ? error.message : String(error);
       this.requestRender();
@@ -403,6 +405,7 @@ export class SubagentTuiManager {
     instance.control.abort();
     instance.status = "aborted";
     instance.summary.status = "aborted";
+    instance.summary.lifecycle = "closed";
     instance.summary.isPartial = false;
     this.requestRender();
   }
