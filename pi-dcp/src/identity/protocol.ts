@@ -47,7 +47,8 @@ function makeUnit(items: readonly ProjectedMessage[], start: number, end: number
   // A bashExecution message has no content array where DCP can attach a stable
   // model-facing alias. Keep it canonical for exact joining, but do not let a
   // caller select an invisible alias or remove shell provenance via a block.
-  const permanentlyBlocked = first?.role === "custom"
+  const permanentlyBlocked = first?.role === "system"
+    || first?.role === "custom"
     || first?.role === "compactionSummary"
     || first?.role === "branchSummary"
     || first?.role === "bashExecution";

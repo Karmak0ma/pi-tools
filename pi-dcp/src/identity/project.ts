@@ -19,6 +19,16 @@ export type ProjectionResult =
   }
   | { ok: false; reason: "projection_unsupported" };
 
+/** Pi persists these entries for replay, UI, or accounting, but never sends them to the model. */
+const NON_CONTEXT_ENTRY_TYPES: ReadonlySet<string> = new Set([
+  "custom",
+  "thinking_level_change",
+  "model_change",
+  "label",
+  "session_info",
+  "usage",
+]);
+
 /**
  * Pi keeps incomplete assistant turns in the session file, but pi-ai's
  * `transformMessages` removes every `error` or `aborted` assistant turn before
@@ -42,37 +52,29 @@ function isProviderDroppedAssistant(entry: SessionEntry): boolean {
   if (message.role !== "assistant") return false;
   return message.stopReason === "error"
     || message.stopReason === "aborted"
+    // Pi normalizes legacy null assistant content to an empty array before the
+    // provider drops the contentless turn. Treat both persisted forms alike.
+    || message.content == null
     || (Array.isArray(message.content) && message.content.length === 0);
 }
 
-/** Versioned Pi 0.84.1 projection adapter. Keep this local: private Pi internals are not imported. */
+/**
+ * Versioned Pi 0.84.1-0.86.1 projection adapter.
+ *
+ * Keep the adapter local and explicit. DCP must reproduce Pi's public
+ * `sessionEntryToContextMessages` behavior without depending on the host's
+ * installed implementation at runtime. Unknown entry and message shapes still
+ * fail closed because silently omitting a context-visible entry could authorize
+ * compression against the wrong transcript.
+ */
 export function projectContextEntries(entries: readonly SessionEntry[]): ProjectionResult {
   const messages: ProjectedMessage[] = [];
   const unprojectedEntryIds = new Set<string>();
   for (const entry of entries) {
     if (typeof entry.id !== "string" || !entry.id || typeof entry.timestamp !== "string" || !Number.isFinite(Date.parse(entry.timestamp))) return { ok: false, reason: "projection_unsupported" };
     if (isProviderDroppedAssistant(entry)) { unprojectedEntryIds.add(entry.id); continue; }
-    let projected: AgentMessage[];
-    switch (entry.type) {
-      case "message": projected = [(entry as SessionMessageEntry).message]; break;
-      case "custom_message": {
-        const custom = entry as CustomMessageEntry;
-        projected = [{ role: "custom", customType: custom.customType, content: custom.content, display: custom.display, details: custom.details, timestamp: Date.parse(custom.timestamp) }];
-        break;
-      }
-      case "compaction": {
-        const compaction = entry as CompactionEntry;
-        projected = [{ role: "compactionSummary", summary: compaction.summary, tokensBefore: compaction.tokensBefore, timestamp: Date.parse(compaction.timestamp) }];
-        break;
-      }
-      case "branch_summary": {
-        const branch = entry as BranchSummaryEntry;
-        if (!branch.summary) projected = []; else projected = [{ role: "branchSummary", summary: branch.summary, fromId: branch.fromId, timestamp: Date.parse(branch.timestamp) }];
-        break;
-      }
-      case "custom": case "thinking_level_change": case "model_change": case "label": case "session_info": projected = []; break;
-      default: return { ok: false, reason: "projection_unsupported" };
-    }
+    const projected = projectEntry(entry);
+    if (!projected) return { ok: false, reason: "projection_unsupported" };
     for (const message of projected) if (!isValidProjectedMessage(message)) return { ok: false, reason: "projection_unsupported" };
     projected.forEach((message, projection) => messages.push({
       key: { kind: "entry", entryId: entry.id, projection }, message,
@@ -82,8 +84,45 @@ export function projectContextEntries(entries: readonly SessionEntry[]): Project
   return { ok: true, messages, unprojectedEntryIds };
 }
 
+/** Return undefined only for entry types whose Pi projection contract is unknown. */
+function projectEntry(entry: SessionEntry): AgentMessage[] | undefined {
+  if (NON_CONTEXT_ENTRY_TYPES.has(entry.type)) return [];
+  switch (entry.type) {
+    case "message": return projectSessionMessage(entry as SessionMessageEntry);
+    case "custom_message": {
+      const custom = entry as CustomMessageEntry;
+      return [{ role: "custom", customType: custom.customType, content: custom.content ?? [], display: custom.display, details: custom.details, timestamp: Date.parse(custom.timestamp) }];
+    }
+    case "compaction": {
+      const compaction = entry as CompactionEntry;
+      const summary: AgentMessage = { role: "compactionSummary", summary: compaction.summary, tokensBefore: compaction.tokensBefore, timestamp: Date.parse(compaction.timestamp) };
+      // Pi 0.86 snapshots the effective transcript-backed system state at a
+      // compaction boundary. It restores that snapshot before the summary so
+      // prompt sections and tool declarations survive removal of old entries.
+      // Older compactions have no systemMessage and retain their 0.84 shape.
+      return compaction.systemMessage ? [compaction.systemMessage, summary] : [summary];
+    }
+    case "branch_summary": {
+      const branch = entry as BranchSummaryEntry;
+      return branch.summary ? [{ role: "branchSummary", summary: branch.summary, fromId: branch.fromId, timestamp: Date.parse(branch.timestamp) }] : [];
+    }
+    default: return undefined;
+  }
+}
+
+/** Mirror Pi's defensive normalization for legacy or hand-edited session files. */
+function projectSessionMessage(entry: SessionMessageEntry): AgentMessage[] {
+  const message = entry.message as AgentMessage & { content?: unknown };
+  if (message.role === "system" && message.content == null) return [{ ...message, content: "" } as AgentMessage];
+  if ((message.role === "user" || message.role === "assistant" || message.role === "toolResult") && message.content == null) {
+    return [{ ...message, content: [] } as AgentMessage];
+  }
+  return [message];
+}
+
 function isValidProjectedMessage(message: AgentMessage): boolean {
   if (!message || typeof message !== "object" || typeof message.role !== "string") return false;
+  if (message.role === "system") return isValidSystemMessage(message);
   if (message.role === "user") return typeof message.content === "string" || (Array.isArray(message.content) && message.content.every((part) => part && typeof part === "object" && ((part as { type?: string }).type === "text" ? typeof (part as { text?: unknown }).text === "string" : (part as { type?: string }).type === "image" && typeof (part as { data?: unknown }).data === "string" && typeof (part as { mimeType?: unknown }).mimeType === "string")));
   if (message.role === "assistant") return Array.isArray(message.content) && message.content.every((part) => part && typeof part === "object" && ((part as { type?: string }).type === "text" && typeof (part as { text?: unknown }).text === "string" || (part as { type?: string }).type === "thinking" && typeof (part as { thinking?: unknown }).thinking === "string" || (part as { type?: string }).type === "toolCall" && typeof (part as { id?: unknown }).id === "string" && typeof (part as { name?: unknown }).name === "string" && (part as { arguments?: unknown }).arguments !== undefined));
   if (message.role === "toolResult") return typeof message.toolCallId === "string" && typeof message.toolName === "string" && Array.isArray(message.content);
@@ -105,6 +144,19 @@ function isValidProjectedMessage(message: AgentMessage): boolean {
   if (message.role === "branchSummary") return typeof message.summary === "string" && typeof message.fromId === "string";
   return false;
 }
+
+function isValidSystemMessage(message: Extract<AgentMessage, { role: "system" }>): boolean {
+  const contentIsValid = typeof message.content === "string"
+    || (Array.isArray(message.content) && message.content.every((part) => part && typeof part === "object" && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string"));
+  const sectionsAreValid = message.sections === undefined
+    || (!!message.sections && typeof message.sections === "object" && !Array.isArray(message.sections) && Object.values(message.sections).every((section) => section === null || typeof section === "string"));
+  const toolsAddedAreValid = message.toolsAdded === undefined
+    || (Array.isArray(message.toolsAdded) && message.toolsAdded.every((tool) => tool && typeof tool === "object" && typeof tool.name === "string" && typeof tool.description === "string" && !!tool.parameters && typeof tool.parameters === "object"));
+  const toolsRemovedAreValid = message.toolsRemoved === undefined
+    || (Array.isArray(message.toolsRemoved) && message.toolsRemoved.every((tool) => tool && typeof tool === "object" && typeof tool.name === "string"));
+  return contentIsValid && sectionsAreValid && toolsAddedAreValid && toolsRemovedAreValid;
+}
+
 function toolIds(message: AgentMessage): string[] {
   if (message.role !== "assistant") return message.role === "toolResult" ? [message.toolCallId] : [];
   return message.content.filter((part): part is Extract<typeof part, { type: "toolCall" }> => part.type === "toolCall").map((part) => part.id);
