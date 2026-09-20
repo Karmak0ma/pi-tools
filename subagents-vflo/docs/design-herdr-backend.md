@@ -96,9 +96,18 @@ The authoritative observation surface for task completion remains the child's
 4. An errored child turn (`stopReason: "error"`) that sits idle past a 30s
    grace fails the task, mirroring the RPC runner; every new session message
    resets the grace so pi's automatic in-turn retries are tolerated.
-5. Startup failures are caught synchronously: `pane split` / `agent start`
-   reject → spawn rejects → task error. `agent start` failure may leave an
-   empty pane → parent closes it (`herdr pane close`), best effort.
+5. Startup failures are caught synchronously: `pane split` / `agent start` /
+   `agent wait --until idle` / initial `agent prompt` reject → spawn rejects →
+   task error. A startup command failure may leave an empty pane → parent
+   closes it (`herdr pane close`), best effort.
+6. After the initial prompt is accepted, the monitor waits for Herdr to report
+   `working` or `blocked`. If neither that state nor an assistant session
+   message appears within the startup-activity deadline (30s by default),
+   the task fails with a specific startup-timeout message; no corrective key
+   is sent. The failed startup closes the pane best effort so a child that
+   never began is not left running after the parent gives up. The timeout
+   applies after the CLI calls return; each Herdr command's own timeout remains
+   the authority while that command is in flight.
 
 This keeps Herdr's status as a *hint* (never a completion signal) and the
 JSONL plus the monitor's explicit lifecycle as the source of truth. A
@@ -156,7 +165,7 @@ classification.
 - Herdr detection lives in `src/herdr.ts` (`isHerdrEnvironment()`,
   `herdrContextFromEnv()`) and nowhere else.
 
-## Herdr CLI facts (verified against herdr 0.8.2; `--wait`/`agent send-keys` argv shapes verified against 0.9.0)
+## Herdr CLI facts (verified against herdr 0.9.0)
 
 - `herdr pane split --current --direction right --ratio 0.5 --cwd <dir>
   --no-focus --env K=V` → `{result:{pane:{pane_id,...}}}`. `--no-focus` prevents
@@ -166,58 +175,73 @@ classification.
   the pi TUI is detected (`interactive_ready`). Name rules:
   `[a-z][a-z0-9_-]{0,31}`, unique among live agents. On `agent_not_ready` the
   name stays reserved.
+- `herdr agent wait <name|pane> --until <status> --timeout <ms>` waits for
+  an observed agent state (`idle`, `working`, `blocked`, `done`, or
+  `unknown`). The backend uses `--until idle` once after `agent start`, before
+  submitting the first task prompt.
 - `herdr agent prompt <name|pane> <text>` types the text (bracketed paste) and
-  presses Enter; fails with `agent_blocked` if the child sits at a dialog.
-  With `--wait --until <state> --timeout <ms>` it additionally confirms the
-  pane left `idle`; see "Initial-prompt submission race" below.
-- `herdr agent send-keys <name> <key>...` sends raw logical keys (e.g.
-  `enter`, `esc`) into the agent's terminal, bypassing bracketed-paste typing.
+  presses Enter; it is used in fire-and-forget mode and fails with
+  `agent_blocked` if the child sits at a dialog. The backend does not use
+  `agent prompt --wait`: its fixed 5s submission observation can race Pi's
+  startup handshake.
 - `herdr pane get <id>` → `{result:{pane:...}}` or `{error:{code:"pane_not_found"}}`.
 - `herdr pane close <id>` kills the process inside the pane.
-- Server errors: JSON on stdout/stderr, exit 1; usage errors exit 2.
+- Server errors: JSON envelope `{error:{code,message}}`, exit 1; usage errors
+  exit 2 as plain text. **The stream is version-dependent**: 0.8.2 was
+  documented as stdout, while 0.9.0 writes the envelope to stderr and leaves
+  stdout empty (`herdr pane get bogus:pane` → empty stdout, envelope on
+  stderr). `parseCliResult()` searches both streams line by line, so no
+  caller depends on the stream. It must stay that way: parsing stdout only
+  made every error lose its `herdrCode`, which silently disabled pane-death
+  classification and turned a recoverable startup condition into a hard
+  subagent spawn failure, while the unit tests stayed green because their
+  fakes fed envelopes on stdout.
 
-## Initial-prompt submission race
+## Initial-prompt readiness and startup deadline
 
-Right after `agent start` reports the pane ready, pi's TUI is still finishing
-its own one-time terminal handshake (a kitty-keyboard-protocol capability
-query it sends at startup). A prompt typed into that short window can
-visibly land in the input box while the trailing Enter keystroke is
-swallowed by that handshake: the pane looks ready, the task text sits there,
-but no turn ever starts. This surfaced as a sporadic real-world symptom — a
-fresh subagent pane showing an unsent prompt until someone manually pressed
-Enter. This only threatens the child's very *first* prompt: by the time any
-later steering message is sent (`control.sendMessage`, mapped to `agent
-prompt` in the table above), the child has already finished that one-time
-handshake, so those calls stay the original fire-and-forget `agent prompt`
-with no confirmation.
+Right after `agent start` reports the pane ready, Pi's TUI may still be
+finishing its one-time terminal handshake (a kitty-keyboard-protocol
+capability query sent at startup). A prompt typed during that short window
+can visibly land in the input box while the terminating Enter is swallowed:
+the pane looks ready, the task text sits there, but no turn starts. This is a
+first-prompt startup race; later steering happens after the handshake.
 
-Herdr documents this exact failure mode: a confirmed `agent prompt --wait`
-reports `agent_prompt_stalled` when it does not observe the pane leave idle
-within its own 5-second window.
+The backend deliberately does **not** use Herdr's confirmed
+`agent prompt --wait` mode here. Herdr has a fixed 5-second observation
+window for that mode, and a stall response does not prove whether the text
+was submitted. Pressing a blind corrective Enter was also removed: it was
+never verified against a real stall and could send an unexpected key to the
+child.
 
-`submitInitialPrompt()` in `src/herdr-backend.ts` guards only that first
-prompt:
+The startup sequence in `src/herdr-backend.ts` is now:
 
-1. Submit with `agentPrompt(name, text, { confirmWithinMs: 8000 })` — 8s
-   gives slack over Herdr's fixed 5s stall check so a real stall surfaces as
-   `agent_prompt_stalled` rather than our own generic CLI timeout.
-2. On `agent_prompt_stalled` (`isHerdrPromptStalled()`), send a corrective
-   `agentSendKeys(name, ["enter"])`: the pane was idle when the stall fired,
-   so the terminating Enter is the most likely thing that was lost. There is
-   no re-check of pane state right before the keystroke and no confirmation
-   afterward — deliberately kept minimal; see "Known limitations" for what
-   that trades away.
+1. `agent start` waits for Herdr to detect an interactive Pi process.
+2. `agent wait <name> --until idle --timeout <remaining readiness budget>`
+   waits for Herdr's detector to report a settled idle pane before input is
+   sent. The `agentStartTimeoutMs` setting is one combined budget for `agent
+   start` plus this idle wait; the backend passes only the remaining time to
+   the second command. This is a readiness gate, not task completion.
+3. `agent prompt <name> <task>` submits the task in fire-and-forget mode.
+   The session JSONL remains the authority for the task's result.
+4. `HerdrChildMonitor` starts a one-shot startup-activity deadline (30 seconds
+   by default). The first observed `working` or `blocked` Herdr state, or any
+   assistant session message, cancels that deadline. If neither appears, the
+   child result fails with a specific message naming the Herdr agent and pane:
+   `Subagent startup timed out for Herdr agent <name> in pane <pane>: did not
+   observe working or blocked state after the initial prompt within ...ms`.
+   The monitor stops and failed-startup cleanup closes the pane best effort.
 
-Only the child's very first prompt goes through this ladder. Later steering
-messages (`control.sendMessage`, mapped to `agent prompt` with no confirm
-mode) stay exactly as fire-and-forget as before: the race is specific to
-pi's one-time startup handshake, which has already finished by the time any
-steering message can be sent.
+The deadline is a notification/backstop, not a recovery attempt. It prevents
+a prompt that never starts from leaving the parent request pending forever,
+while keeping Herdr status separate from task completion: only a normal
+`stop` message in the session JSONL completes the delegated task. If this
+idle gate still produces real startup failures, a state-checked Enter
+backstop can be considered later with live evidence.
 
 ### Rejected alternative: task text via argv
 
-An earlier version of this fix moved the task into pi's own CLI argv instead
-of recovering from the typed-prompt race: pi's `[messages...]` positional
+An earlier version of this work moved the task into pi's own CLI argv instead
+of waiting for idle before using a normal prompt: pi's `[messages...]` positional
 (`pi [options] [--] [messages...]`, documented in pi's `usage.md`) is
 submitted automatically once the TUI is ready, entirely inside pi's own
 process, so no typed keystrokes would ever cross the pty for the first
@@ -238,10 +262,10 @@ including newlines, but it changes what the model sees: pi wraps file
 content as `<file name="...">...</file>` in the first message instead of
 delivering it as a plain instruction, a real framing change from how the RPC
 backend (`src/runner.ts`, `sendCommand(taskText, "prompt")`) delivers the
-same task today. Recovering from the typed-prompt race, as implemented
-above, was chosen instead because it preserves that plain-message framing
-and every task shape (including multi-line and arbitrary-content tasks)
-with no new argv-encoding constraints.
+same task today. The idle-gate plus startup-deadline approach was chosen
+instead because it preserves that plain-message framing and every task shape
+(including multi-line and arbitrary-content tasks) with no new argv-encoding
+constraints.
 
 ## Non-goals
 
@@ -267,28 +291,20 @@ with no new argv-encoding constraints.
   (split → start → prompt) can only mark the instance aborted; the spawn may
   still finish and later complete. The RPC backend has the same race with a
   much smaller window.
-- **The Enter-nudge recovery is unverified against a real stall, and sent
-  blind.** A genuine `agent_prompt_stalled` was never observed in dozens of
-  live spawn attempts during development of this fix, so the nudge path
-  itself is exercised only against a fake `HerdrClient` in
-  `herdr-backend.test.ts`, not a captured live trace. The original root
-  cause (pi's kitty-keyboard-protocol startup handshake racing a typed
-  Enter) is likewise inference from reading pi's and Herdr's code/docs.
-  There is also no re-check of pane state between the stall verdict and the
-  keystroke: on a fast turn that both started and finished inside Herdr's
-  5-second sampling window, a false stall could still be reported, and the
-  nudge would then land as a stray Enter on whatever the pane shows a
-  moment later (normally harmless against an idle/empty composer, but not
-  verified against every possible state, e.g. an unrelated dialog).
-- **Requires a Herdr version with `agent prompt --wait` and `agent
-  send-keys`.** Verified against 0.9.0. `agent prompt --wait` was verified
-  absent on 0.8.2 (this backend's earlier baseline, before `--wait` existed
-  on `agent prompt`); confirm mode there would fail because the plain-text
-  usage error Herdr emits for an unrecognized flag is not the `{error:...}`
-  JSON envelope this backend expects, surfacing to the operator as an
-  opaque parse/CLI failure on every single spawn rather than a clear
-  version message. There is no runtime feature detection or version check
-  for this.
+- **The idle gate is a readiness hint, not a proof that every terminal
+  handshake has finished.** Herdr may report idle from its lifecycle detector
+  while Pi is completing another startup detail, and installations without
+  the managed lifecycle hook use weaker screen detection. The startup
+  activity deadline is the explicit backstop: if Herdr never reports working
+  or blocked after the prompt, the parent receives a specific failure instead
+  of waiting forever. A state-checked Enter recovery is intentionally deferred
+  until a real failure trace shows that the gate and deadline are insufficient;
+  the timed-out pane is closed as part of failed-startup cleanup.
+- **Requires a Herdr version with `agent wait`.** Verified against 0.9.0.
+  The backend uses `agent wait --until idle --timeout ...` before the first
+  prompt. There is no runtime feature detection or version check for this;
+  an older Herdr that lacks the command fails startup, and the backend closes
+  the leftover pane.
 - **Managed hook load is part of startup.** The resolver skips an absent hook,
   but Pi treats an explicit `-e` path that disappears or fails to load as a
   startup error. The backend surfaces that error and closes the pane instead

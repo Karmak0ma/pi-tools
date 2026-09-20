@@ -34,7 +34,7 @@ import {
   writePromptToTempFile,
   type ChildRunResult,
 } from "./runner.js";
-import { HERDR_PANE_ID_VAR, isHerdrPromptStalled, resolveHerdrAgentStateExtension, type HerdrClient } from "./herdr.js";
+import { HERDR_PANE_ID_VAR, resolveHerdrAgentStateExtension, type HerdrClient } from "./herdr.js";
 import { canonicalEntryPath } from "./path-utils.js";
 import { SessionWatcher } from "./session-watcher.js";
 import type { SubagentBackend, SubagentHandle, SubagentSpec } from "./backends.js";
@@ -53,12 +53,11 @@ const MIN_RIGHT_SPLIT_WIDTH = 160;
 const MAX_PANE_POLL_FAILURES = 3;
 
 /**
- * How long to wait for Herdr to confirm a prompt submission left `idle`.
- * Herdr's own internal submission-stall check is a fixed 5 seconds (see
- * docs); this must be strictly larger so a genuine stall surfaces as
- * `agent_prompt_stalled` rather than our own generic CLI timeout racing it.
+ * Maximum time after the first prompt for Herdr to observe the child begin a
+ * turn. This is a notification/deadline, not a recovery attempt: if the
+ * child stays idle this long, the result reports a specific startup failure.
  */
-const PROMPT_CONFIRM_TIMEOUT_MS = 8_000;
+const DEFAULT_STARTUP_ACTIVITY_TIMEOUT_MS = 30_000;
 
 export interface HerdrBackendOptions {
   cli: HerdrClient;
@@ -66,14 +65,17 @@ export interface HerdrBackendOptions {
   pollIntervalMs?: number;
   /** Idle time after an errored child turn before the task fails. */
   errorSettleGraceMs?: number;
-  /** Wait for the pi TUI to become interactive-ready inside the new pane. */
+  /** Combined budget for agent start and the following idle readiness wait. */
   agentStartTimeoutMs?: number;
+  /** Maximum time after the initial prompt to observe working or blocked state. */
+  startupActivityTimeoutMs?: number;
 }
 
 interface ResolvedTimings {
   pollIntervalMs: number;
   errorSettleGraceMs: number;
   agentStartTimeoutMs: number;
+  startupActivityTimeoutMs: number;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
@@ -103,17 +105,14 @@ function deriveSessionName(agentName: string): string {
  * RPC runner (extensions, model, thinking, tools, agent prompt) minus RPC
  * mode, plus a session display name for the pane title.
  *
- * The task itself deliberately does NOT ride in here as a trailing
- * positional. Pi's `[messages...]` positional would avoid the startup race
- * described on `submitInitialPrompt()` below, but Herdr rejects any argv
- * value containing a newline (`invalid_agent_argument`) before the child
- * ever starts — verified live — which would turn a routine multi-line task
- * into a hard spawn failure. `--append-system-prompt <path>` (below) proves
- * a file-based alternative exists, but reading the task from a file instead
- * of a message changes what the model sees (`<file name="...">...</file>`
- * framing, not a plain instruction). Keeping the task as an actual prompt
- * via `submitInitialPrompt()` preserves that framing and every task shape,
- * at the cost of guarding its one real race explicitly.
+ * The task itself deliberately does NOT ride in here as a trailing positional.
+ * Pi's `[messages...]` positional would avoid a typed-input startup race, but
+ * Herdr rejects any argv value containing a newline (`invalid_agent_argument`)
+ * before the child ever starts. `--append-system-prompt <path>` proves a
+ * file-based alternative exists, but changes the task framing to
+ * `<file name="...">...</file>`. Keeping the task as a normal prompt
+ * preserves the same plain-message framing as the RPC backend; readiness is
+ * handled explicitly by the idle gate and the monitor deadline instead.
  */
 function buildChildArgs(spec: SubagentSpec, sessionDir: string, promptFilePath: string | null): string[] {
   const args: string[] = ["--session-dir", sessionDir, "--no-extensions"];
@@ -174,34 +173,51 @@ async function splitPaneForSubagent(cli: HerdrClient, spec: SubagentSpec): Promi
 }
 
 /**
- * Deliver the child's first task prompt, guarded against a startup race in
- * pi's TUI.
- *
- * Right after `agent start` reports the pane ready, pi is still finishing
- * its own terminal handshake (a one-time kitty-keyboard-protocol query it
- * sends at startup). A prompt typed into that window can visibly land in
- * the input box while the trailing Enter keystroke is swallowed by that
- * handshake — the pane looks ready, the text sits there, but no turn
- * starts. This only threatens the very first prompt: by the time any later
- * steering message is sent (HerdrChildMonitor.control.sendMessage below),
- * the child has already finished that one-time handshake, so those calls
- * stay fire-and-forget.
- *
- * Herdr documents this exact failure mode: a confirmed `agent prompt`
- * reports `agent_prompt_stalled` when it does not observe the pane leave
- * idle within its own 5-second window. Recovery is a single corrective
- * keystroke: send Enter, since the pane was idle when the stall fired.
+ * Deliver the child's first task prompt after `agent wait --until idle` has
+ * confirmed that the newly started Pi session has settled. The command is
+ * intentionally fire-and-forget: Herdr's prompt-confirmation mode has its own
+ * fixed five-second observation race, while the child monitor supplies the
+ * explicit startup deadline below and the session JSONL remains authoritative.
  */
 async function submitInitialPrompt(cli: HerdrClient, agentName: string, taskText: string): Promise<void> {
-  try {
-    await cli.agentPrompt(agentName, taskText, { confirmWithinMs: PROMPT_CONFIRM_TIMEOUT_MS });
-  } catch (error) {
-    if (!isHerdrPromptStalled(error)) throw error;
-    await cli.agentSendKeys(agentName, ["enter"]);
-  }
+  await cli.agentPrompt(agentName, taskText);
 }
 
 // ─── Child monitor ──────────────────────────────────────────────────────────────
+
+/**
+ * One-shot startup watchdog kept separate from the long-lived child monitor.
+ * It has one job: turn "no activity after the first prompt" into a callback,
+ * while the monitor remains responsible for task lifecycle and result data.
+ */
+class StartupActivityDeadline {
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private observed = false;
+
+  constructor(
+    private readonly timeoutMs: number,
+    private readonly onTimeout: () => void,
+  ) {}
+
+  start(): void {
+    if (this.observed || this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      if (!this.observed) this.onTimeout();
+    }, this.timeoutMs);
+    this.timer.unref?.();
+  }
+
+  observe(): void {
+    if (this.observed) return;
+    this.observed = true;
+    this.cancel();
+  }
+
+  cancel(): void {
+    this.timer = clearPendingTimer(this.timer);
+  }
+}
 
 /** Everything the monitor needs to observe and steer one child. */
 interface MonitoredChild {
@@ -257,6 +273,7 @@ class HerdrChildMonitor {
   private resolveResult!: (value: ChildRunResult) => void;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
   private errorGraceTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly startupActivityDeadline: StartupActivityDeadline;
   private lastAgentStatus: string | undefined = undefined;
   private tickInFlight = false;
   private pollFailures = 0;
@@ -270,6 +287,12 @@ class HerdrChildMonitor {
     this.agentName = child.agentName;
     this.promptFilePath = child.promptFilePath;
     this.watcher = new SessionWatcher({ sessionDir: child.sessionDir, onAssistantMessage: (m) => this.observeAssistantMessage(m) });
+    this.startupActivityDeadline = new StartupActivityDeadline(
+      this.timings.startupActivityTimeoutMs,
+      () => {
+        if (!this.settled) this.settleStartupTimeout();
+      },
+    );
     this.result = new Promise((resolve) => {
       this.resolveResult = resolve;
     });
@@ -308,6 +331,7 @@ class HerdrChildMonitor {
       return;
     }
     this.transitionLifecycle("running");
+    this.startupActivityDeadline.start();
     this.spec.signal?.addEventListener("abort", this.onAbort, { once: true });
     this.pollTimer = setInterval(() => {
       void this.tick();
@@ -337,6 +361,7 @@ class HerdrChildMonitor {
     this.settled = true;
     this.stopPolling();
     this.cancelErrorGrace();
+    this.startupActivityDeadline.cancel();
     try {
       this.spec.signal?.removeEventListener("abort", this.onAbort);
     } catch { /* listener bookkeeping is best effort */ }
@@ -354,15 +379,29 @@ class HerdrChildMonitor {
 
   private startErrorGrace(): void {
     this.cancelErrorGrace();
-    this.errorGraceTimer = setTimeout(() => {
+    this.errorGraceTimer = this.startOneShotTimer(this.timings.errorSettleGraceMs, () => {
       this.errorGraceTimer = undefined;
       this.settle(this.buildErrorGraceResult());
-    }, this.timings.errorSettleGraceMs);
-    this.errorGraceTimer.unref?.();
+    });
+  }
+
+  private startOneShotTimer(delayMs: number, callback: () => void): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(callback, delayMs);
+    timer.unref?.();
+    return timer;
   }
 
   private cancelErrorGrace(): void {
     this.errorGraceTimer = clearPendingTimer(this.errorGraceTimer);
+  }
+
+  /**
+   * Herdr status is used only to detect startup activity. It is not a task
+   * completion signal; the session JSONL still decides the final result.
+   */
+  private markStartupActivity(): void {
+    if (this.settled) return;
+    this.startupActivityDeadline.observe();
   }
 
   // ─── Terminal results ─────────────────────────────────────────────────────
@@ -424,6 +463,28 @@ class HerdrChildMonitor {
     });
   }
 
+  private buildStartupTimeoutResult(): ChildRunResult {
+    return this.buildResult("failed", 1, {
+      stopReason: "error",
+      errorMessage:
+        `Subagent startup timed out for Herdr agent "${this.agentName}" in pane "${this.paneId}": `
+        + `did not observe working or blocked state after the initial prompt `
+        + `within ${this.timings.startupActivityTimeoutMs}ms`,
+    });
+  }
+
+  private settleStartupTimeout(): void {
+    if (this.settled) return;
+    this.settle(this.buildStartupTimeoutResult());
+    // A failed startup has no user-owned completed session to leave open.
+    // Closing is best effort because the Herdr server may have disappeared;
+    // the specific timeout result has already been resolved for the parent.
+    void this.cli.paneClose(this.paneId).catch((error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.spec.onStderr?.(`Herdr startup-timeout pane cleanup failed: ${detail}\n`);
+    });
+  }
+
   // ─── Session observation ──────────────────────────────────────────────────
 
   /**
@@ -452,6 +513,7 @@ class HerdrChildMonitor {
   }
 
   private observeAssistantMessage(message: any): void {
+    this.markStartupActivity();
     // A direct prompt typed into the pane may first be visible as a complete
     // assistant message with `toolUse`, `stop`, or `error`. Any non-aborted
     // message after an interrupted turn is evidence that the same delegated
@@ -586,6 +648,9 @@ class HerdrChildMonitor {
         // so the window-panel symbol is connected to subagent state.
         this.spec.onEvent?.({ type: "agent_status", agentStatus: paneResult.agentStatus });
       }
+      if (paneResult.agentStatus === "working" || paneResult.agentStatus === "blocked") {
+        this.markStartupActivity();
+      }
       if (paneResult.state === "gone") this.settle(this.buildDeathResult());
     } finally {
       this.tickInFlight = false;
@@ -600,6 +665,7 @@ export function createHerdrBackend(options: HerdrBackendOptions): SubagentBacken
     pollIntervalMs: options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     errorSettleGraceMs: options.errorSettleGraceMs ?? DEFAULT_ERROR_SETTLE_GRACE_MS,
     agentStartTimeoutMs: options.agentStartTimeoutMs ?? DEFAULT_AGENT_START_TIMEOUT_MS,
+    startupActivityTimeoutMs: options.startupActivityTimeoutMs ?? DEFAULT_STARTUP_ACTIVITY_TIMEOUT_MS,
   };
   return {
     spawn: (spec) => spawnSubagentInHerdr(spec, options.cli, timings),
@@ -607,12 +673,42 @@ export function createHerdrBackend(options: HerdrBackendOptions): SubagentBacken
 }
 
 /**
+ * Start one child and wait for its interactive TUI to settle at idle.
+ *
+ * The configured timeout is one combined readiness budget. Herdr's command
+ * runner adds transport slack to each call, but the idle wait receives only
+ * the time left after `agent start` returns.
+ */
+async function startHerdrAgent(
+  cli: HerdrClient,
+  spec: SubagentSpec,
+  paneId: string,
+  agentArgs: string[],
+  timings: ResolvedTimings,
+): Promise<string> {
+  const agentName = deriveHerdrAgentName(spec.agentName);
+  const readinessDeadline = Date.now() + timings.agentStartTimeoutMs;
+  await cli.agentStart(agentName, paneId, agentArgs, timings.agentStartTimeoutMs);
+  if (spec.signal?.aborted) throw new Error("Subagent aborted during startup");
+
+  // `agent start` detects an interactive Pi process, but the TUI may still be
+  // settling. Wait for Herdr's detector to report idle before typing the task.
+  const remainingReadinessMs = readinessDeadline - Date.now();
+  if (remainingReadinessMs <= 0) {
+    throw new Error("Subagent readiness timed out before the idle gate: agent start exhausted the combined readiness budget");
+  }
+  await cli.agentWait(agentName, "idle", remainingReadinessMs);
+  if (spec.signal?.aborted) throw new Error("Subagent aborted during startup");
+  return agentName;
+}
+
+/**
  * Spawn one subagent as an interactive pi session in a new Herdr pane.
  *
- * Startup is a strict sequence — split pane, start agent, inject task — where
- * any failure closes the leftover pane and rejects; nothing partial is ever
- * reported as a completion. Only after the prompt is accepted does the child
- * monitor take over observation.
+ * Startup is a strict sequence — split pane, start agent, wait for idle,
+ * inject task — where any command failure closes the leftover pane and
+ * rejects. Once the prompt is accepted, the child monitor owns the explicit
+ * startup-activity deadline and all later task observation.
  */
 async function spawnSubagentInHerdr(
   spec: SubagentSpec,
@@ -649,11 +745,10 @@ async function spawnSubagentInHerdr(
     paneId = pane.paneId;
     if (spec.signal?.aborted) throw new Error("Subagent aborted during startup");
 
-    const agentName = deriveHerdrAgentName(spec.agentName);
-    await cli.agentStart(agentName, paneId, agentArgs, timings.agentStartTimeoutMs);
-    if (spec.signal?.aborted) throw new Error("Subagent aborted during startup");
+    const agentName = await startHerdrAgent(cli, spec, paneId, agentArgs, timings);
 
-    // Deliver the task as the child's first prompt now that its TUI is ready.
+    // Deliver the task as the child's first prompt. The monitor below reports
+    // a specific startup timeout if Herdr never observes the child begin it.
     await submitInitialPrompt(cli, agentName, spec.taskText);
 
     const monitor = new HerdrChildMonitor({

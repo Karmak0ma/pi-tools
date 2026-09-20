@@ -49,11 +49,11 @@ class CountingFake implements HerdrClient {
   agentStart = async (_name: string, _paneId: string, args: string[]) => {
     this.startedArgs = args;
   };
+  agentWait = async () => {};
   agentPrompt = async () => {};
-  agentSendKeys = async () => {};
   paneGet = async () => {
     this.paneGetCalls++;
-    return { state: "exists" as const };
+    return { state: "exists" as const, agentStatus: "working" };
   };
   paneClose = async () => {};
   paneLayout = async () => [];

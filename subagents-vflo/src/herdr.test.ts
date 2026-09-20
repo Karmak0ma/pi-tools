@@ -10,7 +10,6 @@ import {
   resolveHerdrAgentStateExtension,
   type HerdrCommandResult,
   isHerdrEnvironment,
-  isHerdrPromptStalled,
   selectBackendKind,
 } from "./herdr.js";
 
@@ -48,6 +47,28 @@ function makeRunner(
     return res;
   };
   return { runner, calls };
+}
+
+/**
+ * Which stream carries the `{error:...}` envelope is a herdr version detail:
+ * it was documented on stdout for 0.8.2, while 0.9.0 writes it to stderr and
+ * leaves stdout empty. Pinning tests to one stream is what let error
+ * classification die silently in production, so every classification test
+ * runs over both streams.
+ */
+const ERROR_STREAMS = ["stdout", "stderr"] as const;
+
+function errorResult(
+  payload: unknown,
+  stream: (typeof ERROR_STREAMS)[number],
+  exitCode = 1,
+): HerdrCommandResult {
+  const body = JSON.stringify(payload);
+  return {
+    exitCode,
+    stdout: stream === "stdout" ? body : "",
+    stderr: stream === "stderr" ? body : "",
+  };
 }
 
 const tempDirs: string[] = [];
@@ -200,62 +221,28 @@ describe("HerdrCli", () => {
     expect(calls[0].args).toEqual(["agent", "prompt", "sa-x", "do the thing\nwith two lines"]);
   });
 
-  it("rejects a prompt when the agent is blocked", async () => {
-    const runner = async (): Promise<HerdrCommandResult> => ({
-      exitCode: 1,
-      stdout: JSON.stringify({ error: { code: "agent_blocked", message: "at a dialog" } }),
+  it("waits for a pi agent to become idle before the first prompt", async () => {
+    const { runner, calls } = makeRunner(() => ({
+      exitCode: 0,
+      stdout: JSON.stringify({ result: { agent: { agent_status: "idle" } } }),
       stderr: "",
-    });
+    }));
+    const cli = new HerdrCli(runner);
+
+    await cli.agentWait("sa-x", "idle", 60_000);
+
+    expect(calls[0].args).toEqual([
+      "agent", "wait", "sa-x", "--until", "idle", "--timeout", "60000",
+    ]);
+    expect(calls[0].timeoutMs).toBe(70_000);
+  });
+
+  it.each(ERROR_STREAMS)("rejects a prompt when the agent is blocked (%s)", async (stream) => {
+    const runner = async (): Promise<HerdrCommandResult> =>
+      errorResult({ error: { code: "agent_blocked", message: "at a dialog" } }, stream);
     const cli = new HerdrCli(runner as any);
     await expect(cli.agentPrompt("sa-x", "hello")).rejects.toThrow("agent_blocked");
   });
-
-  it("adds --wait/--until/--timeout only when a confirmation window is requested", async () => {
-    const { runner, calls } = makeRunner(() => ({
-      exitCode: 0,
-      stdout: JSON.stringify({ result: { type: "ok" } }),
-      stderr: "",
-    }));
-    const cli = new HerdrCli(runner);
-
-    await cli.agentPrompt("sa-x", "map the repo", { confirmWithinMs: 8_000 });
-
-    expect(calls[0].args).toEqual([
-      "agent", "prompt", "sa-x", "map the repo",
-      "--wait", "--until", "working", "--until", "blocked", "--timeout", "8000",
-    ]);
-    // Runner timeout leaves slack over the CLI's own confirmation window.
-    expect(calls[0].timeoutMs).toBe(18_000);
-  });
-
-  it("surfaces a stalled confirmed submission as agent_prompt_stalled", async () => {
-    const runner = async (): Promise<HerdrCommandResult> => ({
-      exitCode: 1,
-      stdout: JSON.stringify({ error: { code: "agent_prompt_stalled", message: "no state change observed" } }),
-      stderr: "",
-    });
-    const cli = new HerdrCli(runner as any);
-
-    const failure = await cli.agentPrompt("sa-x", "map the repo", { confirmWithinMs: 8_000 }).catch((e) => e);
-    expect(failure).toBeInstanceOf(Error);
-    expect(isHerdrPromptStalled(failure)).toBe(true);
-    expect(isHerdrPromptStalled(new Error("unrelated"))).toBe(false);
-  });
-
-  it("sends raw terminal keys to an agent", async () => {
-    const { runner, calls } = makeRunner(() => ({
-      exitCode: 0,
-      stdout: JSON.stringify({ result: { type: "ok" } }),
-      stderr: "",
-    }));
-    const cli = new HerdrCli(runner);
-
-    await cli.agentSendKeys("sa-x", ["enter"]);
-
-    expect(calls[0].args).toEqual(["agent", "send-keys", "sa-x", "enter"]);
-  });
-
-
 
   it("returns agent_status from pane get result", async () => {
     const runner = async (): Promise<HerdrCommandResult> => ({
@@ -267,39 +254,32 @@ describe("HerdrCli", () => {
     await expect(cli.paneGet("wJ:pX")).resolves.toEqual({ state: "exists", agentStatus: "working" });
   });
 
-  it("classifies pane_not_found as gone", async () => {
-    const runner = async (): Promise<HerdrCommandResult> => ({
-      exitCode: 1,
-      stdout: JSON.stringify({ error: { code: "pane_not_found" } }),
-      stderr: "",
-    });
+  it.each(ERROR_STREAMS)("classifies pane_not_found as gone (%s)", async (stream) => {
+    const runner = async (): Promise<HerdrCommandResult> =>
+      errorResult({ error: { code: "pane_not_found", message: "pane wJ:pX not found" }, id: "cli:pane:get" }, stream);
     const cli = new HerdrCli(runner as any);
     await expect(cli.paneGet("wJ:pX")).resolves.toEqual({ state: "gone" });
   });
 
-  it("throws on unexpected pane get errors", async () => {
-    const runner = async (): Promise<HerdrCommandResult> => ({
-      exitCode: 1,
-      stdout: JSON.stringify({ error: { code: "server_unavailable" } }),
-      stderr: "",
-    });
+  it.each(ERROR_STREAMS)("throws on unexpected pane get errors (%s)", async (stream) => {
+    const runner = async (): Promise<HerdrCommandResult> =>
+      errorResult({ error: { code: "server_unavailable" } }, stream);
     const cli = new HerdrCli(runner as any);
     await expect(cli.paneGet("wJ:pX")).rejects.toThrow("server_unavailable");
   });
 
-  it("tolerates closing an already-closed pane but surfaces other failures", async () => {
-    let code = "pane_not_found";
-    const runner = async (): Promise<HerdrCommandResult> => ({
-      exitCode: 1,
-      stdout: JSON.stringify({ error: { code } }),
-      stderr: "",
-    });
-    const cli = new HerdrCli(runner as any);
-    await expect(cli.paneClose("wJ:pX")).resolves.toBeUndefined();
+  it.each(ERROR_STREAMS)(
+    "tolerates closing an already-closed pane but surfaces other failures (%s)",
+    async (stream) => {
+      let code = "pane_not_found";
+      const runner = async (): Promise<HerdrCommandResult> => errorResult({ error: { code } }, stream);
+      const cli = new HerdrCli(runner as any);
+      await expect(cli.paneClose("wJ:pX")).resolves.toBeUndefined();
 
-    code = "server_unavailable";
-    await expect(cli.paneClose("wJ:pX")).rejects.toThrow("server_unavailable");
-  });
+      code = "server_unavailable";
+      await expect(cli.paneClose("wJ:pX")).rejects.toThrow("server_unavailable");
+    },
+  );
 
   it("reads pane rectangles from the layout", async () => {
     const runner = async (): Promise<HerdrCommandResult> => ({
@@ -334,5 +314,42 @@ describe("HerdrCli", () => {
     });
     const cli = new HerdrCli(runner as any);
     await expect(cli.paneGet("wJ:pX")).rejects.toThrow(/unexpected argument/);
+  });
+
+  it("does not classify exit-2 usage prose as a server error code", async () => {
+    const runner = async (): Promise<HerdrCommandResult> => ({
+      exitCode: 2,
+      stdout: "",
+      stderr: "usage: herdr pane get <id>\nsee pane_not_found in server responses",
+    });
+    const cli = new HerdrCli(runner as any);
+    const failure = await cli.paneGet("wJ:pX").catch((error) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as any).herdrCode).toBeUndefined();
+    expect(failure.message).toMatch(/usage: herdr pane get/);
+  });
+
+  it("classifies an envelope that shares a stream with unrelated log output", async () => {
+    // A whole-stream JSON.parse would throw on the warning line and lose the
+    // code, which is the exact way classification broke before.
+    const runner = async (): Promise<HerdrCommandResult> => ({
+      exitCode: 1,
+      stdout: "",
+      stderr: `warning: reconnecting to server\n${JSON.stringify({ error: { code: "pane_not_found" } })}\n`,
+    });
+    const cli = new HerdrCli(runner as any);
+    await expect(cli.paneGet("wJ:pX")).resolves.toEqual({ state: "gone" });
+  });
+
+  it("never guesses a pane/agent death from unparsable prose", async () => {
+    // Guessed not-found codes are swallowed (paneGet reports gone), which
+    // would declare a live subagent dead. Only a parsed envelope may do that.
+    const runner = async (): Promise<HerdrCommandResult> => ({
+      exitCode: 1,
+      stdout: "",
+      stderr: "fatal: pane_not_found while talking to the server",
+    });
+    const cli = new HerdrCli(runner as any);
+    await expect(cli.paneGet("wJ:pX")).rejects.toThrow(/pane_not_found/);
   });
 });

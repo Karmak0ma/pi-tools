@@ -136,22 +136,29 @@ interactive Pi sessions instead of headless RPC children:
   with `herdr pane split --current --no-focus` so it never steals keyboard
   focus. The first task of a batch splits right; later tasks split down (and a
   narrow parent always splits down).
-- The child is launched with `herdr agent start <name> --kind pi` and receives
-  the task as its first prompt. Model, tools, thinking level, cwd, agent
-  system prompt, and configured child extensions are preserved from RPC mode;
-  the nesting-depth marker is injected into the pane env. Herdr also loads its
-  managed `herdr-agent-state.ts` lifecycle extension when it is installed, even
-  though unrelated extensions remain disabled by `--no-extensions`, so the
-  Herdr agents view can show working, idle, and blocked states accurately.
+- The child is launched with `herdr agent start <name> --kind pi`. The backend
+  then waits for `herdr agent wait --until idle` before sending the first task
+  prompt, avoiding the prompt-confirmation race during Pi startup. Model,
+  tools, thinking level, cwd, agent system prompt, and configured child
+  extensions are preserved from RPC mode; the nesting-depth marker is injected
+  into the pane env. Herdr also loads its managed `herdr-agent-state.ts`
+  lifecycle extension when it is installed, even though unrelated extensions
+  remain disabled by `--no-extensions`, so the Herdr agents view can show
+  working, idle, and blocked states accurately.
 - The extension's subagent inspector does **not** auto-open (it never did);
   the pane itself is the live view. `/subagents` still lists Herdr instances
   for status, abort, and steering.
 
-The parent observes the child through its **session JSONL** — never through
-Herdr's `idle`/`done` pane status, which is a UI-seen state, not task semantics:
+The parent decides task completion through the child's **session JSONL**.
+Herdr's `idle`/`done` pane status remains a UI-seen state, not task semantics;
+its `idle` state gates the first prompt, and its later `working`/`blocked` state
+cancels a 30-second startup-activity deadline:
 
 - A turn that settles normally (`stop`) completes the task and delivers the
-  result to the parent, exactly like the RPC path.
+  result to the parent, exactly like the RPC path. If no `working`/`blocked`
+  state or assistant session message appears after the initial prompt within
+  the startup deadline, the task fails with a specific startup-timeout message
+  instead of remaining pending forever.
 - An **interrupted turn** (Escape inside the child pane) does not complete or
   fail the task. Its lifecycle becomes `interrupted`; the pane, session,
   watcher, and parent request stay alive for manual/corrective input. A later

@@ -20,6 +20,7 @@ class FakeHerdr implements HerdrClient {
   paneCounter = 0;
   /** Hook fired inside agentStart so tests can abort the tool mid-startup. */
   onAgentStart: (() => void) | undefined;
+  agentStartDelayMs = 0;
   splits: Array<{ direction: string; cwd: string; env: Record<string, string> }> = [];
   started: Array<{ name: string; paneId: string; args: string[]; timeoutMs: number }> = [];
   prompts: Array<{ target: string; text: string }> = [];
@@ -28,14 +29,14 @@ class FakeHerdr implements HerdrClient {
   paneGetCalls = 0;
   paneGetDelayMs = 0;
   paneGetResults: Array<{ state: "exists" | "gone"; agentStatus?: string }> = [];
+  defaultAgentStatus: "idle" | "working" | "blocked" = "working";
   layoutForPane = "";
   layoutWidth = 216;
   agentStartError: Error | undefined;
+  agentWaitError: Error | undefined;
   agentPromptError: Error | undefined;
+  waits: Array<{ target: string; status: string; timeoutMs: number }> = [];
   failPaneClose = false;
-  sendKeysCalls: Array<{ target: string; keys: string[] }> = [];
-  /** How many upcoming confirm-mode agentPrompt calls should report agent_prompt_stalled before succeeding. */
-  stallPromptConfirmations = 0;
 
   async paneSplit(options: { direction: "right" | "down"; cwd: string; env: Record<string, string> }) {
     this.splits.push(options);
@@ -47,28 +48,24 @@ class FakeHerdr implements HerdrClient {
   async agentStart(name: string, paneId: string, args: string[], timeoutMs: number) {
     if (this.agentStartError) throw this.agentStartError;
     this.onAgentStart?.();
+    if (this.agentStartDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.agentStartDelayMs));
     this.started.push({ name, paneId, args, timeoutMs });
   }
 
-  async agentPrompt(target: string, text: string, options?: { confirmWithinMs?: number }) {
-    if (this.agentPromptError) throw this.agentPromptError;
-    this.prompts.push({ target, text });
-    if (options?.confirmWithinMs && this.stallPromptConfirmations > 0) {
-      this.stallPromptConfirmations--;
-      const error = new Error("herdr agent prompt failed: agent_prompt_stalled");
-      (error as any).herdrCode = "agent_prompt_stalled";
-      throw error;
-    }
+  async agentWait(target: string, status: string, timeoutMs: number) {
+    if (this.agentWaitError) throw this.agentWaitError;
+    this.waits.push({ target, status, timeoutMs });
   }
 
-  async agentSendKeys(target: string, keys: string[]) {
-    this.sendKeysCalls.push({ target, keys });
+  async agentPrompt(target: string, text: string) {
+    if (this.agentPromptError) throw this.agentPromptError;
+    this.prompts.push({ target, text });
   }
 
   async paneGet(paneId: string): Promise<{ state: "exists" | "gone"; agentStatus?: string }> {
     this.paneGetCalls++;
     const result = this.paneGetResults.shift() ?? (
-      this.paneExists.get(paneId) !== false ? { state: "exists", agentStatus: "working" } : { state: "gone" }
+      this.paneExists.get(paneId) !== false ? { state: "exists", agentStatus: this.defaultAgentStatus } : { state: "gone" }
     );
     if (this.paneGetDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.paneGetDelayMs));
     return result;
@@ -129,6 +126,7 @@ function makeBackend(fake: FakeHerdr) {
     pollIntervalMs: 10,
     errorSettleGraceMs: 50,
     agentStartTimeoutMs: 500,
+    startupActivityTimeoutMs: 500,
   });
 }
 
@@ -303,6 +301,10 @@ describe("HerdrBackend happy path", () => {
     expect(fake.splits[0].env[NESTING_DEPTH_ENV]).toBe("1");
     expect(fake.started).toHaveLength(1);
     expect(fake.started[0].name).toMatch(/^sa-explore-/);
+    expect(fake.waits).toHaveLength(1);
+    expect(fake.waits[0]).toMatchObject({ target: fake.started[0].name, status: "idle" });
+    expect(fake.waits[0].timeoutMs).toBeGreaterThan(0);
+    expect(fake.waits[0].timeoutMs).toBeLessThanOrEqual(500);
     expect(fake.prompts).toEqual([{ target: fake.started[0].name, text: "map the repo" }]);
 
     // Child argv preserves the shared configuration contract. `--kind pi`
@@ -695,39 +697,127 @@ describe("HerdrBackend failure handling", () => {
   });
 });
 
-// ─── Initial prompt submission race ────────────────────────────────────────
+// ─── Initial prompt readiness and startup deadline ──────────────────────────
 
-describe("HerdrBackend initial prompt submission race", () => {
-  it("confirms the first prompt with --wait semantics and needs no recovery on the happy path", async () => {
+describe("HerdrBackend initial prompt readiness", () => {
+  it("waits for idle before submitting the first prompt and does not use confirmation mode", async () => {
     const fake = new FakeHerdr();
-    await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
-
-    expect(fake.prompts).toEqual([{ target: fake.started[0].name, text: "map the repo" }]);
-    expect(fake.sendKeysCalls).toEqual([]);
-  });
-
-  it("sends a corrective Enter when the confirmed submission stalls, without retyping the task", async () => {
-    const fake = new FakeHerdr();
-    fake.stallPromptConfirmations = 1;
-
     const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
 
-    // Exactly one prompt submission: recovery must not resend the text, only
-    // nudge the terminating Enter that was (assumed) lost.
+    expect(fake.waits).toHaveLength(1);
+    expect(fake.waits[0]).toMatchObject({ target: fake.started[0].name, status: "idle" });
+    expect(fake.waits[0].timeoutMs).toBeGreaterThan(0);
+    expect(fake.waits[0].timeoutMs).toBeLessThanOrEqual(500);
     expect(fake.prompts).toEqual([{ target: fake.started[0].name, text: "map the repo" }]);
-    expect(fake.sendKeysCalls).toEqual([{ target: fake.started[0].name, keys: ["enter"] }]);
+
+    appendAssistant(sessionDirOf(fake), { content: [{ type: "text", text: "done" }], stopReason: "stop" });
+    await expect(handle.result).resolves.toMatchObject({ lifecycle: "completed" });
+  });
+
+  it("fails startup with a specific notification when Herdr never observes activity", async () => {
+    const fake = new FakeHerdr();
+    fake.defaultAgentStatus = "idle";
+    const backend = createHerdrBackend({
+      cli: fake,
+      pollIntervalMs: 10,
+      errorSettleGraceMs: 50,
+      agentStartTimeoutMs: 500,
+      startupActivityTimeoutMs: 40,
+    });
+
+    const handle = await backend.spawn(makeSpec({ agentPrompt: "" }));
+    const result = await handle.result;
+
+    expect(result.lifecycle).toBe("failed");
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain(
+      `Subagent startup timed out for Herdr agent "${fake.started[0].name}" in pane "${fake.started[0].paneId}":`,
+    );
+    expect(result.errorMessage).toContain("within 40ms");
+    expect(fake.closedPanes).toHaveLength(1);
+  });
+
+  it("clears the startup deadline when the child completes before a status poll", async () => {
+    const fake = new FakeHerdr();
+    fake.defaultAgentStatus = "idle";
+    const backend = createHerdrBackend({
+      cli: fake,
+      pollIntervalMs: 10,
+      errorSettleGraceMs: 50,
+      agentStartTimeoutMs: 500,
+      startupActivityTimeoutMs: 40,
+    });
+
+    const handle = await backend.spawn(makeSpec({ agentPrompt: "" }));
+    appendAssistant(sessionDirOf(fake), { content: [{ type: "text", text: "done" }], stopReason: "stop" });
+    await expect(handle.result).resolves.toMatchObject({ lifecycle: "completed" });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(fake.closedPanes).toEqual([]);
+  });
+
+  it("keeps the timeout result when failed pane cleanup also fails", async () => {
+    const fake = new FakeHerdr();
+    fake.defaultAgentStatus = "idle";
+    fake.failPaneClose = true;
+    const stderr: string[] = [];
+    const backend = createHerdrBackend({
+      cli: fake,
+      pollIntervalMs: 10,
+      errorSettleGraceMs: 50,
+      agentStartTimeoutMs: 500,
+      startupActivityTimeoutMs: 40,
+    });
+
+    const handle = await backend.spawn(makeSpec({ agentPrompt: "", onStderr: (data) => stderr.push(data) }));
+    const result = await handle.result;
+
+    expect(result.errorMessage).toContain("Subagent startup timed out");
+    await until(() => stderr.some((line) => line.includes("startup-timeout pane cleanup failed")));
+  });
+
+  it("treats blocked as startup activity and leaves the child available for observation", async () => {
+    const fake = new FakeHerdr();
+    fake.defaultAgentStatus = "blocked";
+    const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
+    await until(() => fake.paneGetCalls > 0);
 
     appendAssistant(sessionDirOf(fake), { content: [{ type: "text", text: "done" }], stopReason: "stop" });
     const result = await handle.result;
+
     expect(result.lifecycle).toBe("completed");
   });
 
-  it("propagates non-stall agentPrompt errors without attempting recovery", async () => {
+  it("reports when agent start exhausts the combined readiness budget", async () => {
+    const fake = new FakeHerdr();
+    fake.agentStartDelayMs = 300;
+    const backend = createHerdrBackend({
+      cli: fake,
+      pollIntervalMs: 10,
+      errorSettleGraceMs: 50,
+      agentStartTimeoutMs: 20,
+      startupActivityTimeoutMs: 500,
+    });
+
+    await expect(backend.spawn(makeSpec({ agentPrompt: "" })))
+      .rejects.toThrow("agent start exhausted the combined readiness budget");
+    expect(fake.waits).toEqual([]);
+    expect(fake.closedPanes).toHaveLength(1);
+  });
+
+  it("closes the pane when the idle readiness gate fails", async () => {
+    const fake = new FakeHerdr();
+    fake.agentWaitError = new Error("herdr agent wait failed: timeout");
+
+    await expect(makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }))).rejects.toThrow("agent wait failed");
+    expect(fake.prompts).toEqual([]);
+    expect(fake.closedPanes).toHaveLength(1);
+  });
+
+  it("propagates prompt errors without a confirmation or Enter recovery path", async () => {
     const fake = new FakeHerdr();
     fake.agentPromptError = new Error("herdr agent prompt failed: agent_blocked");
 
     await expect(makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }))).rejects.toThrow("agent_blocked");
-    expect(fake.sendKeysCalls).toEqual([]);
     expect(fake.closedPanes).toHaveLength(1);
   });
 });

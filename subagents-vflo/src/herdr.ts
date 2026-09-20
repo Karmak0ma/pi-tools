@@ -5,9 +5,19 @@
  * Everything else — the backends, the orchestration in index.ts — works
  * against the backend contract or the HerdrClient interface defined here.
  *
- * CLI behavior verified against herdr 0.8.2:
- * - Server errors arrive as JSON ({error:{code,message}}) on stdout with
- *   exit code 1; usage errors exit 2. Both must be surfaced as failures.
+ * CLI behavior:
+ * - Server errors arrive as JSON ({error:{code,message}}) with exit code 1;
+ *   usage errors exit 2 as plain text. Both must be surfaced as failures.
+ * - WHICH STREAM carries the error envelope is a herdr implementation detail
+ *   and has already changed: it was documented as stdout for 0.8.2, but
+ *   herdr 0.9.0 writes it to stderr and leaves stdout empty. Parsing stdout
+ *   only meant every error lost its `herdrCode`, which silently disabled
+ *   both prompt-error and pane-death classification in production while
+ *   the unit tests (which fed envelopes on stdout) stayed green. That turned
+ *   a recoverable startup condition into a hard subagent spawn failure.
+ *   parseCliResult() therefore searches BOTH streams and never depends on
+ *   which one is used, so this comment cannot rot back into a live bug.
+ * - Success payloads are JSON on stdout with exit code 0.
  * - `pane get` / `agent get` report pane_not_found / agent_not_found after a
  *   pane or its process is gone; these codes mean "the child is dead".
  * - `pane close` kills the process running inside the pane and is a no-op
@@ -175,29 +185,83 @@ function firstLine(text: string): string {
 }
 
 /**
- * Parse a herdr CLI response. Server errors are JSON on stdout with exit 1;
- * parse failures and usage errors (exit 2, plain text) become plain errors.
+ * Parse one blob as a herdr JSON envelope. Returns null for anything that is
+ * not a JSON object, so callers can keep scanning instead of throwing.
+ */
+function parseEnvelope(text: string): any | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Find a matching envelope inside one stream.
+ *
+ * The whole stream is tried first because the normal shape is exactly one
+ * JSON document. The line scan is the safety net: a single unrelated log or
+ * warning line must never hide the envelope behind a whole-stream parse
+ * failure, which is precisely how error classification silently died before
+ * (see the transport note in this module's header).
+ */
+function findEnvelope(stream: string, matches: (envelope: any) => boolean): any | null {
+  const whole = parseEnvelope(stream);
+  if (whole && matches(whole)) return whole;
+  for (const line of stream.split("\n")) {
+    const parsed = parseEnvelope(line);
+    if (parsed && matches(parsed)) return parsed;
+  }
+  return null;
+}
+
+const hasErrorPayload = (envelope: any): boolean => !!envelope.error && typeof envelope.error === "object";
+
+/** Build the thrown error for an `{error:{code,message}}` payload. */
+function envelopeError(operation: string, payload: any): Error {
+  const error = new Error(
+    `herdr ${operation} failed: ${payload.code ?? "error"}${payload.message ? `: ${payload.message}` : ""}`,
+  );
+  (error as any).herdrCode = payload.code;
+  return error;
+}
+
+/**
+ * Parse a herdr CLI response.
+ *
+ * Both streams are searched for the error envelope because which stream
+ * carries it is a herdr implementation detail that has already changed once
+ * (see this module's header). Classification must not depend on it: a lost
+ * `herdrCode` silently disables every recovery path built on it.
+ *
  * The parsed `result` payload is returned; an `error` payload is thrown with
- * its code attached so callers can classify not-found responses.
+ * its code attached so callers can classify stalled/not-found responses.
+ * Usage errors (exit 2, plain text) and unparsable output become plain
+ * errors carrying the first output line.
  */
 function parseCliResult(operation: string, res: HerdrCommandResult): any {
-  let parsed: any;
-  try {
-    parsed = JSON.parse(res.stdout);
-  } catch {
-    throw new Error(`herdr ${operation} failed (exit ${res.exitCode}): ${firstLine(res.stderr || res.stdout) || "no output"}`);
-  }
-  if (parsed && typeof parsed === "object" && parsed.error) {
-    const error = new Error(
-      `herdr ${operation} failed: ${parsed.error.code ?? "error"}${parsed.error.message ? `: ${parsed.error.message}` : ""}`,
+  // stdout wins when both streams carry an envelope: older herdr versions put
+  // errors there, and a stderr envelope alongside a stdout one would be log
+  // noise rather than the command's own verdict.
+  const errorEnvelope =
+    findEnvelope(res.stdout, hasErrorPayload) ?? findEnvelope(res.stderr, hasErrorPayload);
+  if (errorEnvelope) throw envelopeError(operation, errorEnvelope.error);
+
+  // Success payloads stay stdout-only (verified live on 0.9.0: exit 0, JSON on
+  // stdout, empty stderr). The line scan already tolerates a log line printed
+  // before the payload; accepting a success payload from stderr instead would
+  // risk returning an unrelated log object as a command result.
+  const parsed = findEnvelope(res.stdout, () => true);
+  if (!parsed || res.exitCode !== 0) {
+    const failure = new Error(
+      `herdr ${operation} failed (exit ${res.exitCode}): ${firstLine(res.stderr || res.stdout) || "no output"}`,
     );
-    (error as any).herdrCode = parsed.error.code;
-    throw error;
+    throw failure;
   }
-  if (res.exitCode !== 0) {
-    throw new Error(`herdr ${operation} failed (exit ${res.exitCode}): ${firstLine(res.stderr || res.stdout) || "no output"}`);
-  }
-  return parsed?.result ?? parsed;
+  return parsed.result ?? parsed;
 }
 
 /** Error codes that mean the pane (or its agent) no longer exists. */
@@ -207,23 +271,14 @@ function isHerdrNotFound(error: unknown): boolean {
   return HERDR_NOT_FOUND_CODES.has((error as any)?.herdrCode);
 }
 
-/**
- * Whether a confirmed agentPrompt failed because Herdr never observed the
- * pane leave idle within its submission-stall window. This is Herdr's own
- * documented signal for a possibly-lost submission (e.g. the trailing Enter
- * keystroke swallowed by a still-initializing child) — not proof that
- * nothing was sent, which is why callers must not resubmit blindly.
- */
-export function isHerdrPromptStalled(error: unknown): boolean {
-  return (error as any)?.herdrCode === "agent_prompt_stalled";
-}
-
 // ─── Client ──────────────────────────────────────────────────────────────────
 
 /**
  * The surface of Herdr the Herdr backend needs. Declared as an interface so
  * the backend can be tested against a fake without spawning anything.
  */
+export type HerdrAgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
+
 export interface HerdrClient {
   /**
    * Split the calling pane into a new pane. `--no-focus` is always sent: a
@@ -236,23 +291,14 @@ export interface HerdrClient {
    */
   agentStart(name: string, paneId: string, agentArgs: string[], timeoutMs: number): Promise<void>;
   /**
-   * Type a prompt into the agent's terminal and press Enter.
-   *
-   * Without `options.confirmWithinMs`, this returns as soon as Herdr accepts
-   * the command — the fire-and-forget mode used for mid-task steering, where
-   * the child is already running and the submission race below cannot occur.
-   *
-   * With `options.confirmWithinMs`, waits for Herdr to observe the agent
-   * leave `idle` (into `working` or `blocked`) within that many
-   * milliseconds, confirming the submission actually took effect. Rejects
-   * with `herdrCode: "agent_prompt_stalled"` when it does not — Herdr's own
-   * signal that the text may have landed without the trailing Enter taking
-   * effect. Herdr's docs are explicit that this does not prove nothing was
-   * sent, so callers must not resubmit blindly.
+   * Wait until Herdr observes an agent state. The Herdr backend uses
+   * `idle` before the first prompt as a startup gate; it does not use Herdr's
+   * prompt-confirmation stall mode because that fixed 5s observation window
+   * races Pi's startup handshake.
    */
-  agentPrompt(target: string, text: string, options?: { confirmWithinMs?: number }): Promise<void>;
-  /** Send raw terminal keys (e.g. "enter") into an agent's interactive UI, bypassing bracketed-paste typing. */
-  agentSendKeys(target: string, keys: string[]): Promise<void>;
+  agentWait(target: string, status: HerdrAgentStatus, timeoutMs: number): Promise<void>;
+  /** Type a prompt into the agent's terminal and press Enter. */
+  agentPrompt(target: string, text: string): Promise<void>;
   /** Pane state including agent_status (idle/working/blocked); throws on unexpected errors. */
   paneGet(paneId: string): Promise<{ state: "exists" | "gone"; agentStatus?: string }>;
   /** Close a pane (kills its process). Tolerates an already-closed pane. */
@@ -296,27 +342,23 @@ export class HerdrCli implements HerdrClient {
     if (!result?.agent) throw new Error("herdr agent start returned no agent");
   }
 
-  async agentPrompt(target: string, text: string, options?: { confirmWithinMs?: number }): Promise<void> {
+  async agentWait(target: string, status: HerdrAgentStatus, timeoutMs: number): Promise<void> {
+    // Herdr's wait command is a readiness gate only. Task completion remains
+    // the child's session JSONL, not this UI-level state observation.
+    parseCliResult(
+      "agent wait",
+      await this.run(
+        ["agent", "wait", target, "--until", status, "--timeout", String(timeoutMs)],
+        timeoutMs + DEFAULT_COMMAND_TIMEOUT_MS,
+      ),
+    );
+  }
+
+  async agentPrompt(target: string, text: string): Promise<void> {
     // Fire-and-forget mode: completion is decided by the session watcher, not
     // by Herdr's idle/done status, which is a UI-seen state rather than task
     // semantics. parseCliResult surfaces agent_blocked and other server errors.
-    const args = ["agent", "prompt", target, text];
-    let timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
-    if (options?.confirmWithinMs) {
-      // Confirm mode: ask Herdr itself to verify the pane left idle. This is
-      // narrowly about "did the submission take effect", not about task
-      // completion — --until stops the wait the moment the turn begins,
-      // instead of waiting for the whole turn to settle.
-      args.push("--wait", "--until", "working", "--until", "blocked", "--timeout", String(options.confirmWithinMs));
-      // The CLI's own --timeout bounds the wait; the runner timeout adds
-      // slack for process startup and transport, matching agentStart's pattern.
-      timeoutMs = options.confirmWithinMs + DEFAULT_COMMAND_TIMEOUT_MS;
-    }
-    parseCliResult("agent prompt", await this.run(args, timeoutMs));
-  }
-
-  async agentSendKeys(target: string, keys: string[]): Promise<void> {
-    parseCliResult("agent send-keys", await this.run(["agent", "send-keys", target, ...keys], DEFAULT_COMMAND_TIMEOUT_MS));
+    parseCliResult("agent prompt", await this.run(["agent", "prompt", target, text], DEFAULT_COMMAND_TIMEOUT_MS));
   }
 
   async paneGet(paneId: string): Promise<{ state: "exists" | "gone"; agentStatus?: string }> {

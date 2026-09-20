@@ -128,9 +128,9 @@ describe("createBackend selection", () => {
     const fake: HerdrClient = {
       paneSplit: async () => ({ paneId: "wJ:p1" }),
       agentStart: async () => {},
+      agentWait: async () => {},
       agentPrompt: async () => {},
-      agentSendKeys: async () => {},
-      paneGet: async () => ({ state: "exists" as const }),
+      paneGet: async () => ({ state: "exists" as const, agentStatus: "working" }),
       paneClose: async () => {},
       paneLayout: async () => [{ paneId: "wJ:pH", width: 216 }],
     };
