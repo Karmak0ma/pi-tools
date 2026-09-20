@@ -91,10 +91,10 @@
 //     name, we abort the WHOLE repair (leave the message untouched) rather
 //     than guessing or dropping calls -- partial repairs risk executing a
 //     subset of a multi-step plan out of context.
-//   - We do not repair when the message already contains a real toolCall
-//     (even if leaked invoke text is ALSO present) -- we only log that case,
-//     since injecting an extra synthesized call next to a genuine one could
-//     duplicate side effects.
+//   - We do not synthesize a call when the message already contains a real
+//     toolCall (even if leaked invoke text is ALSO present) -- we only strip
+//     the dead leaked text, since injecting an extra synthesized call next to
+//     a genuine one could duplicate side effects.
 //
 // KNOWN LIMITATIONS:
 //   - Non-core custom tools registered under an MCP-style alias name (only
@@ -374,19 +374,18 @@ function missingRequiredParams(pi: ExtensionAPI, toolName: string, invoke: Parse
 }
 
 // ----------------------------------------------------------------------------
-// Bounded console summary + optional full-detail forensic file logging.
+// Optional full-detail forensic file logging.
 //
 // Leaked parameter values can contain file contents, diffs, or (rarely)
-// secrets a command happened to reference. Printing the FULL raw leaked text
-// to console.warn on every repair would push that into stderr/scrollback/any
-// log capture unconditionally, which is a real exposure for something that
-// fires automatically with no user action. So:
-//   - console.warn always gets a BOUNDED summary (truncated raw text).
-//   - The full, untruncated raw text + outcome is only ever written to disk
-//     when the user opts in via PI_CLAUDE_TOOL_CALL_REPAIR_LOG=<path> --
-//     same opt-in-file-logging shape as the sibling `pi-claude-code-use`
-//     extension's PI_CLAUDE_CODE_USE_DEBUG_LOG, for exactly the same reason
-//     (forensic detail on tap without it being unconditionally noisy/exposed).
+// secrets a command happened to reference. Successful repairs must stay
+// silent: writing to console.warn bypasses pi's TUI render bookkeeping and
+// can leave stale text in the terminal's scrollback. Aborted repairs still
+// emit a bounded diagnostic below because no repair was applied. The full,
+// untruncated raw text + outcome is only ever written to disk when the user
+// opts in via PI_CLAUDE_TOOL_CALL_REPAIR_LOG=<path> -- same opt-in-file-
+// logging shape as the sibling `pi-claude-code-use` extension's
+// PI_CLAUDE_CODE_USE_DEBUG_LOG, for exactly the same reason (forensic detail
+// on tap without it being unconditionally noisy/exposed).
 // ----------------------------------------------------------------------------
 const MAX_LOGGED_RAW_CHARS = 2000;
 function truncateForConsole(text: string): string {
@@ -483,10 +482,6 @@ export default function claudeToolRepair(pi: ExtensionAPI): void {
 			const anyLeaks = perBlockLeaks.some((invokes) => invokes.length > 0);
 			if (!anyLeaks) return undefined;
 
-			console.warn(
-				`${LOG_PREFIX} Assistant message has a real toolCall AND leaked <invoke> text; stripping the dead leaked ` +
-					"text so it isn't replayed to the model, without synthesizing an extra call next to the real one.",
-			);
 			const newContent = content.map((block, index) => {
 				const invokes = perBlockLeaks[index];
 				if (!invokes || invokes.length === 0 || block.type !== "text") return block;
@@ -614,11 +609,9 @@ export default function claudeToolRepair(pi: ExtensionAPI): void {
 		});
 
 		const repairedRawText = allInvokes.map((i) => i.raw).join("\n---\n");
-		console.warn(
-			`${LOG_PREFIX} Repaired ${appliedSummaries.length} leaked pseudo-tool-call(s) that would otherwise have ` +
-				`stalled the turn: ${appliedSummaries.join("; ")}. Original leaked text (truncated; set ` +
-				`PI_CLAUDE_TOOL_CALL_REPAIR_LOG=<path> for the full untruncated forensic record):\n${truncateForConsole(repairedRawText)}`,
-		);
+		// Keep successful repairs silent. In particular, do not send the leaked
+		// multiline pseudo-XML through console.warn: console output is outside
+		// pi's TUI render bookkeeping and can remain visible as ghost text.
 		writeForensicLog(`REPAIRED. Summary: ${appliedSummaries.join("; ")}\nRaw text:\n${repairedRawText}`);
 
 		return { message: { ...event.message, content: newContent } as typeof event.message };

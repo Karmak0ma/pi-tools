@@ -38,8 +38,9 @@ The package was renamed from `claude-tool-call-repair` to
 - `PI_CLAUDE_TOOL_CALL_REPAIR_DISABLE=1` disables repair.
 - `PI_CLAUDE_TOOL_CALL_REPAIR_LOG=/path/to/file` enables full forensic logs.
 
-Console messages are bounded. Full leaked content is written only when the
-opt-in forensic log variable is set.
+Successful repairs and leaked-text cleanup are silent. An aborted repair may
+emit a bounded diagnostic because no repair was applied. Full leaked content is
+written only when the opt-in forensic log variable is set.
 
 ## Runtime and development dependencies
 

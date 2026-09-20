@@ -136,6 +136,19 @@ test("truncateForConsole: passes short text through untouched, bounds long text 
 // Full message_end handler, against real captured transcripts
 // ----------------------------------------------------------------------------
 
+async function captureConsoleWarnings<T>(run: () => Promise<T>): Promise<{ result: T; warnings: string[] }> {
+	const previousWarn = console.warn;
+	const warnings: string[] = [];
+	console.warn = (...args: Parameters<typeof console.warn>) => {
+		warnings.push(args.map(String).join(" "));
+	};
+	try {
+		return { result: await run(), warnings };
+	} finally {
+		console.warn = previousWarn;
+	}
+}
+
 test("handler: repairs a clean single-call leak (sample1_bash) into a real bash toolCall, dropping orphan trailing garbage", async () => {
 	const { pi, getHandler } = createFakePi(["bash", "edit", "read"]);
 	claudeToolRepair(pi);
@@ -145,9 +158,10 @@ test("handler: repairs a clean single-call leak (sample1_bash) into a real bash 
 		stopReason: sample1_bash.stopReason,
 		content: [{ type: "text", text: sample1_bash.text }],
 	});
-	const result = await getHandler()({ message }, {});
+	const { result, warnings } = await captureConsoleWarnings(() => getHandler()({ message }, {}));
+	assert.deepEqual(warnings, [], "a successful repair must not write to the console");
 	assert.ok(result, "expected a repair, got a no-op");
-	const content = (result.message as { content: unknown[] }).content;
+	const content = (result as { message: { content: unknown[] } }).message.content;
 	// The orphan trailing <parameter> fragment must be fully gone, leaving
 	// exactly one toolCall block and no leftover text noise.
 	assert.equal(content.length, 1);
@@ -306,9 +320,10 @@ test("handler: a real toolCall already present strips leaked invoke text but doe
 			{ type: "text", text: '<invoke name="Bash"><parameter name="command">echo bye</parameter></invoke>' },
 		],
 	});
-	const result = await getHandler()({ message }, {});
+	const { result, warnings } = await captureConsoleWarnings(() => getHandler()({ message }, {}));
+	assert.deepEqual(warnings, [], "successful leaked-text cleanup must not write to the console");
 	assert.ok(result, "expected the leaked text to be stripped");
-	const content = (result.message as { content: unknown[] }).content;
+	const content = (result as { message: { content: unknown[] } }).message.content;
 	// Real toolCall preserved, leaked text block gone entirely (no leftover empty block).
 	assert.equal(content.length, 1);
 	assert.equal((content[0] as { type: string }).type, "toolCall");
