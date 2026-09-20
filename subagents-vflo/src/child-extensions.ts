@@ -157,6 +157,28 @@ function resolveExtensionEntryPoints(packageDir: string): string[] {
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
+/**
+ * Tell the user when a configured child extension could not be resolved.
+ *
+ * This is intentionally a warning, not an exception: one optional extension
+ * must not prevent every subagent from starting. Keep this at the resolver
+ * boundary because this module has the complete configured-source list and can
+ * report both failure modes (missing package directory and package with no
+ * discoverable entry point) in one message.
+ *
+ * resolveChildExtensions() caches its result for the parent process lifetime,
+ * so this warning is emitted once per resolution, not once per child spawn.
+ */
+export function warnOnUnresolvedChildExtensions(sources: string[]): void {
+  if (sources.length === 0) return;
+
+  const listedSources = sources.map((source) => JSON.stringify(source)).join(", ");
+  console.warn(
+    `[subagents-vflo] Could not resolve configured child extension package(s): ${listedSources}. ` +
+      `They will not be loaded into child processes; check ${getChildExtensionConfigPath()}.`,
+  );
+}
+
 export interface ChildExtensionResolution {
   /** Resolved absolute paths to extension entry points for child processes. */
   paths: string[];
@@ -213,6 +235,7 @@ export function resolveChildExtensions(): ChildExtensionResolution {
     }
   }
 
+  warnOnUnresolvedChildExtensions(result.unresolved);
   cachedResolution = result;
   return result;
 }
