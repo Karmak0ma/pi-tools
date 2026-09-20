@@ -120,9 +120,77 @@ export function resolvePackageDir(source: string): string | null {
 }
 
 /**
+ * One-level discovery of extension files inside a directory that has neither
+ * its own package.json "pi.extensions" manifest nor an index.ts/js.
+ *
+ * Mirrors real pi's own fallback for this exact shape (package-manager.js:
+ * collectResourceFiles -> collectAutoExtensionEntries in
+ * @earendil-works/pi-coding-agent), traced line-by-line rather than assumed:
+ * a manifest-declared "pi.extensions" directory entry that has no index file
+ * of its own is scanned ONE level deep only. Direct .ts/.js files in that
+ * directory load as-is. A SUBdirectory of it loads only if that subdirectory
+ * itself has an index.ts/js (real pi also accepts an inner package.json
+ * manifest at that same level -- deliberately not replicated here since no
+ * package in this allowlist nests a manifest two levels deep; a subdirectory
+ * with neither is silently skipped, exactly matching real pi's own behavior,
+ * not a gap introduced here).
+ *
+ * This fixes @henryqw/pi-herdr-rename specifically: its manifest declares
+ * "./extensions", and the only file inside is named rename.ts, not index.ts.
+ *
+ * Known shared hazard, not introduced by this function: a ".d.ts" file's
+ * name also ends in ".ts", so it would be treated as an entry point. Real
+ * pi's own isExtensionFile() has the identical hazard (plain suffix check,
+ * no ".d.ts" exclusion) -- not fixed here, since fixing it would diverge
+ * from, rather than match, real pi's behavior.
+ */
+function discoverExtensionFilesOneLevel(dir: string): string[] {
+  const discovered: string[] = [];
+  let dirEntries: fs.Dirent[];
+  try {
+    dirEntries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return discovered;
+  }
+  // fs.readdirSync order is not guaranteed to be stable across platforms/filesystems.
+  // Sort so the resulting -e flag order (and therefore extension load order) is
+  // deterministic across runs, independent of raw directory-entry order.
+  const sorted = [...dirEntries].sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of sorted) {
+    if (entry.name.startsWith(".")) continue;
+    if (entry.name === "node_modules") continue;
+    const fullPath = path.join(dir, entry.name);
+    // Real pi's collectFiles/collectAutoExtensionEntries statSync-resolves symlinks
+    // rather than trusting Dirent.isFile()/isDirectory() (which report the link
+    // itself, not its target) -- matched here so a symlinked entry isn't silently
+    // dropped the way the pre-fix resolver already silently dropped rename.ts.
+    let isDir = entry.isDirectory();
+    let isFile = entry.isFile();
+    if (entry.isSymbolicLink()) {
+      try {
+        const stats = fs.statSync(fullPath);
+        isDir = stats.isDirectory();
+        isFile = stats.isFile();
+      } catch {
+        continue;
+      }
+    }
+    if (isFile && (entry.name.endsWith(".ts") || entry.name.endsWith(".js"))) {
+      discovered.push(fullPath);
+    } else if (isDir) {
+      const indexTs = path.join(fullPath, "index.ts");
+      const indexJs = path.join(fullPath, "index.js");
+      if (fs.existsSync(indexTs)) discovered.push(indexTs);
+      else if (fs.existsSync(indexJs)) discovered.push(indexJs);
+    }
+  }
+  return discovered;
+}
+
+/**
  * Given a package directory, resolve its extension entry points to absolute paths.
  */
-function resolveExtensionEntryPoints(packageDir: string): string[] {
+export function resolveExtensionEntryPoints(packageDir: string): string[] {
   const pkg = readPackageJson(packageDir);
   if (!pkg?.pi?.extensions) {
     // Fall back: check if index.ts exists
@@ -147,6 +215,7 @@ function resolveExtensionEntryPoints(packageDir: string): string[] {
         const indexJs = path.join(resolved, "index.js");
         if (fs.existsSync(indexTs)) entries.push(indexTs);
         else if (fs.existsSync(indexJs)) entries.push(indexJs);
+        else entries.push(...discoverExtensionFilesOneLevel(resolved));
       } else {
         entries.push(resolved);
       }
