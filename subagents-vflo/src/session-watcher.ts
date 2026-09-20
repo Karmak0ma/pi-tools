@@ -18,8 +18,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+const SUBAGENT_SESSION_DIR_PREFIX = "pi-subagent-";
+
 export interface SessionWatcherOptions {
-  /** Directory passed to the child via --session-dir. Scanned recursively. */
+  /** Directory passed to the child via --session-dir. Its owned tree is scanned recursively. */
   sessionDir: string;
   /** Called for every assistant message entry observed since the last poll. */
   onAssistantMessage: (message: any) => void;
@@ -30,6 +32,42 @@ interface TrackedFile {
   offset: number;
   /** Unconsumed trailing bytes that do not yet end with a newline. */
   carry: Buffer;
+}
+
+/**
+ * Find one child's session files without crossing into a descendant child.
+ *
+ * Pi can place the watched child's JSONL below a working-directory-derived
+ * folder, so this cannot be a shallow scan. Nested `pi-subagent-*` roots are
+ * separate result channels and must be pruned before their messages can enter
+ * the direct child's usage, events, or lifecycle state.
+ */
+async function discoverSessionFiles(sessionDir: string): Promise<string[]> {
+  const directories = [sessionDir];
+  const sessionFiles: string[] = [];
+
+  for (let index = 0; index < directories.length; index++) {
+    const directory = directories[index];
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(directory, { withFileTypes: true });
+    } catch {
+      // Retry unreadable directories on the next poll without suppressing
+      // files from the rest of this child's readable session tree.
+      continue;
+    }
+
+    for (const entry of entries) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!entry.name.startsWith(SUBAGENT_SESSION_DIR_PREFIX)) directories.push(entryPath);
+      } else if (entry.name.endsWith(".jsonl")) {
+        sessionFiles.push(entryPath);
+      }
+    }
+  }
+
+  return sessionFiles;
 }
 
 export class SessionWatcher {
@@ -44,36 +82,21 @@ export class SessionWatcher {
   }
 
   /**
-   * Scan the session directory once: discover every *.jsonl file (recursively),
+   * Scan the session directory once: discover every owned *.jsonl file,
    * read the bytes appended since the previous poll, and emit assistant
-   * messages. Idempotent and safe to call repeatedly; concurrent invocations
-   * are collapsed.
+   * messages. Descendant subagent roots are separate ownership domains.
+   * Idempotent and safe to call repeatedly; concurrent invocations collapse.
    */
   async poll(): Promise<void> {
     if (this.polling) return;
     this.polling = true;
     try {
-      for (const filePath of await this.discoverSessionFiles()) {
+      for (const filePath of await discoverSessionFiles(this.sessionDir)) {
         await this.readAppended(filePath);
       }
     } finally {
       this.polling = false;
     }
-  }
-
-  /** All *.jsonl files under the session dir, flat or nested. */
-  private async discoverSessionFiles(): Promise<string[]> {
-    let entries: string[];
-    try {
-      entries = await fs.promises.readdir(this.sessionDir, { recursive: true });
-    } catch {
-      // The directory exists (we created it), but a transient readdir failure
-      // must not kill the watcher; the next poll retries.
-      return [];
-    }
-    return entries
-      .filter((entry) => entry.endsWith(".jsonl"))
-      .map((entry) => path.join(this.sessionDir, entry));
   }
 
   /**

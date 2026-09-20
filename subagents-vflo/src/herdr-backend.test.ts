@@ -250,6 +250,46 @@ describe("HerdrBackend happy path", () => {
     expect(fs.readdirSync(parentSessionDir).filter((entry) => entry.endsWith(".jsonl"))).toEqual([]);
   });
 
+  it("keeps descendant messages scoped to the child that invoked them", async () => {
+    const fake = new FakeHerdr();
+    const events: any[] = [];
+    const handle = await makeBackend(fake).spawn(makeSpec({
+      agentPrompt: "",
+      onEvent: (event) => events.push(event),
+    }));
+    const directChildDir = sessionDirOf(fake);
+    const grandchildDir = fs.mkdtempSync(path.join(directChildDir, "pi-subagent-"));
+
+    // A descendant can finish while the direct child is still processing its
+    // result. Its JSONL is persisted below the direct child's directory, but
+    // it is a separate result channel and must not affect this monitor.
+    appendAssistant(grandchildDir, {
+      content: [{ type: "toolCall", name: "read", arguments: { path: "grandchild-only" } }],
+      usage: { input: 100, output: 50, totalTokens: 150 },
+      stopReason: "toolUse",
+    });
+    appendAssistant(grandchildDir, {
+      content: [{ type: "text", text: "grandchild result" }],
+      usage: { input: 200, output: 75, totalTokens: 275 },
+      stopReason: "stop",
+    });
+
+    expect(await settleRace(handle, 80)).toBe("pending");
+    expect(events.filter((event) => event.type === "message_end")).toEqual([]);
+
+    appendAssistant(directChildDir, {
+      content: [{ type: "text", text: "direct child result" }],
+      usage: { input: 10, output: 5, totalTokens: 15 },
+      stopReason: "stop",
+    });
+
+    const result = await handle.result;
+    expect(result.finalOutput).toBe("direct child result");
+    expect(result.usage).toMatchObject({ turns: 1, input: 10, output: 5, contextTokens: 15 });
+    expect(result.toolCalls).toEqual([]);
+    expect(events.filter((event) => event.type === "message_end")).toHaveLength(1);
+  });
+
   it("splits a pane, starts pi, injects the task, and delivers the result on a normal settle", async () => {
     vi.stubEnv(NESTING_DEPTH_ENV, "0");
     const fake = new FakeHerdr();

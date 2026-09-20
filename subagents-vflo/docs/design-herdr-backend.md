@@ -66,9 +66,12 @@ The authoritative observation surface for task completion remains the child's
 1. Parent passes its project-specific `ctx.sessionManager.getSessionDir()` to
    the backend. The backend creates a fresh child directory (`mkdtemp
    <parent-session-dir>/pi-subagent-*`) and passes it to the child via
-   `--session-dir`. Session files land there (flat or nested — watcher globs
-   recursively). This keeps each watcher isolated while placing persistent
-   child history below the same Pi session storage tree as the parent.
+   `--session-dir`. Session files land there either flat or below Pi's
+   working-directory-derived folders. The watcher scans those ordinary folders
+   recursively but prunes nested `pi-subagent-*` roots, which belong to
+   descendants and are separate result channels. This keeps each watcher
+   isolated while placing persistent child history below the same Pi session
+   storage tree as the parent.
    In-memory or unavailable parent session directories fall back to
    `/tmp/pi-subagent-*`. Child histories are intentionally retained for
    inspection; cleanup is manual rather than automatic.

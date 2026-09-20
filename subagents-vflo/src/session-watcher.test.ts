@@ -91,6 +91,21 @@ describe("SessionWatcher", () => {
     expect(seen).toHaveLength(1);
   });
 
+  it("does not cross into a descendant subagent session root", async () => {
+    const dir = makeSessionDir();
+    const ownedDir = path.join(dir, "--home-user-repo--");
+    const descendantDir = path.join(ownedDir, "pi-subagent-grandchild");
+    fs.mkdirSync(descendantDir, { recursive: true });
+    writeSessionLines(ownedDir, [assistantEntry({ content: [{ type: "text", text: "direct child" }] })], "child.jsonl");
+    writeSessionLines(descendantDir, [assistantEntry({ content: [{ type: "text", text: "grandchild" }] })]);
+
+    const seen: any[] = [];
+    const watcher = new SessionWatcher({ sessionDir: dir, onAssistantMessage: (m) => seen.push(m) });
+    await watcher.poll();
+
+    expect(seen.map((message) => message.content[0].text)).toEqual(["direct child"]);
+  });
+
   it("survives a missing directory and malformed lines", async () => {
     const dir = makeSessionDir();
     const filePath = path.join(dir, "session.jsonl");
