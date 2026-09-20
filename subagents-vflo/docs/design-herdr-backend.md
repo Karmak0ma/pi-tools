@@ -63,9 +63,15 @@ accurate per-pane symbols when the managed lifecycle integration is loaded:
 The authoritative observation surface for task completion remains the child's
 **session JSONL**, which pi appends to on every `message_end`:
 
-1. Parent creates a fresh session dir (`mkdtemp /tmp/pi-subagent-*`), passed to
-   the child via `--session-dir`. Session files land there (flat or nested —
-   watcher globs recursively).
+1. Parent passes its project-specific `ctx.sessionManager.getSessionDir()` to
+   the backend. The backend creates a fresh child directory (`mkdtemp
+   <parent-session-dir>/pi-subagent-*`) and passes it to the child via
+   `--session-dir`. Session files land there (flat or nested — watcher globs
+   recursively). This keeps each watcher isolated while placing persistent
+   child history below the same Pi session storage tree as the parent.
+   In-memory or unavailable parent session directories fall back to
+   `/tmp/pi-subagent-*`. Child histories are intentionally retained for
+   inspection; cleanup is manual rather than automatic.
 2. A `SessionWatcher` (fs.watch on the dir + read-from-offset with torn-line
    buffering) parses assistant messages:
    - `stopReason: "toolUse"` → turn continues (working)
@@ -135,7 +141,9 @@ classification.
 ## Environment rules
 
 - Children inherit the parent env minus `PI_SESSION_FILE` (unchanged), plus
-  `PI_SUBAGENTS_VFLO_DEPTH=<depth+1>` (nesting guard unchanged).
+  `PI_SUBAGENTS_VFLO_DEPTH=<depth+1>` (nesting guard unchanged). The session
+  directory is passed explicitly from the parent session manager; it is not
+  inferred from inherited session metadata.
 - In Herdr, depth is additionally injected with `--env` so the *pane shell*
   carries it; the pi process inherits it from the pane.
 - Herdr child startup retains `--no-extensions` and explicitly adds the

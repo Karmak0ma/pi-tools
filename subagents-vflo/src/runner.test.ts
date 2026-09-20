@@ -1,10 +1,23 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { NESTING_DEPTH_ENV, currentNestingDepth, runChild, nestingDepthRefusal } from "./runner.js";
+import { NESTING_DEPTH_ENV, createSubagentSessionDir, currentNestingDepth, runChild, nestingDepthRefusal } from "./runner.js";
 import { FakeRpcChild as FakeChild } from "./fake-rpc-child.js";
 import { MAX_NESTING_DEPTH } from "./types.js";
+
+function findInstalledPackageDir(packageName: string): string {
+  let directory = path.dirname(fileURLToPath(import.meta.url));
+  while (true) {
+    const packageDir = path.join(directory, "node_modules", packageName);
+    if (fs.existsSync(path.join(packageDir, "package.json"))) return packageDir;
+    const parent = path.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  throw new Error(`Cannot locate Pi host package ${packageName}; re-verify the /resume listing invariant manually`);
+}
 
 describe("runChild nesting depth guard", () => {
   it("counts subagent generations from the env marker", () => {
@@ -74,6 +87,98 @@ describe("runChild nesting depth guard", () => {
       expect(childEvents.length).toBeGreaterThan(0);
     } finally {
       vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("runChild session storage", () => {
+  it("keeps nested child JSONL out of Pi's parent session listing", async () => {
+    // Use the installed host implementation rather than duplicating its
+    // directory scan here. This guards the /resume invariant that lets child
+    // directories live below the parent's project session directory.
+    const hostPackageDir = findInstalledPackageDir("@earendil-works/pi-coding-agent");
+    const hostSessionManagerPath = path.join(hostPackageDir, "dist/core/session-manager.js");
+    if (!fs.existsSync(hostSessionManagerPath)) {
+      throw new Error("Pi host session-manager.js layout changed; re-verify the /resume listing invariant manually");
+    }
+    const { SessionManager } = await import(pathToFileURL(hostSessionManagerPath).href);
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-agent-dir-"));
+    const parentSessionDir = path.join(agentDir, "sessions", "--tmp-subagents-vflo-session-list--");
+    fs.mkdirSync(parentSessionDir, { recursive: true });
+    const cwd = "/tmp/subagents-vflo-session-list";
+    const parentSessionFile = path.join(parentSessionDir, "20260101_120000_parent.jsonl");
+    const childSessionDir = fs.mkdtempSync(path.join(parentSessionDir, "pi-subagent-"));
+    vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+    try {
+      const sessionHeader = (id: string) =>
+        JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-01-01T12:00:00.000Z", cwd });
+      const userMessage = (id: string, text: string) =>
+        JSON.stringify({
+          type: "message",
+          id,
+          parentId: null,
+          timestamp: "2026-01-01T12:00:01.000Z",
+          message: { role: "user", content: [{ type: "text", text }] },
+        });
+      fs.writeFileSync(parentSessionFile, `${sessionHeader("parent")}\n${userMessage("parent-message", "parent")}\n`);
+      fs.writeFileSync(
+        path.join(childSessionDir, "20260101_120001_child.jsonl"),
+        `${sessionHeader("child")}\n${userMessage("child-message", "child")}\n`,
+      );
+
+      const sessions = await SessionManager.list(cwd, parentSessionDir);
+      expect(sessions.map((session: { path: string }) => session.path)).toEqual([parentSessionFile]);
+
+      // Interactive /resume uses listAll() for the default project session
+      // directory. Verify that path too, not only the custom-directory branch.
+      const allSessions = await SessionManager.listAll();
+      expect(allSessions.map((session: { path: string }) => session.path)).toEqual([parentSessionFile]);
+    } finally {
+      vi.unstubAllEnvs();
+      fs.rmSync(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to /tmp when the parent session directory is unavailable", async () => {
+    const blockingRoot = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-blocking-root-"));
+    const blockingPath = path.join(blockingRoot, "not-a-directory");
+    fs.writeFileSync(blockingPath, "");
+    let childSessionDir = "";
+    try {
+      childSessionDir = await createSubagentSessionDir(blockingPath);
+      expect(path.dirname(childSessionDir)).toBe(os.tmpdir());
+    } finally {
+      if (childSessionDir) fs.rmSync(childSessionDir, { recursive: true, force: true });
+      fs.rmSync(blockingRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("creates an isolated child directory below the parent Pi session directory", async () => {
+    const parentSessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-parent-session-"));
+    let childSessionDir = "";
+    try {
+      const child = new FakeChild([]);
+      const result = await runChild({
+        resolvedTools: ["bash"],
+        resolvedCwd: "/tmp",
+        agentName: "worker",
+        agentPrompt: "",
+        taskText: "task",
+        parentSessionDir,
+        spawnProcess: ((_command: string, args: string[]) => {
+          const sessionDirFlag = args.indexOf("--session-dir");
+          childSessionDir = args[sessionDirFlag + 1];
+          return child;
+        }) as any,
+      });
+
+      expect(result.lifecycle).toBe("closed");
+      expect(path.dirname(childSessionDir)).toBe(parentSessionDir);
+      expect(path.basename(childSessionDir)).toMatch(/^pi-subagent-/);
+      expect(fs.existsSync(childSessionDir)).toBe(true);
+      expect(fs.readdirSync(parentSessionDir).filter((entry) => entry.endsWith(".jsonl"))).toEqual([]);
+    } finally {
+      fs.rmSync(parentSessionDir, { recursive: true, force: true });
     }
   });
 });

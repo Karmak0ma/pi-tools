@@ -10,7 +10,7 @@ A pi extension that enables delegating tasks to specialized subagents running in
 - **TUI Inspector** — Visual inspector mode to monitor subagent progress in real-time
 - **Live streaming** — See subagent output as it's generated
 - **Live usage header** — Track input, output, cached tokens, and context-window utilization while each subagent works
-- **Persistent child history** — Store each child session as an isolated JSONL file under `/tmp`
+- **Persistent child history** — Store each child session as an isolated JSONL file below the parent Pi session directory
 - **Context-aware abort** — Graceful SIGTERM → SIGKILL escalation with timer cleanup
 - **Agent discovery** — Built-in, user, and project agents with clear override precedence
 - **Child extension UI bridge** — Blocking RPC dialogs are presented as parent-side modals with FIFO ownership and fail-closed cancellation
@@ -105,17 +105,26 @@ in the inspector, but the inspector is not a second response path.
 
 ## Child session storage
 
-Each child runs with pi session persistence enabled, using a unique directory under
-`/tmp/pi-subagent-*`. The session JSONL file is normally nested below that
-directory according to pi's working-directory layout, for example:
+Each child runs with pi session persistence enabled. When the parent session is
+persistent, the extension creates a unique child directory below the exact
+project session directory returned by the parent Pi session manager. With the
+default Pi configuration, that parent directory is below
+`~/.pi/agent/sessions/--path-to-project--/`, so child history appears for
+example at:
 
 ```text
-/tmp/pi-subagent-AbCd12/--path-to-project--/20260101_120000_uuid.jsonl
+~/.pi/agent/sessions/--path-to-project--/pi-subagent-AbCd12/20260101_120000_uuid.jsonl
 ```
 
-The child session directory and JSONL history remain after the child exits so
-they can be inspected. The generated system-prompt file is removed, but the
-session history is left for normal `/tmp` cleanup.
+The unique child directory is intentional: the inspector's watcher can scan
+it without also consuming the parent or a sibling child's messages. Pi's
+session list remains limited to direct `.jsonl` files, so nested child history
+does not pollute `/resume`. The child session directory and JSONL history
+remain after the child exits so they can be inspected; there is no automatic
+history cleanup, so remove stale `pi-subagent-*` directories manually when
+needed. If the parent is running with `--no-session` or its session directory
+is unavailable, the extension falls back to a unique `/tmp/pi-subagent-*`
+directory.
 
 ## Herdr execution backend
 

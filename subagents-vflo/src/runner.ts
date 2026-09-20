@@ -88,17 +88,29 @@ export function getPiInvocation(args: string[]): { command: string; args: string
   return { command: "pi", args };
 }
 
-// ─── Temp Session Management ─────────────────────────────────────────────────
+// ─── Session Management ──────────────────────────────────────────────────────
 
 /**
  * Create a private session directory for one child.
  *
- * Child sessions are intentionally isolated from the parent's normal session
- * directory, but they are now persisted so their JSONL histories can be
- * inspected after the child exits. A unique directory also prevents parallel
- * children from sharing pi's per-working-directory session index.
+ * When the parent has a persistent session, its session manager directory is
+ * used as the storage root. Each child still gets a unique subdirectory so
+ * the JSONL watcher cannot mistake the parent or a sibling child session for
+ * this child. In-memory parents have no usable session directory, so they
+ * retain the old temporary-storage behavior.
  */
-export async function createSubagentSessionDir(): Promise<string> {
+export async function createSubagentSessionDir(parentSessionDir?: string): Promise<string> {
+  if (parentSessionDir) {
+    try {
+      await fs.promises.mkdir(parentSessionDir, { recursive: true });
+      return await fs.promises.mkdtemp(path.join(parentSessionDir, "pi-subagent-"));
+    } catch {
+      // A custom parent session directory may be unavailable. Do not prevent
+      // the delegated task from running when Pi itself can still persist a
+      // child session in the process temporary directory.
+    }
+  }
+
   return fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
 }
 
@@ -170,6 +182,8 @@ export interface RunChildOptions {
   taskText: string;
   thinking?: ThinkingLevel;
   childExtensionPaths?: string[];
+  /** Parent Pi session directory where this child's isolated directory is created. */
+  parentSessionDir?: string;
   /** Test seam for deterministic JSONL transport tests; production uses spawn. */
   spawnProcess?: typeof spawn;
   signal?: AbortSignal;
@@ -240,6 +254,7 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
     taskText,
     thinking,
     childExtensionPaths,
+    parentSessionDir,
     spawnProcess,
     signal,
     onEvent,
@@ -257,10 +272,13 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
   const refusal = nestingDepthRefusal(agentName);
   if (refusal) return refusal;
 
-  // Keep each child history in its own /tmp directory. Do not use
-  // --no-session: the resulting JSONL file is useful for post-run inspection,
-  // while the unique directory keeps it separate from the parent's history.
-  const sessionDir = await createSubagentSessionDir();
+  // Keep each child history in its own directory. Prefer a unique directory
+  // below the parent's Pi session directory so the history survives outside
+  // /tmp; the helper falls back to /tmp for an in-memory/unavailable parent.
+  // Do not use --no-session: the resulting JSONL file is useful for post-run
+  // inspection, while the unique directory keeps it separate from the
+  // parent's history.
+  const sessionDir = await createSubagentSessionDir(parentSessionDir);
   const args: string[] = ["--mode", "rpc", "--session-dir", sessionDir, "--no-extensions"];
   if (childExtensionPaths && childExtensionPaths.length > 0) {
     for (const extPath of childExtensionPaths) {

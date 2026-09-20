@@ -40,6 +40,8 @@ export interface SubagentSpec {
   taskText: string;
   thinking?: ThinkingLevel;
   childExtensionPaths?: string[];
+  /** Parent Pi session directory where this child stores its isolated history. */
+  parentSessionDir?: string;
   /** Tool-call abort signal for the parent's subagent tool invocation. */
   signal?: AbortSignal;
   /** Observation callbacks. The Herdr backend emits synthetic session events. */

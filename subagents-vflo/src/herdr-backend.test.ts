@@ -235,6 +235,21 @@ describe("Herdr child extension wiring", () => {
 // ─── Happy path ──────────────────────────────────────────────────────────────
 
 describe("HerdrBackend happy path", () => {
+  it("stores the child session below the parent Pi session directory", async () => {
+    const parentSessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-parent-session-"));
+    tempDirs.push(parentSessionDir);
+    const fake = new FakeHerdr();
+    const handle = await makeBackend(fake).spawn(makeSpec({ parentSessionDir, agentPrompt: "" }));
+    const childSessionDir = sessionDirOf(fake);
+
+    expect(path.dirname(childSessionDir)).toBe(parentSessionDir);
+    expect(path.basename(childSessionDir)).toMatch(/^pi-subagent-/);
+
+    appendAssistant(childSessionDir, { content: [{ type: "text", text: "done" }], stopReason: "stop" });
+    await handle.result;
+    expect(fs.readdirSync(parentSessionDir).filter((entry) => entry.endsWith(".jsonl"))).toEqual([]);
+  });
+
   it("splits a pane, starts pi, injects the task, and delivers the result on a normal settle", async () => {
     vi.stubEnv(NESTING_DEPTH_ENV, "0");
     const fake = new FakeHerdr();

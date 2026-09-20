@@ -624,7 +624,7 @@ async function spawnSubagentInHerdr(
   const refusal = nestingDepthRefusal(spec.agentName);
   if (refusal) return { result: Promise.resolve(refusal) };
 
-  const sessionDir = await createSubagentSessionDir();
+  const sessionDir = await createSubagentSessionDir(spec.parentSessionDir);
   let promptFilePath: string | null = null;
   if (spec.agentPrompt.trim()) {
     // Same mechanism as the RPC runner: the agent definition rides in via

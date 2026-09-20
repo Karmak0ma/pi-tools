@@ -7,7 +7,7 @@
  * Adapted from the official pi subagent example.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { discoverAgents, findAgent, formatAgentList } from "./agents.js";
 import { renderCall, renderResult } from "./render.js";
@@ -69,6 +69,20 @@ const SubagentParams = Type.Object({
 });
 
 // ─── Extension Entry ─────────────────────────────────────────────────────────
+
+/**
+ * Read the parent's storage directory without making persistence a runtime
+ * requirement. In-memory sessions return an empty directory, while older or
+ * custom hosts may omit the accessor or reject the lookup; both cases are
+ * handled by the backend's temporary-storage fallback.
+ */
+function getParentSessionDir(ctx: Pick<ExtensionContext, "sessionManager">): string | undefined {
+  try {
+    return ctx.sessionManager?.getSessionDir?.();
+  } catch {
+    return undefined;
+  }
+}
 
 export default function (pi: ExtensionAPI) {
   const tracker = new SubagentTracker();
@@ -357,6 +371,8 @@ export default function (pi: ExtensionAPI) {
       };
       if (signal) signal.addEventListener("abort", cancelInvocation, { once: true });
 
+      const parentSessionDir = getParentSessionDir(ctx);
+
       let results: PersistedTaskSummary[];
       try {
         results = await mapWithConcurrencyLimit(
@@ -454,6 +470,7 @@ export default function (pi: ExtensionAPI) {
               taskText: task.task,
               thinking: instance.thinking,
               childExtensionPaths: toolResolutionOptions.childExtensionPaths,
+              parentSessionDir,
               signal,
               // Pane geometry hint (Herdr only): first task right, the rest
               // stacked down so a concurrent batch cannot shrink the parent
