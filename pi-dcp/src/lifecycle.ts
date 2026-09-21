@@ -17,7 +17,7 @@ import { createEnvelope, isOperationEnvelope, OPERATION_CUSTOM_TYPE, type OpEnve
 import { reduceEnvelope, markAvailability, type ReducedState } from "./state/reducer.ts";
 import { clearBaselines, disableRuntime, invalidateSnapshot, publishBaseline, resetSemanticNudges, runtimeSessionIdentity, setDcpToolActive, type DcpRuntime } from "./runtime.ts";
 import { modelKey } from "./identity/snapshot.ts";
-import { buildSystemGuidance } from "./prompts/defaults.ts";
+import { buildSystemGuidance, DCP_SYSTEM_SECTION } from "./prompts/defaults.ts";
 import { estimatePotentialSavings, evaluateSemanticNudge } from "./transform/semantic-nudge.ts";
 import { persistMissingSavingsBestEffort, persistSavingsBestEffort } from "./stats.ts";
 import { bindCompressionProvenance } from "./compression/tool.ts";
@@ -45,7 +45,7 @@ export function registerLifecycle(pi: ExtensionAPI, runtime: DcpRuntime): void {
     runtime.semanticIterationsSinceNudge++;
     if (lastAssistantContainsCompress(ctx)) runtime.pendingNudge = undefined;
   });
-  pi.on("before_agent_start", async (event, ctx) => beforeAgentStart(event, ctx, runtime));
+  pi.on("before_agent_start", (event, ctx) => beforeAgentStart(event, ctx, runtime));
   pi.on("context", async (event: ContextEvent, ctx) => transformContext(event, ctx, runtime));
   // The nudge suffix would otherwise carry the provider's rolling prompt-cache
   // breakpoint, which no later request can ever read back.
@@ -107,6 +107,8 @@ async function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext, r
   runtime.lastNudgeTurn = undefined;
   runtime.lastNudgeEvaluation = undefined;
   runtime.pendingManual = undefined;
+  runtime.promptSectionsUnavailable = false;
+  runtime.promptSectionsRecoveryAllowed = false;
   runtime.mutationBlocked = false;
   runtime.valid = !runtime.reduced.corruptReason && runtime.config.enabled && !runtime.warnedReasonCodes.has("tool_collision");
   runtime.lastReadiness = runtime.valid
@@ -116,8 +118,7 @@ async function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext, r
   // only auto-activates a genuinely new tool name on its registry rebuild, so
   // a name that was ever deactivated (e.g. a prior `deny`/invalid session)
   // stays inactive across `/reload` unless explicitly re-added here.
-  if (runtime.valid) setDcpToolActive(pi, runtime.config.compress.permission !== "deny");
-  else setDcpToolActive(pi, false);
+  setConfiguredCompressionTool(runtime, runtime.valid);
   if (loaded.error) runtime.logger.diagnostic({ reason: "config_layer_invalid" });
   void event;
 }
@@ -145,22 +146,98 @@ async function rebase(ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionA
     if (runtime.reduced.corruptReason) {
       runtime.valid = false;
       runtime.lastReadiness = { ready: false, reason: "state_invalidated", generation: runtime.generation };
-      setDcpToolActive(pi, false);
+      setConfiguredCompressionTool(runtime, false);
     }
   });
 }
 
-async function beforeAgentStart(event: BeforeAgentStartEvent, _ctx: ExtensionContext, runtime: DcpRuntime): Promise<{ systemPrompt: string }> {
+function beforeAgentStart(event: BeforeAgentStartEvent, _ctx: ExtensionContext, runtime: DcpRuntime): undefined {
+  // Pi 0.86 owns the rendered system prompt and persists named sections as
+  // system-message patches. Mutate the normalized options in place so Pi can
+  // diff this section against the replayed transcript. Returning a complete
+  // `systemPrompt` would force Pi to install an opaque prompt projection and
+  // discard the cache-preserving section diff for this run.
+  const sections = event.systemPromptOptions?.sections;
+  if (!sections) {
+    handleMissingPromptSections(runtime);
+    return undefined;
+  }
+
+  recoverPromptSections(runtime);
+
+  // `runtime.valid` is false only for a disabled/unavailable extension state,
+  // not for a transient snapshot or projection fallback. Keep stable guidance
+  // through transient failures; removing and re-adding it would flap the
+  // system prefix and make every recovery request miss the provider cache.
+  if (!runtime.valid || !runtime.config.enabled) {
+    delete sections[DCP_SYSTEM_SECTION];
+    return undefined;
+  }
+
   // The guidance carries the compression selection rules, including the
   // turn-relative ones, so no per-request message has to restate them. It is
-  // built from config rather than being a constant, but config is fixed for a
-  // session, so the system prefix stays byte-stable and cacheable.
-  //
+  // built only from config, not live usage, aliases, timestamps, generations,
+  // or nudge state. An unchanged config therefore produces identical bytes.
+  const guidance = buildSystemGuidance(runtime.config);
+  let sectionPublished = false;
+  try {
+    sections[DCP_SYSTEM_SECTION] = guidance;
+    sectionPublished = sections[DCP_SYSTEM_SECTION] === guidance;
+  } catch { /* a frozen/proxy host object is an unsupported capability */ }
+  if (!sectionPublished) {
+    handleMissingPromptSections(runtime);
+    return undefined;
+  }
+
   // Nudges are operation-backed for replay/audit; their model-visible delivery
   // stays transient and happens in the nudge suffix of context, because a
   // per-request byte in the system channel would invalidate the whole
   // conversation cache (see prompts/nudge.ts).
-  return { systemPrompt: `${event.systemPrompt}\n\n${buildSystemGuidance(runtime.config)}` };
+  return undefined;
+}
+
+/**
+ * Disable DCP once when a host cannot provide structured prompt sections.
+ *
+ * The state is intentionally recoverable. Pi 0.86 always supplies this shape,
+ * but a version mismatch or malformed test/integration host must not cause a
+ * permanent session kill-switch if a later event restores the capability.
+ */
+function handleMissingPromptSections(runtime: DcpRuntime): void {
+  if (runtime.promptSectionsUnavailable) return;
+  runtime.promptSectionsUnavailable = true;
+  runtime.promptSectionsRecoveryAllowed = runtime.valid && !runtime.mutationBlocked;
+  disableRuntime(runtime, "capability_missing");
+  runtime.pendingNudge = undefined;
+  setConfiguredCompressionTool(runtime, false);
+}
+
+/** Restore DCP after a transient event-shape mismatch when state is safe. */
+function recoverPromptSections(runtime: DcpRuntime): void {
+  if (!runtime.promptSectionsUnavailable || !runtime.promptSectionsRecoveryAllowed) return;
+  // Restore only the valid state that this capability check interrupted. The
+  // mutation guard and reducer/tool checks prevent a later normalized event
+  // from clearing an unrelated branch, shutdown, corruption, or collision
+  // invalidation while the prompt shape was unavailable.
+  const canRecover = runtime.config.enabled
+    && !runtime.mutationBlocked
+    && !runtime.reduced.corruptReason
+    && !runtime.warnedReasonCodes.has("tool_collision");
+  if (!canRecover) return;
+
+  runtime.promptSectionsUnavailable = false;
+  runtime.promptSectionsRecoveryAllowed = false;
+  runtime.warnedReasonCodes.delete("capability_missing");
+  runtime.valid = true;
+  runtime.generation++;
+  runtime.lastReadiness = { ready: false, reason: "state_invalidated", generation: runtime.generation };
+  setConfiguredCompressionTool(runtime, true);
+}
+
+function setConfiguredCompressionTool(runtime: DcpRuntime, active: boolean): void {
+  try {
+    if (runtime.pi) setDcpToolActive(runtime.pi, active && runtime.config.compress.permission !== "deny");
+  } catch { /* tool activation must never break the agent turn */ }
 }
 
 async function transformContext(event: ContextEvent, ctx: ExtensionContext, runtime: DcpRuntime): Promise<{ messages: AgentMessage[] }> {

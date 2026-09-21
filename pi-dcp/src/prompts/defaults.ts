@@ -1,6 +1,16 @@
 import type { EffectiveConfig } from "../config/defaults.ts";
 
 /**
+ * The single structured prompt section owned by pi-dcp.
+ *
+ * Keep this key stable. Pi persists named system sections and diffs them by
+ * key, so changing the key would create a second durable guidance section and
+ * leave the old one in resumed sessions. The value is intentionally separate
+ * from transient nudges, which belong at the outgoing context tail instead.
+ */
+export const DCP_SYSTEM_SECTION = "pi_dcp_context_compression";
+
+/**
  * Configuration this module needs to describe selection rules accurately.
  * Deliberately narrow: the guidance must depend only on the settings that
  * actually change which units the model may select, so an unrelated config

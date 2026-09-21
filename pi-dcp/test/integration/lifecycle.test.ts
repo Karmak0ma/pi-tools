@@ -9,6 +9,7 @@ import { defaults } from "../../src/config/defaults.ts";
 import { emptyState } from "../../src/state/reducer.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
 import { registerLifecycle } from "../../src/lifecycle.ts";
+import { DCP_SYSTEM_SECTION } from "../../src/prompts/defaults.ts";
 import { sha256 } from "../../src/util/hash.ts";
 
 describe("extension capability gate", () => {
@@ -265,7 +266,72 @@ describe("extension capability gate", () => {
     }
   });
 
-  it("materializes an automatic nudge on the next agent request", async () => {
+  it("fails closed and recovers when structured options are absent", async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+    const runtime = createRuntime();
+    const diagnostics: unknown[] = [];
+    runtime.logger = { diagnostic: (diagnostic) => { diagnostics.push(diagnostic); } };
+    registerLifecycle({
+      on: (name: string, handler: (event: any, ctx: any) => unknown) => { handlers.set(name, handler); },
+    } as any, runtime);
+
+    // Pi 0.86 always supplies normalized options. This guard keeps an older
+    // or malformed host event from throwing inside the lifecycle hook while
+    // the support matrix decides whether that host is certified.
+    const result = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, {}) as any;
+
+    expect(result).toBeUndefined();
+    expect(runtime.valid).toBe(false);
+    expect(runtime.lastReadiness).toMatchObject({ ready: false, reason: "capability_missing" });
+    expect(diagnostics).toEqual([{ reason: "capability_missing" }]);
+
+    await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, {});
+    expect(diagnostics).toHaveLength(1);
+
+    const recoveredSections: Record<string, string> = {};
+    const recoveredEvent = { systemPrompt: "base", systemPromptOptions: { sections: recoveredSections } };
+    await handlers.get("before_agent_start")?.(recoveredEvent, {});
+
+    expect(runtime.valid).toBe(true);
+    expect(runtime.promptSectionsUnavailable).toBe(false);
+    expect(recoveredSections[DCP_SYSTEM_SECTION]).toBeDefined();
+  });
+
+  it("does not recover prompt capability over corrupt persisted state", async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+    const runtime = createRuntime();
+    runtime.reduced.corruptReason = "state_conflict";
+    registerLifecycle({
+      on: (name: string, handler: (event: any, ctx: any) => unknown) => { handlers.set(name, handler); },
+    } as any, runtime);
+
+    await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, {});
+    const sections: Record<string, string> = {};
+    await handlers.get("before_agent_start")?.({ systemPrompt: "base", systemPromptOptions: { sections } }, {});
+
+    expect(runtime.valid).toBe(false);
+    expect(runtime.promptSectionsUnavailable).toBe(true);
+    expect(sections[DCP_SYSTEM_SECTION]).toBeUndefined();
+  });
+
+  it("does not recover prompt capability while lifecycle mutation is blocked", async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+    const runtime = createRuntime();
+    registerLifecycle({
+      on: (name: string, handler: (event: any, ctx: any) => unknown) => { handlers.set(name, handler); },
+    } as any, runtime);
+
+    await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, {});
+    runtime.mutationBlocked = true;
+    const sections: Record<string, string> = {};
+    await handlers.get("before_agent_start")?.({ systemPrompt: "base", systemPromptOptions: { sections } }, {});
+
+    expect(runtime.valid).toBe(false);
+    expect(runtime.promptSectionsUnavailable).toBe(true);
+    expect(sections[DCP_SYSTEM_SECTION]).toBeUndefined();
+  });
+
+  it("keeps automatic nudge state out of the structured system section", async () => {
     const handlers = new Map<string, (event: any, ctx: any) => unknown>();
     const runtime = createRuntime();
     runtime.generation = 7;
@@ -281,12 +347,110 @@ describe("extension capability gate", () => {
       on: (name: string, handler: (event: any, ctx: any) => unknown) => { handlers.set(name, handler); },
     } as any, runtime);
 
-    const result = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, {
+    const nudgedSections: Record<string, string> = { host_guidance: "keep this" };
+    const nudgedEvent = { systemPrompt: "base", systemPromptOptions: { sections: nudgedSections } };
+    runtime.pendingNudge = {
+      band: "critical",
+      kind: "context",
+      nudgeKey: "SENTINEL_NUDGE_KEY",
+    };
+    const result = await handlers.get("before_agent_start")?.(nudgedEvent, {
       sessionManager: { getBranch: () => [] },
     }) as any;
 
-    expect(result.message).toBeUndefined();
-    expect(result.systemPrompt).toContain("Never invent labels");
+    const baselineRuntime = createRuntime();
+    const baselineHandlers = new Map<string, (event: any, ctx: any) => unknown>();
+    registerLifecycle({
+      on: (name: string, handler: (event: any, ctx: any) => unknown) => { baselineHandlers.set(name, handler); },
+    } as any, baselineRuntime);
+    const baselineSections: Record<string, string> = { host_guidance: "keep this" };
+    const baselineEvent = { systemPrompt: "base", systemPromptOptions: { sections: baselineSections } };
+    await baselineHandlers.get("before_agent_start")?.(baselineEvent, {
+      sessionManager: { getBranch: () => [] },
+    });
+
+    expect(result).toBeUndefined();
+    expect(JSON.stringify(nudgedEvent)).not.toContain("SENTINEL_NUDGE_KEY");
+    expect(nudgedEvent.systemPrompt).toBe(baselineEvent.systemPrompt);
+    expect(nudgedSections).toEqual(baselineSections);
+    expect(Object.keys(nudgedSections)).toEqual(["host_guidance", DCP_SYSTEM_SECTION]);
+  });
+
+  it("publishes deterministic guidance in one structured system section", async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+    const runtime = createRuntime();
+    registerLifecycle({
+      on: (name: string, handler: (event: any, ctx: any) => unknown) => { handlers.set(name, handler); },
+    } as any, runtime);
+
+    const sections: Record<string, string> = { host_guidance: "keep this" };
+    const event = { systemPrompt: "base", systemPromptOptions: { sections } };
+    const result = await handlers.get("before_agent_start")?.(event, {}) as any;
+    const firstValue = sections[DCP_SYSTEM_SECTION];
+    const firstKeys = Object.keys(sections);
+
+    expect(result).toBeUndefined();
+    expect(DCP_SYSTEM_SECTION).toBe("pi_dcp_context_compression");
+    expect(firstValue).toContain("Never invent labels");
+    expect(firstKeys).toEqual(["host_guidance", DCP_SYSTEM_SECTION]);
+    expect(event.systemPromptOptions.sections).toBe(sections);
+
+    // Live request state must not alter the stable section bytes. The same
+    // object and key stay in place so Pi can keep its structured-section
+    // ordering and emit no unnecessary prompt patch.
+    runtime.generation = 99;
+    runtime.turnCount = 12345;
+    runtime.pendingNudge = { band: "critical", kind: "context", nudgeKey: "request-specific-nudge" };
+    runtime.lastReadiness = { ready: false, reason: "projection_unsupported", generation: 99 };
+    const secondResult = await handlers.get("before_agent_start")?.(event, {}) as any;
+
+    expect(secondResult).toBeUndefined();
+    expect(sections[DCP_SYSTEM_SECTION]).toBe(firstValue);
+    expect(Object.keys(sections)).toEqual(firstKeys);
+    expect(firstValue).not.toContain("request-specific-nudge");
+    expect(firstValue).not.toContain("12345");
+  });
+
+  it("updates the same structured section when a guidance setting changes", async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+    const runtime = createRuntime();
+    registerLifecycle({
+      on: (name: string, handler: (event: any, ctx: any) => unknown) => { handlers.set(name, handler); },
+    } as any, runtime);
+    const sections: Record<string, string> = {};
+    const event = { systemPrompt: "base", systemPromptOptions: { sections } };
+
+    await handlers.get("before_agent_start")?.(event, {});
+    const original = sections[DCP_SYSTEM_SECTION];
+    runtime.config.turnProtection = { enabled: true, turns: 4 };
+    await handlers.get("before_agent_start")?.(event, {});
+
+    expect(sections[DCP_SYSTEM_SECTION]).not.toBe(original);
+    expect(sections[DCP_SYSTEM_SECTION]).toContain("The 4 most recent user turns are still live");
+    expect(Object.keys(sections)).toEqual([DCP_SYSTEM_SECTION]);
+  });
+
+  it("removes guidance when DCP is disabled or unavailable", async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+    const runtime = createRuntime();
+    registerLifecycle({
+      on: (name: string, handler: (event: any, ctx: any) => unknown) => { handlers.set(name, handler); },
+    } as any, runtime);
+    const sections: Record<string, string> = { [DCP_SYSTEM_SECTION]: "stale guidance" };
+    const event = { systemPrompt: "base", systemPromptOptions: { sections } };
+
+    runtime.config.enabled = false;
+    await handlers.get("before_agent_start")?.(event, {});
+    expect(sections[DCP_SYSTEM_SECTION]).toBeUndefined();
+
+    runtime.config.enabled = true;
+    runtime.valid = true;
+    await handlers.get("before_agent_start")?.(event, {});
+    expect(sections[DCP_SYSTEM_SECTION]).toContain("Never invent labels");
+
+    runtime.valid = false;
+    await handlers.get("before_agent_start")?.(event, {});
+    expect(sections[DCP_SYSTEM_SECTION]).toBeUndefined();
   });
 
   it("delivers a nudge after settled pruning advances the runtime generation", async () => {
@@ -332,8 +496,11 @@ describe("extension capability gate", () => {
       const nudge = [...runtime.reduced.nudges.values()][0];
       expect(nudge?.configGeneration).toBe(runtime.generation);
 
-      const result = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, ctx) as any;
-      expect(result.message).toBeUndefined();
+      const sections: Record<string, string> = {};
+      const event = { systemPrompt: "base", systemPromptOptions: { sections } };
+      const result = await handlers.get("before_agent_start")?.(event, ctx) as any;
+      expect(result).toBeUndefined();
+      expect(event.systemPromptOptions.sections[DCP_SYSTEM_SECTION]).toContain("Never invent labels");
       expect(runtime.pendingNudge?.nudgeKey).toBe(nudge?.nudgeKey);
     } finally {
       if (previousStatsDir === undefined) delete process.env.PI_CODING_AGENT_DIR;

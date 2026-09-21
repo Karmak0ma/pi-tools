@@ -642,7 +642,7 @@ Turn protection counts canonical user turns, excludes DCP custom metadata, and p
 
 ## 13. Prompting and manual mode
 
-Append, never replace, a fixed built-in system guidance segment in `before_agent_start`. It covers semantic closure, summary fidelity, current range schema, protocol-unit aliases, placeholders, protected content, snapshot freshness, and manual mode. No custom prompt store exists.
+On the adopted Pi 0.86.1 host, mutate one owned `systemPromptOptions.sections` entry in `before_agent_start` instead of returning a complete `systemPrompt` replacement. The section covers semantic closure, summary fidelity, current range schema, protocol-unit aliases, placeholders, protected content, snapshot freshness, and manual mode. Stable guidance is deterministic for the effective DCP configuration; live usage and transient nudges stay out of the section. No custom prompt store exists. Older Pi behavior remains uncertified until the support matrix and peer-version policy are resolved.
 
 Nudges are ephemeral and deduplicated by canonical anchor, nudge kind, and config generation. Heuristic estimates may trigger soft/strong nudges but are labeled estimates and never drive native-compaction cancellation.
 

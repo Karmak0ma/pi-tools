@@ -83,6 +83,12 @@ export interface DcpRuntime {
    */
   pendingFallbackNotice?: string;
   mutationBlocked: boolean;
+  /**
+   * Missing prompt capability may recover only if it interrupted a valid,
+   * unblocked runtime; see recoverPromptSections in lifecycle.ts.
+   */
+  promptSectionsUnavailable: boolean;
+  promptSectionsRecoveryAllowed: boolean;
   logger: Logger;
   pi?: ExtensionAPI;
   pendingNudge?: { band: "soft" | "imperative" | "critical"; kind?: "context" | "turn" | "iteration"; nudgeKey: string };
@@ -108,6 +114,8 @@ export function createRuntime(pi?: ExtensionAPI): DcpRuntime {
     lastReadiness: { ready: false, reason: "extension_disabled", generation: 0 },
     warnedReasonCodes: new Set(),
     mutationBlocked: false,
+    promptSectionsUnavailable: false,
+    promptSectionsRecoveryAllowed: false,
     logger: createLogger("0.2.0"),
     pi,
   };
