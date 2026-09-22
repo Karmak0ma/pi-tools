@@ -54,6 +54,8 @@ export interface DcpRuntime {
     adapterId?: string;
     generation: number;
   };
+  /** DCP state used for the last outgoing request; Pi cannot see DCP-only mutations. */
+  lastOutgoingContext?: { generation: number; dcpEnabled: boolean };
   lastModel?: ModelKey;
   lastSettledSuffixHash?: string;
   turnCount: number;

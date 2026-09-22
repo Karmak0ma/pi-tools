@@ -386,69 +386,46 @@ Pi already stops warming on model switch, native compaction, and branch navigati
 
 ### 7.2 DCP-specific stale-prefix risk
 
-DCP can know that the next real provider request will differ even when Pi's persisted message history changed only through a non-context DCP operation. Examples include:
+Pi's cache warmer replays the exact context captured for its last real request. It validates model and session-message identity, but it cannot see DCP-only operation state. A compression, block activation, automatic pruning, configuration change, or lifecycle invalidation can make DCP's next outgoing context differ even when Pi's ordinary session messages still look like a reusable prefix.
 
-- a new active compression block;
-- a decompression or recompression;
-- tool-pruning state applied by DCP;
-- a pending transient nudge;
-- an invalidated DCP generation awaiting publication;
-- mutation-blocked branch or compaction transition state;
-- projection fallback that will send raw context instead of the last transformed context.
+These changes advance DCP's generation or change whether DCP transforms the outgoing context. Warming can be stale when either fact no longer matches the last outgoing request.
 
-Warming the previous request in those states may pay for a prefix that DCP will not reuse.
+### 7.3 Implemented conservative policy
 
-### 7.3 Conservative proposal
+DCP records the generation and enabled state associated with each outgoing `context` result. It returns `{ action: "stop" }` only when Pi proposed `warm` and one of these conditions holds:
 
-DCP may change Pi's `"warm"` to `"stop"` only when it has positive local evidence that the last provider-visible DCP transform is stale.
+- lifecycle mutation is blocked;
+- DCP's current generation differs from the recorded outgoing generation; or
+- DCP's enabled state changed after that outgoing context.
 
-DCP should not override Pi's `"stop"` to `"warm"`. Pi has better information about provider lifetime, cache tier, cost, and continuation probability.
+An unknown outgoing marker is not positive evidence, so it does not cause an override. Pi's own `stop` decision is never overridden to `warm`.
 
-A candidate policy is:
+A pending nudge alone does not stop warming: it is a request-tail addition, not evidence that the stable DCP prefix changed. A failed transform that sent raw context can also be warmed when DCP state has not changed since it was sent. Model, branch, and compaction changes remain Pi-owned cancellation cases. Do not infer staleness from timestamps or approximate message-array equality.
 
-```ts
-if (event.action !== "warm") return;
+### 7.4 Observability and remaining measurement
 
-if (
-  runtime.mutationBlocked
-  || runtime.pendingNudge
-  || !runtime.lastReadiness?.ready
-  || hasUnpublishedDcpGeneration(runtime)
-  || providerVisibleTransformChangedSinceLastRealRequest(runtime)
-) {
-  return { action: "stop" };
-}
-```
+A DCP override emits a metadata-only reason diagnostic with the previous and current generation/enabled state. No prompt, summary, path, argument, or credential is logged.
 
-The two conceptual predicates must be backed by explicit runtime state. Do not infer them from timestamps or approximate array equality.
-
-### 7.4 Observability
-
-Record metadata-only counters:
-
-- Pi decisions observed as warm or stop;
-- DCP warm decisions changed to stop;
-- DCP stop reason code;
-- whether the next real request changed the transformed prefix;
-- estimated warm cost and miss cost, without message content.
-
-This permits validation of whether DCP is preventing real waste or stopping useful warming too often.
+This records why DCP stopped a warm, but it does not prove the next transformed provider prefix changed or quantify savings. Provider-specific cache-breakpoint behavior and economic effectiveness remain unmeasured. Do not claim a cost benefit until payload fixtures or optional live checks establish one.
 
 ### 7.5 Validation plan
 
-Test:
+Deterministic lifecycle tests cover:
 
-1. Pi stop remains stop;
-2. a stable, ready DCP state does not override warm;
-3. pending compression-state publication stops warming;
-4. pending transient nudge stops warming;
-5. projection fallback stops warming;
-6. next real request clears the stop condition where appropriate;
-7. no content, summaries, paths, or tool arguments enter diagnostics;
+1. unknown and stable DCP state do not override `warm`;
+2. Pi's `stop` remains in force;
+3. a generation change stops warming;
+4. DCP enabled/disabled state changes stop warming;
+5. a blocked lifecycle mutation stops warming;
+6. a pending transient nudge alone does not stop warming;
+7. the next outgoing context records the new state;
+8. diagnostics contain only reason and numeric metadata.
+
+Provider payload/cache-breakpoint fixtures and optional live checks remain outside `npm run check` and are required before claiming economic effectiveness.
 
 ### 7.6 Completion criterion
 
-Phase 3 is complete when DCP overrides only proven-stale warm candidates, never forces warming, and measured diagnostics show that each override corresponds to a changed next provider-visible context.
+The initial coordination guard is complete when it preserves Pi's decisions, stops only on the explicit DCP state conditions above, and passes deterministic lifecycle tests. Measuring whether those overrides save cost remains a separate follow-up.
 
 ## 8. Opportunity 4: native-compaction integration
 

@@ -8,7 +8,8 @@ export type ReasonCode =
   | "permission_denied" | "permission_unavailable" | "manual_nonce_required" | "tool_collision"
   | "append_best_effort" | "provider_adapter_unsupported" | "startup_error"
   | "legacy_state_ignored" | "baseline_unavailable" | "alias_overflow" | "previous_extension_changed_context"
-  | "compression_unavailable" | "state_invalidated";
+  | "compression_unavailable" | "state_invalidated"
+  | "cache_warming_generation_changed" | "cache_warming_availability_changed" | "cache_warming_mutation_blocked";
 
 export interface Diagnostic {
   reason: ReasonCode;

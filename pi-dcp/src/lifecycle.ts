@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext, ContextEvent, BeforeAgentStartEvent, SessionStartEvent, SessionBeforeCompactEvent, AgentSettledEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ContextEvent, BeforeAgentStartEvent, CacheWarmingDecisionEvent, SessionStartEvent, SessionBeforeCompactEvent, AgentSettledEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { checkContextCapabilities } from "./capabilities.ts";
 import { loadConfig } from "./config/load.ts";
@@ -22,6 +22,7 @@ import { estimatePotentialSavings, evaluateSemanticNudge } from "./transform/sem
 import { persistMissingSavingsBestEffort, persistSavingsBestEffort } from "./stats.ts";
 import { bindCompressionProvenance } from "./compression/tool.ts";
 import { stripLeakedLabelTags } from "./ui/strip-labels.ts";
+import type { ReasonCode } from "./observability/logger.ts";
 
 export const VERSION = "0.2.0";
 
@@ -50,6 +51,7 @@ export function registerLifecycle(pi: ExtensionAPI, runtime: DcpRuntime): void {
   // The nudge suffix would otherwise carry the provider's rolling prompt-cache
   // breakpoint, which no later request can ever read back.
   pi.on("before_provider_request", (event) => relocateCacheBreakpoint(event.payload));
+  pi.on("cache_warming_decision", (event) => decideCacheWarming(event, runtime));
   // Strip label tags the model wrote into its own reply, before that reply is
   // persisted and becomes context. An echoed tag is indistinguishable from a
   // real label on the next request and is usually wrong (see transform/echo.ts),
@@ -75,6 +77,7 @@ export function registerLifecycle(pi: ExtensionAPI, runtime: DcpRuntime): void {
 }
 
 async function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionAPI): Promise<void> {
+  runtime.lastOutgoingContext = undefined;
   const capability = checkContextCapabilities(ctx);
   if (!capability.ok) {
     disableRuntime(runtime, "capability_missing");
@@ -245,11 +248,13 @@ async function transformContext(event: ContextEvent, ctx: ExtensionContext, runt
   const fallback = deepClone(event.messages);
   if (!runtime.valid) {
     const nudge = buildNudgeMessage(runtime);
+    recordOutgoingContextState(runtime);
     return { messages: nudge ? [...fallback, nudge] : fallback };
   }
   if (runtime.mutationBlocked) {
     runtime.lastReadiness = { ready: false, reason: "state_invalidated", generation: runtime.generation };
     const nudge = buildNudgeMessage(runtime);
+    recordOutgoingContextState(runtime);
     return { messages: nudge ? [...fallback, nudge] : fallback };
   }
   return runtime.mutex.runExclusive(() => {
@@ -302,8 +307,46 @@ async function transformContext(event: ContextEvent, ctx: ExtensionContext, runt
       reason: result.reason,
     };
     const nudge = buildNudgeMessage(runtime);
+    recordOutgoingContextState(runtime);
     return { messages: nudge ? [...result.messages, nudge] : result.messages };
   });
+}
+
+function recordOutgoingContextState(runtime: DcpRuntime): void {
+  // Cache warming replays the last request without running DCP's context hook.
+  // Capture the exact DCP state associated with that request so an operation
+  // appended later cannot make Pi mistake the old transformed prefix as current.
+  runtime.lastOutgoingContext = {
+    generation: runtime.generation,
+    dcpEnabled: runtime.valid && runtime.config.enabled && !runtime.mutationBlocked,
+  };
+}
+
+function decideCacheWarming(event: CacheWarmingDecisionEvent, runtime: DcpRuntime): { action: "stop" } | undefined {
+  // Pi owns cache economics. Never override its stop decision, and do not stop
+  // for transient nudges: they are request-tail additions, not stale DCP state.
+  if (event.action !== "warm") return undefined;
+  const previous = runtime.lastOutgoingContext;
+  const dcpEnabled = runtime.valid && runtime.config.enabled && !runtime.mutationBlocked;
+  const reason: Extract<ReasonCode, `cache_warming_${string}`> | undefined = runtime.mutationBlocked
+    ? "cache_warming_mutation_blocked"
+    : previous && previous.generation !== runtime.generation
+      ? "cache_warming_generation_changed"
+      : previous && previous.dcpEnabled !== dcpEnabled
+        ? "cache_warming_availability_changed"
+        : undefined;
+  if (!reason) return undefined;
+
+  runtime.logger.diagnostic({
+    reason,
+    counts: {
+      previous_generation: previous?.generation ?? -1,
+      current_generation: runtime.generation,
+      previous_enabled: previous?.dcpEnabled ? 1 : 0,
+      current_enabled: dcpEnabled ? 1 : 0,
+    },
+  });
+  return { action: "stop" };
 }
 
 function reconcileAvailability(state: ReducedState, index: { units: { entryIds: string[]; role: string; compressible: boolean }[] }, unprojectedEntryIds: ReadonlySet<string> = new Set()): ReducedState {

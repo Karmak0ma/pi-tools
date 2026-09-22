@@ -24,7 +24,7 @@ The following work is complete:
 
 The following is **not** complete:
 
-- cache-warming coordination has not been implemented;
+- cache-warming has a conservative DCP-state guard, but its provider-specific economic effect has not been measured;
 - the new lifecycle boundary events have not been adopted for DCP writes;
 - native-compaction behavior remains outside the frozen product contract;
 - the next Pi update process has not yet been exercised against a newer host.
@@ -33,7 +33,7 @@ The following is **not** complete:
 
 | Priority | Improvement | Source | Status | Decision |
 |---:|---|---|---|---|
-| 1 | Conservative `cache_warming_decision` coordination | 0.86, retained in 0.87 | Future | Adopt after compatibility repair. Stop warming only when DCP has positive evidence that its next transformed prefix cannot reuse the previous provider cache. |
+| 1 | Conservative `cache_warming_decision` coordination | 0.86, retained in 0.87 | Guard implemented; effectiveness unmeasured | Preserve Pi's `stop`. Change `warm` to `stop` only when the last outgoing DCP generation or availability no longer matches, or lifecycle mutation is blocked. Do not stop for a transient nudge alone. |
 | 2 | `turn_end` and `agent_before_settle` lifecycle review | 0.87 | Future | Measure first. Use the new boundaries to improve observation and operation ordering only if tests prove the timing is safer than the current `agent_settled` path. |
 | 3 | Current-host projection hardening | 0.86 + 0.87 | Partially implemented | Add more Pi 0.87 differential fixtures and malformed-output checks. Do not create a previous-version matrix or reintroduce an older-host fallback. |
 | 4 | Optional extension-owned model calls via `streamSimple()` | 0.86 | Future / optional | Use only for bounded auxiliary work. Do not replace the current model-authored `compress` workflow or silently invoke a second model. |
@@ -58,31 +58,27 @@ No previous-version compatibility matrix is maintained. A host without the curre
 
 ## 1. Conservative cache-warming coordination
 
-### Opportunity
+### Implemented guard
 
-Pi 0.86 introduced provider cache warming and Pi 0.87 retains the `cache_warming_decision` event. Pi owns cache lifetime, provider pricing, and continuation probability. DCP knows when its outgoing prefix changed for reasons that may not be visible in the persisted session tree.
+Pi 0.87's cache warmer replays the exact context captured for the last real request. It checks model and session-message identity, but it cannot see DCP-only state changes. DCP now records the generation and enabled state used for each outgoing `context` result, including fail-closed pass-through requests.
 
-DCP can identify likely stale-prefix cases such as:
+When Pi proposes `warm`, DCP changes it to `stop` only when:
 
-- a new active compression block;
-- decompression or recompression;
-- persisted tool-output redaction;
-- a generation invalidation;
-- a pending transient nudge;
-- projection fallback or mutation blocking;
-- a system-section configuration change.
+- lifecycle mutation is blocked;
+- DCP's current generation differs from the last outgoing context generation; or
+- DCP's enabled state changed since that outgoing context.
 
-### Proposed behavior
+If Pi proposes `stop`, DCP returns no override. A pending nudge alone does not stop warming: it is a transient request-tail addition, not evidence that the stable DCP prefix changed. A raw fail-closed request can be warmed when DCP state has not changed since it was sent. Model, branch, and compaction changes remain Pi-owned cancellation cases.
 
-- If Pi chooses `stop`, never force it back to `warm`.
-- Change `warm` to `stop` only with positive evidence that the next DCP-transformed prefix cannot reuse the previous transformed prefix.
-- Keep the decision metadata-only. Do not log prompts, summaries, paths, arguments, or credentials.
-- Treat a pending transient nudge as a request-tail change, not automatically as a reason to discard the stable prefix; measure the provider-specific cache boundary before deciding.
-- Invalidate the DCP cache-warming decision when the branch, model, system section, or DCP generation changes.
+Each DCP override emits a metadata-only diagnostic with the reason and generation/enabled state. It does not record message content, prompts, summaries, paths, arguments, or credentials.
+
+### Remaining measurement
+
+This guard identifies a DCP state change, not the exact provider cache boundary or the cost saved. The next request refreshes the outgoing-state marker, but DCP does not yet measure whether its next transformed output diverged from the previously warmed prefix. Do not claim an economic benefit until provider-specific payload or live measurements establish that.
 
 ### Validation gate
 
-Add deterministic tests for every stale-prefix reason, the no-op case, and the rule that Pi's `stop` decision is never overridden. Add provider payload/cache-breakpoint fixtures and an opt-in live check only outside `npm run check`.
+Deterministic lifecycle tests cover unknown/stable state, generation changes, availability changes, mutation blocking, transient nudges, and Pi's original `stop` decision. Optional provider payload/cache-breakpoint fixtures and live checks remain outside `npm run check`; use them to measure effectiveness before claiming savings.
 
 ## 2. `turn_end` and `agent_before_settle`
 

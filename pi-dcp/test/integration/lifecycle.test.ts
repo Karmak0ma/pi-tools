@@ -75,6 +75,71 @@ describe("extension capability gate", () => {
     expect(active).not.toContain("compress");
   });
 
+  it("stops cache warming only when outgoing DCP state is stale", async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+    const diagnostics: unknown[] = [];
+    const runtime = createRuntime();
+    runtime.sessionId = "cache-warm-session";
+    runtime.generation = 4;
+    runtime.logger = { diagnostic: (diagnostic) => { diagnostics.push(diagnostic); } };
+    registerLifecycle({
+      on: (name: string, handler: (event: any, ctx: any) => unknown) => { handlers.set(name, handler); },
+    } as any, runtime);
+
+    const message = { role: "user", content: "current request", timestamp: 1 } as any;
+    const entry = { type: "message", id: "user-1", parentId: null, timestamp: new Date(1).toISOString(), message };
+    const ctx = {
+      model: { provider: "test", id: "model", api: "test", contextWindow: 100_000 },
+      getContextUsage: () => ({ tokens: 10, contextWindow: 100_000 }),
+      sessionManager: {
+        buildSessionProjection: () => buildSessionProjection([entry] as any, "user-1"),
+        getLeafId: () => "user-1",
+      },
+    } as any;
+    const warmEvent = { type: "cache_warming_decision", action: "warm", warmCost: 1, missCost: 2, continuationProbability: 1 };
+
+    // Unknown state is not positive evidence that the cached prefix is stale.
+    expect(await handlers.get("cache_warming_decision")?.(warmEvent, ctx)).toBeUndefined();
+    await handlers.get("context")?.({ messages: [message] }, ctx);
+    expect(runtime.lastOutgoingContext).toEqual({ generation: 4, dcpEnabled: true });
+    expect(await handlers.get("cache_warming_decision")?.(warmEvent, ctx)).toBeUndefined();
+
+    // A transient nudge only changes the request tail; it does not invalidate
+    // the stable prefix Pi is warming.
+    runtime.pendingNudge = { band: "soft", kind: "context", nudgeKey: "nudge-1" };
+    expect(await handlers.get("cache_warming_decision")?.(warmEvent, ctx)).toBeUndefined();
+
+    // Preserve Pi's own stop even when DCP knows its outgoing state is stale.
+    runtime.generation++;
+    expect(await handlers.get("cache_warming_decision")?.({ ...warmEvent, action: "stop" }, ctx)).toBeUndefined();
+    expect(await handlers.get("cache_warming_decision")?.(warmEvent, ctx)).toEqual({ action: "stop" });
+    expect(diagnostics).toEqual([{
+      reason: "cache_warming_generation_changed",
+      counts: { previous_generation: 4, current_generation: 5, previous_enabled: 1, current_enabled: 1 },
+    }]);
+
+    // The next actual context request publishes the new generation, so stable
+    // state can warm again instead of leaving cache warming disabled.
+    await handlers.get("context")?.({ messages: [message] }, ctx);
+    expect(runtime.lastOutgoingContext).toEqual({ generation: 5, dcpEnabled: true });
+    expect(await handlers.get("cache_warming_decision")?.(warmEvent, ctx)).toBeUndefined();
+
+    runtime.valid = false;
+    expect(await handlers.get("cache_warming_decision")?.(warmEvent, ctx)).toEqual({ action: "stop" });
+    expect(diagnostics.at(-1)).toMatchObject({ reason: "cache_warming_availability_changed" });
+
+    // Once a raw pass-through request is the latest request, its exact context
+    // is safe to warm until DCP state changes again.
+    await handlers.get("context")?.({ messages: [message] }, ctx);
+    expect(runtime.lastOutgoingContext).toEqual({ generation: 5, dcpEnabled: false });
+    expect(await handlers.get("cache_warming_decision")?.(warmEvent, ctx)).toBeUndefined();
+
+    runtime.valid = true;
+    runtime.mutationBlocked = true;
+    expect(await handlers.get("cache_warming_decision")?.(warmEvent, ctx)).toEqual({ action: "stop" });
+    expect(diagnostics.at(-1)).toMatchObject({ reason: "cache_warming_mutation_blocked" });
+  });
+
   it("registers compress without calling runtime-only inspection APIs", () => {
     const registered: Array<{ name: string; promptGuidelines?: string[] }> = [];
     const pi = {
