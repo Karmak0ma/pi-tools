@@ -1,8 +1,8 @@
 # pi-dcp implementation plan
 
-**Status:** frozen implementation plan  
-**Inputs:** `DESIGN.md`, `DESIGN_review.md`, user decisions in the planning session  
-**Target:** private, source-loaded `pi-dcp` extension for Pi `>=0.84.1`  
+**Status:** current implementation contract
+**Inputs:** `DESIGN.md`, `DESIGN_review.md`, user decisions in the planning session
+**Target:** private, source-loaded `pi-dcp` extension for the current Pi `0.87.x` host family
 **License:** AGPL-3.0-or-later-compatible implementation and distribution
 
 ## 1. Frozen product contract
@@ -73,14 +73,13 @@ The extension MUST NOT read, edit, or claim to enforce this setting. The README 
 ### 1.4 Package and compatibility policy
 
 - Package name: `pi-dcp`.
-- Initial version: `0.1.0`.
+- Current extension version: `0.2.0`.
 - Package is private: `"private": true`; no npm publication step.
 - Pi loads `./src/index.ts` directly.
 - Authoring TypeScript is retained; no `dist/` artifact is needed.
-- The package requires Pi `>=0.84.1`; Pi `0.84.1` is the initially certified semantic version.
-- `peerDependencies` use `>=0.84.1` for imported Pi packages.
-- Development dependencies pin Pi packages to `0.84.1` so fixtures and type checks are reproducible.
-- Later Pi versions are accepted only while runtime capabilities exist and every encountered entry/message form conforms to a versioned projection adapter. Capability presence alone never proves projection compatibility. Unknown or changed projection forms fail closed to raw context and are not called certified until their version is added to the support matrix with fixtures.
+- The supported host is exactly Pi `0.87.0`; the four peer dependencies and lockfile use that exact version.
+- This is an internal single-host policy. When Pi updates, update the four pins and rerun the complete suite; do not maintain a previous-version compatibility matrix.
+- Runtime projection requires Pi's provenance-preserving `buildSessionProjection()`. DCP validates every host source/message form, and unknown or changed projection forms fail closed to raw context. No local host-version fallback is retained.
 - Startup capability checks are authoritative even when semver is satisfied. A missing capability disables all mutation/transformation and emits one metadata-only diagnostic; ordinary Pi operation continues with raw context.
 - `jsonc-parser` is the only non-Pi runtime dependency. Tokenization remains heuristic.
 
@@ -89,7 +88,7 @@ The extension MUST NOT read, edit, or claim to enforce this setting. The README 
 The implementation MUST incorporate all three valid review corrections:
 
 1. **Fork semantics:** `/tree` and clone-style operations normally copy/select active paths, but static `SessionManager.forkFrom()` can copy abandoned entries. Canonical replay always uses the selected leaf's `getBranch()`, never `getEntries()`. Add an explicit `forkFrom()` fixture proving copied abandoned operations do not leak into active state.
-2. **Compaction projection:** the adapter is version-specific. For certified Pi 0.84.1, a compaction projects one summary; retained entries selected from `firstKeptEntryId` remain ordinary projected entries and no separate retained-tail message is invented. A fixture containing materialized `retainedTail` metadata must assert the actual 0.84.1 `buildContextEntries()` behavior. Any later Pi behavior gets a separate adapter and certification fixture.
+2. **Compaction projection:** the Pi 0.87 adapter projects the current host contract, including legacy compaction entries, without inventing materialized retained-tail messages. The current host's `buildContextEntries()` behavior is covered by the installed 0.87.0 fixture.
 3. **Reference wording:** documentation describes the reference package as having no published authoring `.ts` sources while generated `.d.ts` declarations are present; it does not call the package literally TypeScript-free.
 
 ## 2. Repository and package layout
@@ -478,18 +477,17 @@ Factory-time checks cover `pi`; context-dependent checks finish at `session_star
 
 ### 7.1 Projection adapter
 
-Read `buildContextEntries()` exactly once per reconciliation. Project each returned entry through a local Pi-0.84.1 adapter, recording canonical provenance beside each expected message.
+Use one canonical projection per reconciliation. The certified Pi 0.87 host exposes `sessionManager.buildSessionProjection()`; adapt its provenance-preserving entries through a DCP-owned validator. A missing projection API is a startup capability failure, not a reason to select an older local adapter.
 
-Cover:
+The host adapter must:
 
-- normal message: one projection;
-- custom operation and other context-invisible entries: zero;
-- custom message: one;
-- non-empty branch summary: one;
-- Pi 0.84.1 compaction: exactly one summary projection; retained ordinary entries selected from `firstKeptEntryId` are projected under their own entry IDs, and no projection is synthesized from `retainedTail` metadata;
-- unknown entry type or projection shape: adapter failure and raw-context fallback.
+- preserve each projected message's `sourceEntry.id` and projection ordinal;
+- accept Pi 0.87 `context_edit` entries only as host-applied state, never as DCP messages;
+- apply DCP's provider-dropped-assistant rule and preserve those source IDs in `unprojectedEntryIds`;
+- validate source IDs, timestamps, certified entry types, projected message shapes, and the host flattened-message list;
+- fail closed to raw context on an unknown/malformed source or projection.
 
-Maintain golden fixtures generated from Pi 0.84.1's actual `buildContextEntries()` behavior, including compaction records with and without `retainedTail` metadata. Do not import private Pi implementation functions at runtime. Add a separate adapter and fixture namespace before certifying any Pi version whose behavior differs.
+The complete projection remains canonical for protocol units, system barriers, block coverage, snapshots, and authorization. The `context` join uses a derived provider-visible projection that excludes only `role: "system"` messages, maps its result back to complete indexes, preserves system messages supplied by a host as untouched extras, and never manufactures hidden system messages. Do not use `buildSessionContext().messages` alone because it loses source provenance. Maintain Pi 0.87 fixtures for context edits, compaction/system checkpoints, system-free context, and malformed host output.
 
 ### 7.2 Fingerprints
 
@@ -499,7 +497,7 @@ A transform-tolerant fingerprint that omits payload hashes may be logged as a re
 
 ### 7.3 Join algorithm
 
-Join expected projections to incoming `context` messages in this order:
+Join the provider-visible expected projection to incoming `context` messages in this order. System messages remain in the complete canonical projection as non-compressible barriers but are not required in Pi 0.87's system-free `context` event:
 
 1. anchor exact assistant call-ID sets and tool-result IDs;
 2. anchor unique structural fingerprint plus occurrence;
@@ -642,7 +640,7 @@ Turn protection counts canonical user turns, excludes DCP custom metadata, and p
 
 ## 13. Prompting and manual mode
 
-On the adopted Pi 0.86.1 host, mutate one owned `systemPromptOptions.sections` entry in `before_agent_start` instead of returning a complete `systemPrompt` replacement. The section covers semantic closure, summary fidelity, current range schema, protocol-unit aliases, placeholders, protected content, snapshot freshness, and manual mode. Stable guidance is deterministic for the effective DCP configuration; live usage and transient nudges stay out of the section. No custom prompt store exists. Older Pi behavior remains uncertified until the support matrix and peer-version policy are resolved.
+On the adopted Pi 0.87.0 host, mutate one owned `systemPromptOptions.sections` entry in `before_agent_start` instead of returning a complete `systemPrompt` replacement. The section covers semantic closure, summary fidelity, current range schema, protocol-unit aliases, placeholders, protected content, snapshot freshness, and manual mode. Stable guidance is deterministic for the effective DCP configuration; live usage and transient nudges stay out of the section. No custom prompt store exists. The internal extension certifies the current Pi 0.87.x host family only; older Pi hosts are unsupported and fail closed.
 
 Nudges are ephemeral and deduplicated by canonical anchor, nudge kind, and config generation. Heuristic estimates may trigger soft/strong nudges but are labeled estimates and never drive native-compaction cancellation.
 
@@ -684,7 +682,7 @@ Detailed notification shows action/topic/count/estimates/duration/confidence; su
 - **session_tree/start after fork or switch:** replay selected `getBranch()`, derive availability, increment generation. Never replay abandoned entries copied by `forkFrom()`.
 - **before_agent_start:** append fixed guidance and consume one matching manual nonce.
 - **turn_start:** invalidate prior-turn snapshot and record in-memory boundary.
-- **context:** run the exact fail-closed pipeline.
+- **context:** run the exact fail-closed pipeline against Pi's provider-visible messages; on Pi 0.87, system/tool state is host-owned and the complete DCP projection is used only for canonical identity and barriers.
 - **agent_settled:** evaluate and atomically persist automatic pruning decisions; clear one-turn UI indicators.
 - **model_select:** invalidate snapshot, update model limits, increment generation.
 - **session_before_compact:** invalidate snapshot; return `undefined` for manual, threshold, and overflow.
@@ -781,7 +779,7 @@ Golden changes require explicit review; tests never rewrite them automatically i
 
 ### 19.4 Pi integration tests
 
-Build a fake ExtensionAPI/context harness for deterministic tests and a subprocess harness using installed Pi 0.84.1 for real lifecycle tests. Cover restart, in-memory state, tree branches, clone, static `forkFrom()`, resume/new/reload, streaming follow-up, permissions in each UI mode, parallel sibling tools, all compaction reasons, historical compactions, model switch, extension ordering, malformed operation tails, and provider strictness.
+Build a fake ExtensionAPI/context harness for deterministic tests and a subprocess harness using the installed Pi 0.87.0 host for real lifecycle tests. Cover restart, in-memory state, tree branches, clone, static `forkFrom()`, resume/new/reload, streaming follow-up, permissions in each UI mode, parallel sibling tools, all compaction reasons, historical compactions, model switch, extension ordering, malformed operation tails, and provider strictness.
 
 ### 19.5 Crash tests
 
@@ -809,9 +807,9 @@ Because cache/checkpoints are excluded, remove the design's cached 25 ms and che
 
 Each step is a merge gate. Do not start model compression until the identity/protocol foundation passes.
 
-1. **Scaffold and license:** manifest, TypeScript/Vitest config, AGPL license/notices, README skeleton with the compaction prerequisite, support matrix, and CI-safe scripts.
+1. **Scaffold and license:** manifest, TypeScript/Vitest config, AGPL license/notices, README skeleton with the compaction prerequisite, current-host certification notes, and CI-safe scripts.
 2. **Utilities/config/capabilities:** canonical JSON, hashing, cloning, mutex, strict config schema/layering/trust, logger, capability failure mode.
-3. **Projection spike promoted to production:** Pi 0.84.1 projection adapter, retained-tail/legacy fixtures, fingerprints, join, protocol units, ambiguity fallback, performance baseline.
+3. **Projection spike promoted to production:** Pi 0.87.0 public projection adapter, legacy-entry fixtures, fingerprints, join, protocol units, ambiguity fallback, performance baseline.
 4. **Canonical state:** operation validators, pure reducer, branch-only reconstruction, atomic batch schema, derived availability, forkFrom and malformed-tail tests.
 5. **Runtime/lifecycle:** session construction, generation/snapshot invalidation, active-tool collision handling, tree/fork/switch/model/reload/shutdown behavior, native-compaction no-cancel/rebase behavior.
 6. **Base transform and snapshots:** clone pipeline, protocol validation, sparse metadata, provider-neutral fallback, OpenAI/opencode bridge goldens.
@@ -846,7 +844,7 @@ npm run test:live:openai
 npm run test:live:opencode
 ```
 
-A live provider outage does not invalidate deterministic compatibility tests, but the support matrix records the last successful live run date/model/version.
+A live provider outage does not invalidate deterministic compatibility tests, but the verification record should include the last successful live run date/model/version.
 
 ## 22. Completion criteria
 
@@ -856,7 +854,7 @@ The implementing agent is finished only when:
 2. every test command above passes;
 3. Pi raw entries are unmodified and only valid custom operations/ordinary tool receipts are appended;
 4. replay uses only the selected `getBranch()` and passes static `forkFrom()` leakage tests;
-5. Pi 0.84.1 compaction fixtures with `firstKeptEntryId` and materialized `retainedTail` metadata pass while proving that no separate retained-tail projection is invented;
+5. Pi 0.87.0 compaction fixtures with `firstKeptEntryId` and materialized `retainedTail` metadata pass while proving that no separate retained-tail projection is invented;
 6. every ambiguous join returns an untouched clone and writes nothing;
 7. all transformed contexts preserve settled call/result protocol and current incomplete forms;
 8. one compression call persists one coherent multi-range operation;

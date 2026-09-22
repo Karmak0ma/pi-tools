@@ -16,7 +16,10 @@ export function checkFactoryCapabilities(pi: ExtensionAPI): CapabilityResult {
 export function checkContextCapabilities(ctx: ExtensionContext): CapabilityResult {
   const missing: string[] = [];
   const session = ctx.sessionManager as unknown as Record<string, unknown>;
-  for (const name of ["getLeafId", "getBranch", "buildContextEntries"]) if (typeof session[name] !== "function") missing.push(`sessionManager.${name}`);
+  // The current Pi projection is an authorization boundary: DCP must not
+  // silently switch to a version-specific local projection on an older host.
+  // This internal extension certifies only the current Pi 0.87 host family.
+  for (const name of ["getLeafId", "getBranch", "buildContextEntries", "buildSessionProjection"]) if (typeof session[name] !== "function") missing.push(`sessionManager.${name}`);
   for (const [name, value] of Object.entries({ getContextUsage: ctx.getContextUsage, isProjectTrusted: ctx.isProjectTrusted, isIdle: ctx.isIdle, reload: (ctx as unknown as { reload?: unknown }).reload })) if (name !== "reload" && typeof value !== "function") missing.push(name);
 
   // Confirmation is a policy-dependent execution capability, not a startup

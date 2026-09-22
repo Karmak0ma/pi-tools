@@ -4,12 +4,13 @@ import { emptyState } from "../../src/state/reducer.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
 import { buildErrorText } from "../../src/compression/errors.ts";
 import { createRuntime, publishBaseline } from "../../src/runtime.ts";
+import { currentHostSessionManager } from "../helpers/current-host.ts";
 
 describe("actionable compression errors", () => {
   const setup = () => {
     const messages = [{ role: "user", content: "old", timestamp: 1 }, { role: "user", content: "current", timestamp: 2 }] as any[];
     const entries = messages.map((message, index) => ({ type: "message", id: `entry-${index + 1}`, parentId: index ? `entry-${index}` : null, timestamp: new Date(index + 1).toISOString(), message }));
-    const ctx = { cwd: "/tmp", model: { provider: "test", id: "model", api: "test", contextWindow: 10_000 }, getContextUsage: () => ({ tokens: null, contextWindow: 10_000 }), sessionManager: { buildContextEntries: () => entries, getLeafId: () => "entry-2" } } as any;
+    const ctx = { cwd: "/tmp", model: { provider: "test", id: "model", api: "test", contextWindow: 10_000 }, getContextUsage: () => ({ tokens: null, contextWindow: 10_000 }), sessionManager: currentHostSessionManager(entries, "entry-2") } as any;
     const result = transformOutgoingContext(messages, { ctx, sessionId: "s", generation: 1, state: emptyState(), config: structuredClone(defaults) as any });
     const runtime = createRuntime();
     publishBaseline(runtime, result.snapshot!);

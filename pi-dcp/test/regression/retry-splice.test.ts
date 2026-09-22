@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { defaults } from "../../src/config/defaults.ts";
 import { emptyState, markAvailability, type ReducedBlock } from "../../src/state/reducer.ts";
-import { projectContextEntries } from "../../src/identity/project.ts";
+import { currentHostSessionManager, projectCurrentEntries } from "../helpers/current-host.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
 
 /**
@@ -34,7 +34,7 @@ function ctxFor(entries: unknown[]) {
     cwd: "/tmp",
     model: { provider: "test", id: "model", api: "test", contextWindow: 10_000 },
     getContextUsage: () => ({ tokens: null, contextWindow: 10_000 }),
-    sessionManager: { buildContextEntries: () => entries, getLeafId: () => `entry-${entries.length}` },
+    sessionManager: currentHostSessionManager(entries, `entry-${entries.length}`),
   } as any;
 }
 
@@ -50,7 +50,7 @@ const history: AgentMessage[] = [
 describe("assistant messages left behind by an incomplete request", () => {
   it("does not project an empty failed turn, so a retry-spliced incoming list still joins", () => {
     const entries = entriesFor(history);
-    const projection = projectContextEntries(entries as any);
+    const projection = projectCurrentEntries(entries as any);
     expect(projection.ok).toBe(true);
     if (!projection.ok) return;
     expect(projection.messages).toHaveLength(3);
@@ -88,7 +88,7 @@ describe("assistant messages left behind by an incomplete request", () => {
   ])("does not project a contentful $name that Pi removes before dispatch", ({ message }) => {
     const persisted: AgentMessage[] = [history[0], message, history[2], history[3]];
     const entries = entriesFor(persisted);
-    const projection = projectContextEntries(entries as any);
+    const projection = projectCurrentEntries(entries as any);
     expect(projection.ok).toBe(true);
     if (!projection.ok) return;
     expect(projection.messages).toHaveLength(3);

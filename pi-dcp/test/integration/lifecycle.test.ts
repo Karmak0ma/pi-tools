@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { buildSessionProjection } from "@earendil-works/pi-coding-agent";
 import { checkContextCapabilities, checkFactoryCapabilities } from "../../src/capabilities.ts";
 import { bindCompressionProvenance, registerCompressionTool } from "../../src/compression/tool.ts";
 import { clearBaselines, createRuntime, publishBaseline, setDcpToolActive } from "../../src/runtime.ts";
@@ -17,7 +18,7 @@ describe("extension capability gate", () => {
 
   it("does not require confirmation UI to keep allow-mode compression available", () => {
     const result = checkContextCapabilities({
-      sessionManager: { getLeafId: () => null, getBranch: () => [], buildContextEntries: () => [] },
+      sessionManager: { getLeafId: () => null, getBranch: () => [], buildContextEntries: () => [], buildSessionProjection: () => ({ entries: [], messages: [] }) },
       getContextUsage: () => undefined,
       isProjectTrusted: () => true,
       isIdle: () => true,
@@ -26,6 +27,52 @@ describe("extension capability gate", () => {
 
     expect(result.ok).toBe(true);
     expect(result.missing).not.toContain("ui.confirm");
+  });
+
+  it("requires the current Pi projection API", () => {
+    const result = checkContextCapabilities({
+      sessionManager: { getLeafId: () => null, getBranch: () => [], buildContextEntries: () => [] },
+      getContextUsage: () => undefined,
+      isProjectTrusted: () => true,
+      isIdle: () => true,
+      ui: { notify: () => undefined },
+    } as any);
+
+    expect(result.ok).toBe(false);
+    expect(result.missing).toContain("sessionManager.buildSessionProjection");
+  });
+
+  it("disables DCP at session start when the current projection API is missing", async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => unknown>();
+    let active = ["read", "compress"];
+    const pi = {
+      on: (name: string, handler: (event: any, ctx: any) => unknown) => { handlers.set(name, handler); },
+      getActiveTools: () => [...active],
+      setActiveTools: (names: string[]) => { active = names; },
+    } as any;
+    const runtime = createRuntime(pi);
+    const notices: string[] = [];
+    registerLifecycle(pi, runtime);
+    await handlers.get("session_start")?.({}, {
+      cwd: "/tmp",
+      isProjectTrusted: () => true,
+      isIdle: () => true,
+      getContextUsage: () => undefined,
+      ui: { notify: (text: string) => notices.push(text) },
+      sessionManager: {
+        getSessionId: () => "session-1",
+        getSessionFile: () => undefined,
+        getLeafId: () => null,
+        getBranch: () => [],
+        buildContextEntries: () => [],
+      },
+    });
+
+    expect(runtime.valid).toBe(false);
+    expect(runtime.lastReadiness).toMatchObject({ ready: false, reason: "capability_missing" });
+    expect(notices[0]).toContain("Pi 0.87.x is required");
+    expect(notices[0]).toContain("sessionManager.buildSessionProjection");
+    expect(active).not.toContain("compress");
   });
 
   it("registers compress without calling runtime-only inspection APIs", () => {
@@ -89,6 +136,7 @@ describe("extension capability gate", () => {
         getLeafId: () => null,
         getBranch: () => [],
         buildContextEntries: () => [],
+        buildSessionProjection: () => ({ entries: [], messages: [] }),
       },
     } as any;
 
@@ -134,6 +182,7 @@ describe("extension capability gate", () => {
         ui: { notify: () => undefined, confirm: async () => true },
         sessionManager: {
           buildContextEntries: () => entries,
+          buildSessionProjection: () => buildSessionProjection(entries as any, leafId),
           getLeafId: () => leafId,
         },
       } as any;
@@ -183,6 +232,60 @@ describe("extension capability gate", () => {
     }
   });
 
+  it("validates compression against Pi 0.87 host projection after a context edit", async () => {
+    const originalAssistant = { role: "assistant", content: [{ type: "text", text: "original" }], api: "openai-completions", provider: "openai", model: "model", stopReason: "stop", timestamp: 2 };
+    const editedAssistant = { ...originalAssistant, content: [{ type: "text", text: "edited" }] };
+    const entries = [
+      { type: "message", id: "entry-1", parentId: null, timestamp: new Date(1).toISOString(), message: { role: "user", content: "old work", timestamp: 1 } },
+      { type: "message", id: "entry-2", parentId: "entry-1", timestamp: new Date(2).toISOString(), message: originalAssistant },
+      { type: "context_edit", id: "edit-1", parentId: "entry-2", timestamp: new Date(3).toISOString(), targetId: "entry-2", replacement: { content: editedAssistant.content } },
+      { type: "message", id: "entry-3", parentId: "edit-1", timestamp: new Date(4).toISOString(), message: { role: "user", content: "current request", timestamp: 4 } },
+    ] as any[];
+    let leafId = "entry-3";
+    let registered: any;
+    const statsDir = await mkdtemp(join(tmpdir(), "pi-dcp-pi087-compress-test-"));
+    const previousStatsDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = statsDir;
+    try {
+      const pi = { registerTool: (tool: any) => { registered = tool; }, appendEntry: () => undefined, sendMessage: () => undefined } as any;
+      const runtime = createRuntime(pi);
+      runtime.sessionId = "session-1";
+      runtime.generation = 1;
+      const ctx = {
+        cwd: "/tmp",
+        hasUI: false,
+        model: { provider: "openai", id: "model", api: "openai-completions", contextWindow: 128_000 },
+        getContextUsage: () => ({ tokens: null, contextWindow: 128_000 }),
+        ui: { notify: () => undefined, confirm: async () => true },
+        sessionManager: {
+          buildContextEntries: () => entries,
+          buildSessionProjection: () => buildSessionProjection(entries as any, leafId),
+          getLeafId: () => leafId,
+        },
+      } as any;
+      registerCompressionTool(pi, runtime);
+      const providerMessages = [entries[0].message, editedAssistant, entries[3].message];
+      const transformed = transformOutgoingContext(providerMessages, { ctx, sessionId: runtime.sessionId, generation: runtime.generation, state: emptyState(), config: structuredClone(defaults) as any });
+      expect(transformed.snapshot).toBeDefined();
+      publishBaseline(runtime, transformed.snapshot!);
+      runtime.index = transformed.index;
+      runtime.reduced = transformed.state;
+
+      const toolCallId = "compress-after-edit";
+      const compressionParams = { topic: "old work", content: [{ startId: "m0001", endId: "m0002", summary: "old work was completed and verified" }] };
+      entries.push({ type: "message", id: "entry-4", parentId: leafId, timestamp: new Date(5).toISOString(), message: { role: "assistant", content: [{ type: "toolCall", id: toolCallId, name: "compress", arguments: compressionParams }], api: "openai-completions", provider: "openai", model: "model", stopReason: "toolUse", timestamp: 5 } } as any);
+      leafId = "entry-4";
+
+      const result = await registered.execute(toolCallId, compressionParams, undefined, undefined, ctx);
+      expect(result.content[0].text).toContain("pi-dcp compressed 1 range(s)");
+      expect(result.details.reason).toBeUndefined();
+    } finally {
+      if (previousStatsDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previousStatsDir;
+      await rm(statsDir, { recursive: true, force: true });
+    }
+  });
+
   it("never persists a compression envelope the reducer would reject (regression: 2026-08-19 permanent block)", async () => {
     // A rejected envelope must fail closed *before* pi.appendEntry, not
     // after: reconstructFromBranch replays the full persisted branch
@@ -213,6 +316,7 @@ describe("extension capability gate", () => {
       const runtime = createRuntime(pi);
       runtime.sessionId = "session-1";
       runtime.generation = 1;
+      let leafId = "entry-3";
       const ctx = {
         cwd: "/tmp",
         hasUI: false,
@@ -221,7 +325,8 @@ describe("extension capability gate", () => {
         ui: { notify: () => undefined, confirm: async () => true },
         sessionManager: {
           buildContextEntries: () => entries,
-          getLeafId: () => "entry-3",
+          buildSessionProjection: () => buildSessionProjection(entries as any, leafId),
+          getLeafId: () => leafId,
         },
       } as any;
       registerCompressionTool(pi, runtime);
@@ -256,6 +361,7 @@ describe("extension capability gate", () => {
       // tool-call ID (no colliding requestKey) still succeeds right after.
       const retryEntries = [...entries, { type: "message", id: "entry-4", parentId: "entry-3", timestamp: new Date(4).toISOString(), message: { role: "assistant", content: [{ type: "toolCall", id: "compress-retry", name: "compress", arguments: compressionParams }], api: "openai-completions", provider: "openai", model: "model", stopReason: "toolUse", timestamp: 4 } }];
       entries.push(retryEntries.at(-1)!);
+      leafId = "entry-4";
       const retryResult = await registered.execute("compress-retry", compressionParams, undefined, undefined, ctx);
       expect(retryResult.content[0].text).toContain("pi-dcp compressed 1 range(s)");
       expect(appended).toHaveLength(1);
@@ -275,9 +381,9 @@ describe("extension capability gate", () => {
       on: (name: string, handler: (event: any, ctx: any) => unknown) => { handlers.set(name, handler); },
     } as any, runtime);
 
-    // Pi 0.86 always supplies normalized options. This guard keeps an older
-    // or malformed host event from throwing inside the lifecycle hook while
-    // the support matrix decides whether that host is certified.
+    // Pi 0.87 supplies normalized options. This guard keeps a malformed host
+    // event from throwing inside the lifecycle hook while the capability gate
+    // disables unsupported hosts.
     const result = await handlers.get("before_agent_start")?.({ systemPrompt: "base" }, {}) as any;
 
     expect(result).toBeUndefined();
@@ -483,6 +589,7 @@ describe("extension capability gate", () => {
         sessionManager: {
           getBranch: () => entries,
           buildContextEntries: () => entries,
+          buildSessionProjection: () => buildSessionProjection(entries as any, "user-3"),
           getLeafId: () => "user-3",
         },
       } as any;
@@ -539,6 +646,7 @@ describe("extension capability gate", () => {
       sessionManager: {
         getBranch: () => entries,
         buildContextEntries: () => entries,
+        buildSessionProjection: () => buildSessionProjection(entries as any, "user-2"),
         getLeafId: () => "user-2",
       },
     } as any;
@@ -580,6 +688,7 @@ describe("extension capability gate", () => {
       sessionManager: {
         getBranch: () => entries,
         buildContextEntries: () => entries,
+        buildSessionProjection: () => buildSessionProjection(entries as any, "user-2"),
         getLeafId: () => "user-2",
       },
     } as any;
@@ -622,6 +731,7 @@ describe("extension capability gate", () => {
         ui: { notify: () => undefined, confirm: async () => true },
         sessionManager: {
           buildContextEntries: () => entries,
+          buildSessionProjection: () => buildSessionProjection(entries as any, "entry-3"),
           getLeafId: () => "entry-3",
         },
       } as any;
@@ -697,6 +807,7 @@ describe("extension capability gate", () => {
       getContextUsage: () => ({ tokens: 400, contextWindow: 1_000 }),
       sessionManager: {
         buildContextEntries: () => [entry],
+        buildSessionProjection: () => buildSessionProjection([entry] as any, "message-1"),
         getLeafId: () => "message-1",
       },
     } as any;

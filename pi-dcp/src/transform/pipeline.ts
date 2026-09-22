@@ -3,10 +3,10 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { deepClone } from "../util/clone.ts";
 import { hashJson } from "../util/hash.ts";
 import { buildProtocolUnits } from "../identity/protocol.ts";
-import { projectContextEntries } from "../identity/project.ts";
+import { projectSessionManager, type ProjectionResult } from "../identity/project.ts";
 import { joinProjectedMessages } from "../identity/join.ts";
 import { createBaselineSnapshot, modelKey } from "../identity/snapshot.ts";
-import type { BaselineSnapshot, CanonicalIndex } from "../identity/types.ts";
+import type { BaselineSnapshot, CanonicalIndex, ProjectedMessage } from "../identity/types.ts";
 import { markAvailability, type ReducedState } from "../state/reducer.ts";
 import type { EffectiveConfig } from "../config/defaults.ts";
 import { injectInlineLabels } from "./labels.ts";
@@ -54,13 +54,11 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
     // The generic adapter is intentionally never undefined. Protocol and wire
     // validation below remain the fail-closed safety net for malformed output.
     const adapter = adapterForModel({ api: options.ctx.model?.api || "unknown" });
-    const entries = options.ctx.sessionManager.buildContextEntries();
-    const projection = projectContextEntries(entries);
-    if (!projection.ok) return failure(fallback, state, projection.reason);
+    const joined = resolveProjectionAndJoin(input, options.ctx);
+    if (!joined.ok) return failure(fallback, state, joined.reason);
+    const { projection, incomingByFullIndex, canonicalMessages } = joined;
     const indexResult = buildProtocolUnits(projection.messages);
     if (!("units" in indexResult)) return failure(fallback, state, indexResult.reason);
-    const join = joinProjectedMessages(projection.messages, input);
-    if (!join.ok) return failure(fallback, state, join.reason);
 
     const availableEntryIds = new Set(projection.messages.map((item) => item.key.entryId));
     const validAnchors = new Map<string, { beforeEntryId?: string; afterEntryId?: string }>();
@@ -86,7 +84,6 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
       configHash: hashJson(options.config),
     });
 
-    const canonicalMessages = projection.messages.map((_item, expectedIndex) => input[join.incomingByExpected[expectedIndex]]);
     // Redact and label source messages before block replacement. A replacement
     // then receives its own bNNNN tag, while injected extras are merged later
     // without ever being inspected or mutated by DCP. Labels only reflect
@@ -99,7 +96,7 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
     // prefix stability.
     const labeled = injectInlineLabels(applyPersistedRedactions(canonicalMessages, availableState), indexResult.units, snapshot);
     const rendered = replaceBlocksWithOrigins(labeled, indexResult.units, snapshot, availableState);
-    const transformed = mergeProjectedOutput(input, join.incomingByExpected, rendered.byProjectedIndex);
+    const transformed = mergeProjectedOutput(input, incomingByFullIndex, rendered.byProjectedIndex);
     if (!validateProtocol(transformed)) return failure(fallback, state, "protocol_invalid");
     const wire = adapter.canonicalWire(transformed);
     const wireValidation = adapter.validateWire(wire);
@@ -126,8 +123,49 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
   }
 }
 
+type CompleteProjection = Extract<ProjectionResult, { ok: true }>;
+
+type JoinedProjection =
+  | { ok: true; projection: CompleteProjection; incomingByFullIndex: number[]; canonicalMessages: AgentMessage[] }
+  | { ok: false; reason: string };
+
+function resolveProjectionAndJoin(input: readonly AgentMessage[], ctx: ExtensionContext): JoinedProjection {
+  const projection = projectSessionManager(ctx.sessionManager);
+  if (!projection.ok) return projection;
+  const visible = buildProviderVisibleProjection(projection.messages);
+  const join = joinProjectedMessages(visible.messages, input);
+  if (!join.ok) return join;
+  const incomingByFullIndex = mapVisibleJoinToFull(projection.messages.length, visible.fullIndexes, join.incomingByExpected);
+  const canonicalMessages = projection.messages.map((item, fullIndex) => {
+    const incomingIndex = incomingByFullIndex[fullIndex];
+    // Pi 0.87 hides system messages from `context`. Use the canonical host
+    // message only for those barriers; the output merge never invents them.
+    // Older hosts that include systems preserve their incoming copy as extra.
+    return incomingIndex >= 0 ? input[incomingIndex] : item.message;
+  });
+  return { ok: true, projection, incomingByFullIndex, canonicalMessages };
+}
+
+function buildProviderVisibleProjection(messages: readonly ProjectedMessage[]): { messages: ProjectedMessage[]; fullIndexes: number[] } {
+  const visible: { messages: ProjectedMessage[]; fullIndexes: number[] } = { messages: [], fullIndexes: [] };
+  messages.forEach((item, fullIndex) => {
+    if (item.message.role === "system") return;
+    visible.messages.push(item);
+    visible.fullIndexes.push(fullIndex);
+  });
+  return visible;
+}
+
+/** Expand a join over provider-visible messages back to the full canonical index. */
+function mapVisibleJoinToFull(fullLength: number, fullIndexes: readonly number[], incomingByVisible: readonly number[]): number[] {
+  const incomingByFull = Array.from({ length: fullLength }, () => -1);
+  fullIndexes.forEach((fullIndex, visibleIndex) => { incomingByFull[fullIndex] = incomingByVisible[visibleIndex] ?? -1; });
+  return incomingByFull;
+}
+
 function mergeProjectedOutput(input: readonly AgentMessage[], incomingByExpected: readonly number[], byProjectedIndex: readonly AgentMessage[][]): AgentMessage[] {
-  const expectedAtIncoming = new Map(incomingByExpected.map((incomingIndex, expectedIndex) => [incomingIndex, expectedIndex]));
+  const expectedAtIncoming = new Map<number, number>();
+  incomingByExpected.forEach((incomingIndex, expectedIndex) => { if (incomingIndex >= 0) expectedAtIncoming.set(incomingIndex, expectedIndex); });
   const output: AgentMessage[] = [];
   for (let incomingIndex = 0; incomingIndex < input.length; incomingIndex++) {
     const expectedIndex = expectedAtIncoming.get(incomingIndex);

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createEnvelope } from "../../src/state/operations.ts";
-import { projectContextEntries } from "../../src/identity/project.ts";
+import { projectCurrentEntries } from "../helpers/current-host.ts";
 import { buildProtocolUnits } from "../../src/identity/protocol.ts";
 import { createSnapshot } from "../../src/identity/snapshot.ts";
 import { buildCompressionEnvelope } from "../../src/compression/service.ts";
@@ -50,7 +50,7 @@ describe("savings accounting", () => {
       { role: "user", content: "A newer request", timestamp: 3 },
     ] as any[];
     const entries = messages.map((message, index) => ({ type: "message", id: `entry-${index}`, parentId: index ? "entry-0" : null, timestamp: new Date(index + 1).toISOString(), message }));
-    const projection = projectContextEntries(entries as any);
+    const projection = projectCurrentEntries(entries as any);
     expect(projection.ok).toBe(true);
     if (!projection.ok) return;
     const index = buildProtocolUnits(projection.messages);

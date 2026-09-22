@@ -4,7 +4,7 @@ import { CompressionParameters, isCompressionParams, normalizeCompressionParams 
 import { buildCompressionEnvelope } from "./service.ts";
 import { modelKey, computeSnapshotHash } from "../identity/snapshot.ts";
 import type { BaselineSnapshot } from "../identity/types.ts";
-import { projectContextEntries } from "../identity/project.ts";
+import { projectSessionManager } from "../identity/project.ts";
 import { buildProtocolUnits } from "../identity/protocol.ts";
 import { reduceEnvelope } from "../state/reducer.ts";
 import { OPERATION_CUSTOM_TYPE } from "../state/operations.ts";
@@ -83,8 +83,8 @@ Validation
 /**
  * Bind a compress invocation at Pi's authoritative `tool_call` boundary.
  *
- * Pi 0.84.1 documents that SessionManager is synchronized through the current
- * assistant message before `tool_call`, but its agent hook can run before the
+ * The current Pi host synchronizes SessionManager through the current
+ * assistant message before `tool_call`, but the agent hook can run before the
  * asynchronous message event has persisted that entry. We therefore prefer a
  * persisted assistant entry when available and otherwise bind the exact host
  * tool-call ID to the baseline published immediately before this response.
@@ -353,14 +353,14 @@ function validateBaselineHistory(baseline: BaselineSnapshot, ctx: ExtensionConte
       seenResults.add(entry.message.toolCallId);
     }
   } else {
-    // This is the Pi 0.84.1 persistence race: `tool_call` proved the call, but
-    // SessionManager still exposes the exact parent baseline. Any changed leaf
-    // means unrelated history appeared and the fallback must fail closed.
+    // `tool_call` proves the call while SessionManager still exposes the exact
+    // parent baseline. Any changed leaf means unrelated history appeared and
+    // the fallback must fail closed.
     if (runtime.compressionProvenance.get(toolCallId) !== baseline) return { ok: false, stage: "assistant_provenance_missing" };
     if (ctx.sessionManager.getLeafId() !== baseline.leafId) return { ok: false, stage: "assistant_parent_changed" };
   }
 
-  const projection = projectContextEntries(entries);
+  const projection = projectSessionManager(ctx.sessionManager);
   if (!projection.ok) return { ok: false, stage: "projection_unsupported" };
   const index = buildProtocolUnits(projection.messages);
   if (!("units" in index)) return { ok: false, stage: "protocol_invalid" };

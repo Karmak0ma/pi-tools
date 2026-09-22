@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { canonicalPlainObject, isPlainObject } from "../util/canonical-json.ts";
 import type { CanonicalIndex, CanonicalMessageKey } from "../identity/types.ts";
 
-// Pi 0.84.1's built-ins are read, write, edit, bash, grep, find, and ls.
+// The current Pi built-ins are read, write, edit, bash, grep, find, and ls.
 export const PI_BUILTIN_TOOLS = new Set(["read", "write", "edit", "bash", "grep", "find", "ls"]);
 
 /**

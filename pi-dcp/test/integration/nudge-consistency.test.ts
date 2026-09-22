@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { buildSessionProjection } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { createRuntime, invalidateSnapshot, noteSuccessfulCompression, type DcpRuntime } from "../../src/runtime.ts";
 import { defaults } from "../../src/config/defaults.ts";
@@ -23,7 +24,7 @@ import { LABEL_TAG_NAME } from "../../src/transform/labels.ts";
  *   (model switch, compaction, tree changes), because its envelope generation
  *   and token thresholds no longer describe the upcoming request.
  *
- * The FakeHost mirrors pi 0.84.1's event order (session_start, turn_start,
+ * The FakeHost mirrors the current Pi event order (session_start, turn_start,
  * context, agent_settled) as verified against agent-loop.js and
  * agent-session.js in the host package.
  */
@@ -63,6 +64,7 @@ class FakeHost {
       sessionManager: {
         getBranch: () => host.entries,
         buildContextEntries: () => host.entries,
+        buildSessionProjection: () => buildSessionProjection(host.entries as any, host.entries.at(-1)?.id),
         getLeafId: () => host.entries.at(-1)?.id ?? null,
         getSessionId: () => "s",
         getSessionFile: () => undefined,

@@ -3,7 +3,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { checkContextCapabilities } from "./capabilities.ts";
 import { loadConfig } from "./config/load.ts";
 import { reconstructFromBranch } from "./state/reconstruct.ts";
-import { projectContextEntries } from "./identity/project.ts";
+import { projectSessionManager } from "./identity/project.ts";
 import { buildProtocolUnits } from "./identity/protocol.ts";
 import { hashJson } from "./util/hash.ts";
 import { deepClone } from "./util/clone.ts";
@@ -59,8 +59,8 @@ export function registerLifecycle(pi: ExtensionAPI, runtime: DcpRuntime): void {
     const cleaned = stripEchoedLabels(event.message);
     return cleaned ? { message: cleaned } : undefined;
   });
-  // Capture the host's direct tool-call event because Pi 0.84.1 may invoke it
-  // before the producing assistant entry becomes visible in SessionManager.
+  // Capture the host's direct tool-call event because the producing assistant
+  // entry may not yet be visible in SessionManager.
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName === "compress") await bindCompressionProvenance(event.toolCallId, ctx, runtime);
   });
@@ -79,6 +79,7 @@ async function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext, r
   if (!capability.ok) {
     disableRuntime(runtime, "capability_missing");
     try { setDcpToolActive(pi, false); } catch { /* capability failure can include active-tool APIs */ }
+    ctx.ui?.notify?.(`pi-dcp disabled: Pi 0.87.x is required; missing ${capability.missing.join(", ")}.`, "error");
     return;
   }
   const loaded = await loadConfig(ctx.cwd, ctx.isProjectTrusted());
@@ -92,7 +93,7 @@ async function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext, r
   await persistBranchSavings(ctx.sessionManager.getBranch(), runtime);
   if (rebuilt.legacyIgnored) runtime.logger.diagnostic({ reason: "legacy_state_ignored", counts: { entries: rebuilt.legacyOperationEntries } });
   if (rebuilt.operationEntries === 0) runtime.reduced.manualMode = loaded.config.manualMode.enabled;
-  const initialProjection = projectContextEntries(ctx.sessionManager.buildContextEntries());
+  const initialProjection = projectSessionManager(ctx.sessionManager);
   resetSemanticNudges(runtime);
   if (initialProjection.ok) {
     const initialIndex = buildProtocolUnits(initialProjection.messages);
@@ -131,7 +132,7 @@ async function rebase(ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionA
     runtime.sessionFile = identity.sessionFile;
     runtime.branchLeafId = identity.leafId;
     const rebuilt = reconstructFromBranch(ctx.sessionManager.getBranch());
-    const projection = projectContextEntries(ctx.sessionManager.buildContextEntries());
+    const projection = projectSessionManager(ctx.sessionManager);
     const index = projection.ok ? buildProtocolUnits(projection.messages) : { ok: false as const, reason: "projection_unsupported" as const };
     runtime.reduced = "units" in index ? reconcileAvailability(rebuilt.state, index, projection.ok ? projection.unprojectedEntryIds : undefined) : rebuilt.state;
     runtime.index = "units" in index ? index : undefined;
@@ -152,7 +153,7 @@ async function rebase(ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionA
 }
 
 function beforeAgentStart(event: BeforeAgentStartEvent, _ctx: ExtensionContext, runtime: DcpRuntime): undefined {
-  // Pi 0.86 owns the rendered system prompt and persists named sections as
+  // Pi 0.87 owns the rendered system prompt and persists named sections as
   // system-message patches. Mutate the normalized options in place so Pi can
   // diff this section against the replayed transcript. Returning a complete
   // `systemPrompt` would force Pi to install an opaque prompt projection and
@@ -199,9 +200,9 @@ function beforeAgentStart(event: BeforeAgentStartEvent, _ctx: ExtensionContext, 
 /**
  * Disable DCP once when a host cannot provide structured prompt sections.
  *
- * The state is intentionally recoverable. Pi 0.86 always supplies this shape,
- * but a version mismatch or malformed test/integration host must not cause a
- * permanent session kill-switch if a later event restores the capability.
+ * The state is intentionally recoverable. Pi 0.87 normally supplies this
+ * shape, but a malformed event must not cause a permanent session kill-switch
+ * if a later event restores the capability.
  */
 function handleMissingPromptSections(runtime: DcpRuntime): void {
   if (runtime.promptSectionsUnavailable) return;
@@ -385,7 +386,7 @@ async function onSettled(ctx: ExtensionContext, runtime: DcpRuntime, pi: Extensi
     try {
       const rebuilt = reconstructFromBranch(ctx.sessionManager.getBranch());
       if (rebuilt.state.corruptReason) { runtime.valid = false; return; }
-      const projection = projectContextEntries(ctx.sessionManager.buildContextEntries());
+      const projection = projectSessionManager(ctx.sessionManager);
       if (!projection.ok) return;
       const index = buildProtocolUnits(projection.messages);
       if (!("units" in index)) return;

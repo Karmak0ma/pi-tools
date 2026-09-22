@@ -4,6 +4,7 @@ import { defaults } from "../../src/config/defaults.ts";
 import { emptyState } from "../../src/state/reducer.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
 import { hasProviderVisibleContent, LABEL_TAG_NAME } from "../../src/transform/labels.ts";
+import { currentHostSessionManager } from "../helpers/current-host.ts";
 
 /**
  * Regression guard for the 2026-08-19 "assistant message prefill" incident.
@@ -30,7 +31,7 @@ function harness(messages: AgentMessage[]) {
     cwd: "/tmp",
     model: { provider: "anthropic", id: "claude-opus-5", api: "anthropic-messages", contextWindow: 200_000 },
     getContextUsage: () => ({ tokens: null, contextWindow: 200_000 }),
-    sessionManager: { buildContextEntries: () => entries, getLeafId: () => `e${messages.length}` },
+    sessionManager: currentHostSessionManager(entries, `e${messages.length}`),
   } as any;
   return transformOutgoingContext(messages, { ctx, sessionId: "s", generation: 1, state: emptyState(), config: structuredClone(defaults) as any });
 }

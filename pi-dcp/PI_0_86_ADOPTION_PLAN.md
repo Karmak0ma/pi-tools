@@ -1,9 +1,12 @@
 # Pi 0.86 capability investigation and pi-dcp adoption plan
 
-**Status:** proposed roadmap; compatibility repair implemented, capability phases not implemented  
-**Host version investigated:** `@earendil-works/pi-coding-agent` 0.86.1  
-**Current pi-dcp peer range:** Pi `>=0.84.1`  
+**Status:** historical Pi 0.86 roadmap; structured-prompt Phase 1 and Pi 0.87 compatibility repair implemented, later capability phases remain open
+**Host version investigated:** `@earendil-works/pi-coding-agent` 0.86.1
+**Current lockfile host:** `@earendil-works/pi-coding-agent` 0.87.0
+**Current pi-dcp peer range:** Pi `0.87.0` exact
+**Support policy:** internal latest-host certification only; no previous-version matrix
 **Primary audience:** maintainers and agents implementing the next pi-dcp phases
+**Combined roadmap:** `PI_0_86_0_87_ROADMAP.md`
 
 ## 1. Purpose
 
@@ -18,7 +21,7 @@ This document records:
 5. a phased implementation and validation plan;
 6. the decisions that must be made before native-compaction behavior changes.
 
-This is a proposal, not authorization to implement every phase. The current repository has already moved its development dependencies and compatibility code to Pi 0.86.1, while `IMPLEMENTATION_PLAN.md` and `README.md` still describe Pi 0.84.1 as the pinned or certified baseline. That documentation and certification conflict must be resolved before release. In addition, Phase 4 conflicts with the frozen first-release native-compaction contract and requires a separate explicit product decision before implementation.
+This is a proposal, not authorization to implement every phase. The current repository tests against Pi 0.87.0 and certifies only the current Pi 0.87.x host family. The structured-prompt work and the Pi 0.87 projection/context compatibility repair are implemented; the remaining capability phases are future work. Phase 4 conflicts with the frozen first-release native-compaction contract and requires a separate explicit product decision before implementation.
 
 ## 2. Executive recommendation
 
@@ -97,9 +100,9 @@ The current working implementation now:
 - retains DCP's special handling for errored, aborted, empty, and legacy-null assistant turns that the provider does not receive;
 - marks system protocol units permanently non-compressible;
 - includes system content, section patches, and tool declarations in heuristic token estimates;
-- pins development Pi packages to 0.86.1 while retaining the `>=0.84.1` peer range.
+- pins development Pi packages, peer dependencies, and the current lockfile to exact 0.87.0 for the internal current-host policy.
 
-The last item deliberately diverges from `IMPLEMENTATION_PLAN.md`, which freezes development dependencies at 0.84.1 and requires a separate adapter and fixture namespace before certifying later behavior. The current fix verifies 0.86.1 in the working tree, but it does not by itself prove that one dependency installation still passes both the 0.84.1 and 0.86.1 contracts. Section 11 defines the decision and matrix required to resolve this conflict.
+The historical plan text above described a multi-version policy. That policy is withdrawn: the lockfile and deterministic suite certify Pi 0.87.0 only, and a future Pi update requires updating the four pins and rerunning the suite rather than retaining a previous-version matrix.
 
 The regression tests are in `test/golden/projection.test.ts`.
 
@@ -344,23 +347,15 @@ It should not replace per-entry mapping.
 - A runtime value import must resolve the host-supported public package API. Do not import a private `dist/core/...` path.
 - Different Pi versions can convert the same malformed legacy entry differently. The compatibility matrix must detect this.
 
-### 6.7 Compatibility matrix
+### 6.7 Current-host certification
 
-The certified version set is an open product decision, not an existing repository fact. If the project retains the `>=0.84.1` peer range, certify at least:
+The internal extension certifies the exact Pi `0.87.0` lockfile host and requires that exact version in all four peer dependencies. Every Pi update must refresh the four pins and rerun `npm ci` plus the complete deterministic suite. No 0.84.x, 0.85.x, or 0.86.x host matrix is maintained.
 
-| Pi version | Required fixture coverage |
-|---|---|
-| 0.84.1 | ordinary messages, custom messages, legacy compaction, branch summary, metadata exclusions |
-| 0.85.1 | the 0.84.1 set plus any changed session behavior found in release notes/types |
-| 0.86.1 | usage entries, system messages, prompt/tool patches, compaction system checkpoint, null normalization |
-
-Create one differential suite, proposed as `test/compat/pi-projection.test.ts`, that compares the DCP wrapper with that installed version's public helper and session builder. Add a disposable matrix runner, proposed as `scripts/test-pi-compat.mjs`, that creates an isolated temporary package installation for each exact Pi version, installs the four matching Pi packages, and runs typecheck plus the compatibility, golden, and lifecycle suites. The runner must not rewrite the repository lockfile.
-
-The exact matrix runner command must become part of `npm run check:compat` or the release checklist. Until it exists and all selected versions pass, describe only the version exercised by the ordinary lockfile as verified; do not claim the full peer range is certified.
+Pi 0.87's public `buildSessionProjection()` is a required startup capability. A host without it is unsupported and disables DCP rather than selecting an older projection path. Tests for usage entries, persisted system state, legacy compaction metadata, and null normalization remain because those data shapes are still accepted by the certified Pi 0.87 host.
 
 ### 6.8 Completion criterion
 
-Phase 2 is complete when DCP delegates certified entry conversion to the public helper, retains exact canonical provenance and fail-closed behavior, and the version matrix proves equivalent projection for every supported fixture.
+Phase 2 is complete when DCP delegates certified entry conversion to the current public helper, retains exact canonical provenance and fail-closed behavior, and the Pi 0.87.0 lockfile suite passes.
 
 ## 7. Opportunity 3: cache-warming coordination
 
@@ -450,7 +445,6 @@ Test:
 5. projection fallback stops warming;
 6. next real request clears the stop condition where appropriate;
 7. no content, summaries, paths, or tool arguments enter diagnostics;
-8. older supported Pi versions load the extension even when the event never fires.
 
 ### 7.6 Completion criterion
 
@@ -668,23 +662,18 @@ System messages define the instruction and tool environment under which later me
 
 ## 11. Cross-phase compatibility and rollout policy
 
-### 11.1 Maintain the peer-version contract deliberately
+### 11.1 Selected current-host policy
 
-The repository currently has four conflicting signals:
+The project selected the internal current-host policy on 2026-09-21:
 
-- `peerDependencies` still say `>=0.84.1`;
-- development dependencies and the lockfile now target 0.86.1;
-- `README.md` still calls 0.84.1 the certified runtime;
-- `IMPLEMENTATION_PLAN.md` freezes 0.84.1 development pins, fixtures, and certification, while the package is now version 0.2.0 rather than the plan's initial 0.1.0.
+- the four Pi peer dependencies use exact `0.87.0`;
+- the lockfile pins and certifies exact Pi `0.87.0` behavior;
+- Pi 0.87's `buildSessionProjection()` is a required startup capability;
+- older host APIs are unsupported and fail closed rather than receiving a compatibility claim;
+- no previous-version matrix or previous-host lifecycle tests are maintained;
+- when Pi updates, update the four pins and rerun `npm ci` plus the complete deterministic suite.
 
-This state is acceptable only as an in-progress compatibility repair. It is not a finished release policy.
-
-Choose one of these policies before release:
-
-1. **Multi-version support:** implement `scripts/test-pi-compat.mjs` and `test/compat/pi-projection.test.ts`, pass 0.84.1, 0.85.1, and 0.86.1, retain the current peer range, and revise `IMPLEMENTATION_PLAN.md` plus `README.md` to name the matrix.
-2. **Current-host support:** raise the peer minimum and documented certified runtime to 0.86.1, revise the frozen plan, and remove compatibility branches that no longer earn their cost.
-
-Until that choice is complete, the lockfile proves ordinary development against 0.86.1 only, and the README's 0.84.1 certification statement is stale relative to the working tree. Do not claim multi-version support from semver alone.
+The local legacy projector was removed. Current-host tests invoke Pi 0.87's public projection helper directly, and older host APIs remain unsupported.
 
 ### 11.2 Capability versus semantic checks
 
@@ -714,7 +703,7 @@ For each phase:
 Each phase should remain separately revertible:
 
 - Phase 1 can return to full prompt replacement without changing block state.
-- Phase 2 can return to the local projector without changing persisted operations.
+- Phase 2 can disable the host-projection integration without changing persisted operations.
 - Phase 3 can remove the warming handler without changing conversation state.
 - Phase 4 requires special care because custom native compaction changes future session reconstruction. Prototype it in disposable sessions before normal use.
 - Phase 5 model calls should fail before any durable operation when no valid result exists.
@@ -730,8 +719,8 @@ Each phase should remain separately revertible:
 
 ### Issue B: public projection helper adapter
 
-**Scope:** `src/identity/project.ts`, projection fixtures, version matrix.  
-**Outcome:** Pi converts certified entries; DCP retains provenance and validation.  
+**Scope:** `src/identity/project.ts`, current-host projection fixtures, and validation.
+**Outcome:** Pi 0.87 converts certified entries; DCP retains provenance and validation.
 **Dependencies:** compatibility harness for multiple Pi versions.  
 **Risk:** medium because projection is an authorization boundary.
 
@@ -781,8 +770,7 @@ Resolve these before Phase 4 or Phase 5:
 5. Which model generates an optional native-compaction summary: active model, configured secondary model, or Pi default?
 6. Is secondary-model summarization allowed in manual mode?
 7. How is permission obtained for a model call that the active agent did not explicitly request?
-8. Which Pi versions remain certified after structured prompt and cache-warming adoption?
-9. Should the package raise its peer minimum to 0.86.1 instead of carrying a multi-version matrix?
+8. When the next Pi release lands, which current-host fixtures and APIs must be refreshed before updating the four pins?
 
 ## 14. Final acceptance criteria
 
@@ -799,7 +787,7 @@ The complete roadmap is successful when:
 - native-compaction behavior changes only after telemetry and an explicit contract revision;
 - manual and overflow compaction are never blocked;
 - actual model usage and estimated DCP savings remain separate;
-- all supported Pi versions have explicit projection and lifecycle fixtures;
+- the exact current Pi lockfile host has explicit projection and lifecycle fixtures;
 - the complete non-live test suite, typecheck, quality delta, and contract checks pass;
 - documentation describes actual runtime behavior rather than intended behavior.
 

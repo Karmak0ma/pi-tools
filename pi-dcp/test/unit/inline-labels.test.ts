@@ -3,10 +3,11 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { defaults } from "../../src/config/defaults.ts";
 import { emptyState } from "../../src/state/reducer.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
+import { currentHostSessionManager } from "../helpers/current-host.ts";
 
 function context(messages: AgentMessage[]) {
   const entries = messages.map((message, index) => ({ type: "message", id: `entry-${index + 1}`, parentId: index ? `entry-${index}` : null, timestamp: new Date(index + 1).toISOString(), message }));
-  return { cwd: "/tmp", model: { provider: "test", id: "model", api: "test", contextWindow: 10_000 }, getContextUsage: () => ({ tokens: null, contextWindow: 10_000 }), sessionManager: { buildContextEntries: () => entries, getLeafId: () => `entry-${entries.length}` } } as any;
+  return { cwd: "/tmp", model: { provider: "test", id: "model", api: "test", contextWindow: 10_000 }, getContextUsage: () => ({ tokens: null, contextWindow: 10_000 }), sessionManager: currentHostSessionManager(entries, `entry-${entries.length}`) } as any;
 }
 
 describe("inline message labels", () => {

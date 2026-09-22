@@ -31,9 +31,9 @@ export interface DcpRuntime {
   index?: CanonicalIndex;
   baselines: BaselineRegistry;
   /**
-   * Host-observed compress calls keyed by tool-call ID. Pi 0.84.1 invokes
-   * `tool_call` directly from the agent before its asynchronous message event
-   * has necessarily persisted the producing assistant entry. Keeping this
+   * Host-observed compress calls keyed by tool-call ID. Pi invokes `tool_call`
+   * directly from the agent before its asynchronous message event has
+   * necessarily persisted the producing assistant entry. Keeping this
    * short-lived binding lets execution use the host event as provenance
    * without weakening authorization to model-supplied aliases alone.
    */

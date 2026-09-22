@@ -1,1 +1,0 @@
-Pi 0.84.1 projection fixtures belong in this directory. The adapter intentionally ignores materialized retainedTail metadata because buildContextEntries() projects the compaction summary plus ordinary entries selected from firstKeptEntryId.

@@ -52,7 +52,7 @@ pi request
 transformContext (lifecycle.ts)
   ├─ early return if !valid || mutationBlocked   → readiness=unavailable(state_invalidated)
   └─ transformOutgoingContext (pipeline.ts)
-       ├─ buildContextEntries → projectContextEntries → buildProtocolUnits
+       ├─ buildSessionProjection → validated host adapter → buildProtocolUnits
        ├─ joinProjectedMessages (tolerant: extras pass through; ambiguity fails)
        ├─ replaceBlocks (block summary messages only — NO separate unit label messages)
        ├─ injectInlineLabels (new: tags appended to content, BLOCKED markers)

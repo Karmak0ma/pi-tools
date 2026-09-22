@@ -5,11 +5,12 @@ import { emptyState } from "../../src/state/reducer.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
 import { createRuntime, publishBaseline } from "../../src/runtime.ts";
 import { buildNudgeMessage } from "../../src/prompts/nudge.ts";
+import { currentHostSessionManager } from "../helpers/current-host.ts";
 
 function fixture() {
   const messages: AgentMessage[] = [{ role: "user", content: "old", timestamp: 1 }, { role: "user", content: "current", timestamp: 2 }];
   const entries = messages.map((message, index) => ({ type: "message", id: `entry-${index + 1}`, parentId: index ? `entry-${index}` : null, timestamp: new Date(index + 1).toISOString(), message }));
-  const ctx = { cwd: "/tmp", model: { provider: "test", id: "model", api: "test", contextWindow: 10_000 }, getContextUsage: () => ({ tokens: null, contextWindow: 10_000 }), sessionManager: { buildContextEntries: () => entries, getLeafId: () => "entry-2" } } as any;
+  const ctx = { cwd: "/tmp", model: { provider: "test", id: "model", api: "test", contextWindow: 10_000 }, getContextUsage: () => ({ tokens: null, contextWindow: 10_000 }), sessionManager: currentHostSessionManager(entries, "entry-2") } as any;
   return { messages, ctx };
 }
 

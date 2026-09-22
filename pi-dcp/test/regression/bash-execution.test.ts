@@ -3,6 +3,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { defaults } from "../../src/config/defaults.ts";
 import { emptyState } from "../../src/state/reducer.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
+import { currentHostSessionManager } from "../helpers/current-host.ts";
 
 /**
  * Regression cover for the 2026-08-21 `projection_unsupported` incident.
@@ -36,10 +37,7 @@ function fixture(excludeFromContext: boolean, exitCode: number | null | undefine
     cwd: "/tmp",
     model: { provider: "test", id: "model", api: "test", contextWindow: 10_000 },
     getContextUsage: () => ({ tokens: null, contextWindow: 10_000 }),
-    sessionManager: {
-      buildContextEntries: () => entries,
-      getLeafId: () => "entry-2",
-    },
+    sessionManager: currentHostSessionManager(entries, "entry-2"),
   } as any;
   return { bashExecution, messages, ctx };
 }

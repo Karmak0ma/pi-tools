@@ -3,7 +3,7 @@ import { defaults, type EffectiveConfig } from "../../src/config/defaults.ts";
 import { emptyState } from "../../src/state/reducer.ts";
 import { createRuntime, noteSuccessfulCompression } from "../../src/runtime.ts";
 import { buildProtocolUnits } from "../../src/identity/protocol.ts";
-import { projectContextEntries } from "../../src/identity/project.ts";
+import { projectCurrentEntries } from "../helpers/current-host.ts";
 import { estimatePotentialSavings, evaluateSemanticNudge } from "../../src/transform/semantic-nudge.ts";
 
 function config(): EffectiveConfig {
@@ -18,7 +18,7 @@ function indexFor(messages: any[]) {
     timestamp: new Date(index + 1).toISOString(),
     message,
   }));
-  const projection = projectContextEntries(entries as any);
+  const projection = projectCurrentEntries(entries as any);
   if (!projection.ok) throw new Error(projection.reason);
   const index = buildProtocolUnits(projection.messages);
   if (!("units" in index)) throw new Error(index.reason);

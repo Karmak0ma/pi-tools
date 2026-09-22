@@ -7,6 +7,7 @@ import { isCompressionParams } from "../../src/compression/schema.ts";
 import { createEnvelope, OPERATION_CUSTOM_TYPE } from "../../src/state/operations.ts";
 import { reconstructFromBranch } from "../../src/state/reconstruct.ts";
 import { adapterForModel } from "../../src/transform/adapters.ts";
+import { currentHostSessionManager } from "../helpers/current-host.ts";
 
 function context(messages: AgentMessage[], leaf: string) {
   const entries = messages.map((message, index) => ({
@@ -20,7 +21,7 @@ function context(messages: AgentMessage[], leaf: string) {
     cwd: "/tmp",
     model: { provider: "test", id: "model", api: "test", contextWindow: 10_000 },
     getContextUsage: () => ({ tokens: null, contextWindow: 10_000 }),
-    sessionManager: { buildContextEntries: () => entries, getLeafId: () => leaf },
+    sessionManager: currentHostSessionManager(entries, leaf),
   } as any;
 }
 

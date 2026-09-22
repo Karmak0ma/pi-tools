@@ -3,6 +3,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { defaults } from "../../src/config/defaults.ts";
 import { emptyState } from "../../src/state/reducer.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
+import { currentHostSessionManager } from "../helpers/current-host.ts";
 
 const APIs = ["openai-completions", "openai-responses", "anthropic-messages", "azure-openai-responses", "google-generative-ai", "openai-codex-responses", "opencode-cli-runner", "test"];
 
@@ -14,7 +15,7 @@ function fixture(api: string) {
     { role: "custom", customType: "block-summary", content: "historical summary", display: false, timestamp: 4 },
   ];
   const entries = messages.map((message, index) => ({ type: "message", id: `entry-${index + 1}`, parentId: index ? `entry-${index}` : null, timestamp: new Date(index + 1).toISOString(), message }));
-  return { messages, ctx: { cwd: "/tmp", model: { provider: "provider", id: "model", api, contextWindow: 20_000 }, getContextUsage: () => ({ tokens: null, contextWindow: 20_000 }), sessionManager: { buildContextEntries: () => entries, getLeafId: () => `entry-${entries.length}` } } as any };
+  return { messages, ctx: { cwd: "/tmp", model: { provider: "provider", id: "model", api, contextWindow: 20_000 }, getContextUsage: () => ({ tokens: null, contextWindow: 20_000 }), sessionManager: currentHostSessionManager(entries, `entry-${entries.length}`) } as any };
 }
 
 describe("generic adapter transforms", () => {
