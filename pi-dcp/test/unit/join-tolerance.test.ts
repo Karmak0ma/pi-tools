@@ -3,7 +3,7 @@ import { buildSessionProjection } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { defaults } from "../../src/config/defaults.ts";
 import { emptyState } from "../../src/state/reducer.ts";
-import { joinProjectedMessages } from "../../src/identity/join.ts";
+import { describeJoinMismatch, joinProjectedMessages } from "../../src/identity/join.ts";
 import { currentHostSessionManager, projectCurrentEntries } from "../helpers/current-host.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
 
@@ -41,6 +41,20 @@ describe("tolerant projected-message joins", () => {
     const projection = projectCurrentEntries(setup(messages).entries as any);
     expect(projection.ok).toBe(true);
     if (projection.ok) expect(joinProjectedMessages(projection.messages, messages)).toEqual({ ok: true, incomingByExpected: [0, 1] });
+  });
+
+  it("counts join mismatches as multisets", () => {
+    // Duplicates must be consumed one by one: one surviving twin must not
+    // hide that the other twin was changed before DCP saw it.
+    const canonical: AgentMessage[] = [
+      { role: "user", content: "same", timestamp: 1 },
+      { role: "user", content: "same", timestamp: 1 },
+      { role: "user", content: "other", timestamp: 2 },
+    ];
+    const projection = projectCurrentEntries(setup(canonical).entries as any);
+    expect(projection.ok).toBe(true);
+    const incoming = [canonical[0], { role: "user", content: "same, edited", timestamp: 1 } as AgentMessage, canonical[2]];
+    if (projection.ok) expect(describeJoinMismatch(projection.messages, incoming)).toEqual({ missingExpected: 1, unexpectedIncoming: 1 });
   });
 
   it("still fails closed when a duplicate-fingerprint extra creates genuine ambiguity", () => {

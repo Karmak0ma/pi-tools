@@ -84,6 +84,8 @@ export interface DcpRuntime {
    * its tool results and break protocol ordering.
    */
   pendingFallbackNotice?: string;
+  /** Per-session request outcomes; see ContextStats. */
+  contextStats: ContextStats;
   mutationBlocked: boolean;
   /**
    * Missing prompt capability may recover only if it interrupted a valid,
@@ -94,6 +96,27 @@ export interface DcpRuntime {
   logger: Logger;
   pi?: ExtensionAPI;
   pendingNudge?: { band: "soft" | "imperative" | "critical"; kind?: "context" | "turn" | "iteration"; nudgeKey: string };
+}
+
+/**
+ * Metadata-only outcomes of DCP's `context` hook, reset on session start.
+ *
+ * A raw request silently costs the full uncompressed history, and the
+ * one-shot notice only reports reason changes. These counters let `/dcp debug`
+ * show how often compression was lost and why, including when another
+ * extension changed session messages before DCP could match them.
+ */
+export interface ContextStats {
+  requests: number;
+  rawRequests: number;
+  rawByReason: Record<string, number>;
+  lastRawReason?: string;
+  lastRawTurn?: number;
+  lastJoin?: { missingExpected: number; unexpectedIncoming: number };
+}
+
+export function emptyContextStats(): ContextStats {
+  return { requests: 0, rawRequests: 0, rawByReason: {} };
 }
 
 export function createRuntime(pi?: ExtensionAPI): DcpRuntime {
@@ -115,6 +138,7 @@ export function createRuntime(pi?: ExtensionAPI): DcpRuntime {
     semanticIterationsSinceNudge: 0,
     lastReadiness: { ready: false, reason: "extension_disabled", generation: 0 },
     warnedReasonCodes: new Set(),
+    contextStats: emptyContextStats(),
     mutationBlocked: false,
     promptSectionsUnavailable: false,
     promptSectionsRecoveryAllowed: false,

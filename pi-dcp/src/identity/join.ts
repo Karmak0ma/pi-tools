@@ -19,6 +19,39 @@ export function joinProjectedMessages(expected: readonly ProjectedMessage[], inc
   for (const message of incoming) if (message.role === "assistant") for (const part of message.content) if (part.type === "toolCall") { if (seenCalls.has(part.id)) return { ok: false, reason: "protocol_invalid" }; seenCalls.add(part.id); }
   return { ok: true, incomingByExpected: mapping };
 }
+export interface JoinMismatch {
+  /** Session messages Pi projected but that did not reach DCP's `context` input unchanged. */
+  missingExpected: number;
+  /** Incoming messages that match no projected session message (other extensions' extras). */
+  unexpectedIncoming: number;
+}
+
+/**
+ * Count fingerprint differences between the projection and the incoming
+ * context, as multisets. This is diagnostic only: it explains a raw fallback
+ * to the user, and never influences whether the join is accepted.
+ *
+ * A nonzero `missingExpected` is the useful signal. DCP tolerates added
+ * messages, but a session message that is absent from its input was changed or
+ * removed before DCP saw it - usually by an earlier `context` handler.
+ */
+export function describeJoinMismatch(expected: readonly ProjectedMessage[], incoming: readonly AgentMessage[]): JoinMismatch {
+  const available = new Map<string, number>();
+  for (const message of incoming) {
+    const fingerprint = fingerprintMessage(message);
+    available.set(fingerprint, (available.get(fingerprint) || 0) + 1);
+  }
+  let missingExpected = 0;
+  for (const item of expected) {
+    const count = available.get(item.fingerprint) || 0;
+    if (count > 0) available.set(item.fingerprint, count - 1);
+    else missingExpected++;
+  }
+  let unexpectedIncoming = 0;
+  for (const count of available.values()) unexpectedIncoming += count;
+  return { missingExpected, unexpectedIncoming };
+}
+
 function search(candidates: readonly number[][], position: number, previous: number, current: number[], solutions: number[][], limit: number): void {
   if (solutions.length >= limit) return;
   if (position === candidates.length) { solutions.push([...current]); return; }

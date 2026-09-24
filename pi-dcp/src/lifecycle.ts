@@ -15,7 +15,7 @@ import { relocateCacheBreakpoint } from "./transform/cache-breakpoint.ts";
 import { evaluateSettledStrategies } from "./strategies/settle.ts";
 import { createEnvelope, isOperationEnvelope, OPERATION_CUSTOM_TYPE, type OpEnvelope } from "./state/operations.ts";
 import { reduceEnvelope, markAvailability, type ReducedState } from "./state/reducer.ts";
-import { clearBaselines, disableRuntime, invalidateSnapshot, publishBaseline, resetSemanticNudges, runtimeSessionIdentity, setDcpToolActive, type DcpRuntime } from "./runtime.ts";
+import { clearBaselines, disableRuntime, emptyContextStats, invalidateSnapshot, publishBaseline, resetSemanticNudges, runtimeSessionIdentity, setDcpToolActive, type DcpRuntime } from "./runtime.ts";
 import { modelKey } from "./identity/snapshot.ts";
 import { buildSystemGuidance, DCP_SYSTEM_SECTION } from "./prompts/defaults.ts";
 import { estimatePotentialSavings, evaluateSemanticNudge } from "./transform/semantic-nudge.ts";
@@ -78,6 +78,8 @@ export function registerLifecycle(pi: ExtensionAPI, runtime: DcpRuntime): void {
 
 async function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionAPI): Promise<void> {
   runtime.lastOutgoingContext = undefined;
+  // Counters describe one session; a switch or reload starts a new count.
+  runtime.contextStats = emptyContextStats();
   const capability = checkContextCapabilities(ctx);
   if (!capability.ok) {
     disableRuntime(runtime, "capability_missing");
@@ -248,12 +250,14 @@ async function transformContext(event: ContextEvent, ctx: ExtensionContext, runt
   const fallback = deepClone(event.messages);
   if (!runtime.valid) {
     const nudge = buildNudgeMessage(runtime);
+    recordContextOutcome(runtime, runtime.lastReadiness?.reason || "extension_disabled");
     recordOutgoingContextState(runtime);
     return { messages: nudge ? [...fallback, nudge] : fallback };
   }
   if (runtime.mutationBlocked) {
     runtime.lastReadiness = { ready: false, reason: "state_invalidated", generation: runtime.generation };
     const nudge = buildNudgeMessage(runtime);
+    recordContextOutcome(runtime, "state_invalidated");
     recordOutgoingContextState(runtime);
     return { messages: nudge ? [...fallback, nudge] : fallback };
   }
@@ -291,7 +295,7 @@ async function transformContext(event: ContextEvent, ctx: ExtensionContext, runt
       // already been consumed by an unrelated reason earlier in the run.
       if (runtime.fallbackReason !== reason) {
         runtime.fallbackReason = reason;
-        runtime.pendingFallbackNotice = `pi-dcp: context compression disabled: ${reason}. Every request is now sent uncompressed. Restarting the session usually clears this.`;
+        runtime.pendingFallbackNotice = `pi-dcp: context compression disabled: ${reason}. Every request is now sent uncompressed. ${fallbackHint(result.join)}`;
         if (!runtime.warnedReasonCodes.has(reason)) {
           runtime.warnedReasonCodes.add(reason);
           ctx.ui?.notify?.(`pi-dcp: context transform disabled: ${reason}`);
@@ -307,9 +311,34 @@ async function transformContext(event: ContextEvent, ctx: ExtensionContext, runt
       reason: result.reason,
     };
     const nudge = buildNudgeMessage(runtime);
+    recordContextOutcome(runtime, result.reason, result.join);
     recordOutgoingContextState(runtime);
     return { messages: nudge ? [...result.messages, nudge] : result.messages };
   });
+}
+
+/** Count one `context` request; a defined reason means it was sent raw. */
+function recordContextOutcome(runtime: DcpRuntime, rawReason: string | undefined, join?: { missingExpected: number; unexpectedIncoming: number }): void {
+  const stats = runtime.contextStats;
+  stats.requests++;
+  if (join) stats.lastJoin = { ...join };
+  if (rawReason === undefined) return;
+  stats.rawRequests++;
+  stats.rawByReason[rawReason] = (stats.rawByReason[rawReason] || 0) + 1;
+  stats.lastRawReason = rawReason;
+  stats.lastRawTurn = runtime.turnCount;
+}
+
+/**
+ * Name the likely cause when session messages were missing from the context
+ * DCP received. DCP cannot see which extension changed them, only that the
+ * exact projected messages did not arrive, so the hint stays conditional.
+ */
+function fallbackHint(join: { missingExpected: number } | undefined): string {
+  if (join && join.missingExpected > 0) {
+    return `${join.missingExpected} session message(s) did not reach pi-dcp unchanged; another extension's context handler may have changed them. See /dcp debug.`;
+  }
+  return "Restarting the session usually clears this. See /dcp debug.";
 }
 
 function recordOutgoingContextState(runtime: DcpRuntime): void {

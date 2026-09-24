@@ -7,6 +7,22 @@ function numberOrUnknown(value: number | null | undefined): string {
   return value == null ? "unknown" : String(value);
 }
 
+/**
+ * Summarize raw (uncompressed) requests. The join line matters most when it
+ * reports missing session messages: that is the only visible sign that an
+ * earlier extension changed context and made DCP fail closed.
+ */
+function contextStatsLines(runtime: DcpRuntime): string[] {
+  const stats = runtime.contextStats;
+  const reasons = Object.entries(stats.rawByReason).map(([reason, count]) => `${reason}=${count}`).join(", ") || "none";
+  const last = stats.lastRawReason ? `; last=${stats.lastRawReason} at turn ${stats.lastRawTurn}` : "";
+  const join = stats.lastJoin;
+  const joinLine = join
+    ? `last join: missing session messages=${join.missingExpected}; pass-through extras=${join.unexpectedIncoming}${join.missingExpected > 0 ? " (another extension may have changed context)" : ""}`
+    : "last join: none recorded";
+  return [`raw requests: ${stats.rawRequests} of ${stats.requests}${last}; by reason: ${reasons}`, joinLine];
+}
+
 function turns(value: number): string {
   return Number.isFinite(value) ? String(value) : "∞";
 }
@@ -28,6 +44,7 @@ export async function debugCommand(ctx: ExtensionCommandContext, pi: ExtensionAP
     `last transform: ${runtime.lastTransform?.reason || "ok"}; changed=${runtime.lastTransform?.changed ?? "unknown"}; savings=${numberOrUnknown(runtime.lastTransform?.savingsTokens)}`,
     `nudge: ${evaluation ? evaluation.reason : "no context transform recorded"}${evaluation?.decision ? `; selected=${evaluation.decision.kind}:${evaluation.decision.type}` : ""}`,
     evaluation ? `nudge inputs: tokens=${numberOrUnknown(evaluation.tokens)}; window=${evaluation.contextWindow}; thresholds=${evaluation.min}/${evaluation.max}/${evaluation.critical} tokens; turnsSince=${turns(evaluation.turnsSinceNudge)}; alreadyThisTurn=${evaluation.alreadyNudgedThisTurn}; potentialSavings=${numberOrUnknown(evaluation.potentialSavingsTokens)}; semanticTurns=${turns(evaluation.userTurnsSinceCompression ?? Number.POSITIVE_INFINITY)}; iterations=${turns(evaluation.iterationsSinceUserTurn ?? Number.POSITIVE_INFINITY)}` : "nudge inputs: unavailable",
+    ...contextStatsLines(runtime),
     `nudge delivery: lastSentTurn=${runtime.lastNudgeTurn ?? "never"}; baselines=${runtime.baselines.order.length}; latest=${latestBaseline(runtime) ? "retained" : "none"}`,
     `runtime version:       ${VERSION}`,
     `active model:          ${model ? `${model.provider}/${model.id}` : "none yet"}`,

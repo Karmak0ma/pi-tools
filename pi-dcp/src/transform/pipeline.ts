@@ -4,7 +4,7 @@ import { deepClone } from "../util/clone.ts";
 import { hashJson } from "../util/hash.ts";
 import { buildProtocolUnits } from "../identity/protocol.ts";
 import { projectSessionManager, type ProjectionResult } from "../identity/project.ts";
-import { joinProjectedMessages } from "../identity/join.ts";
+import { describeJoinMismatch, joinProjectedMessages, type JoinMismatch } from "../identity/join.ts";
 import { createBaselineSnapshot, modelKey } from "../identity/snapshot.ts";
 import type { BaselineSnapshot, CanonicalIndex, ProjectedMessage } from "../identity/types.ts";
 import { markAvailability, type ReducedState } from "../state/reducer.ts";
@@ -40,6 +40,12 @@ export interface TransformResult {
   nudge?: NudgeEvaluation;
   confidence: "reported" | "heuristic";
   reason?: string;
+  /**
+   * Join diagnostics for `/dcp debug`. Present whenever the transform reached
+   * the join: on success it counts pass-through extras; on a failed join it
+   * also counts session messages missing from the incoming context.
+   */
+  join?: JoinMismatch;
 }
 
 /**
@@ -55,8 +61,10 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
     // validation below remain the fail-closed safety net for malformed output.
     const adapter = adapterForModel({ api: options.ctx.model?.api || "unknown" });
     const joined = resolveProjectionAndJoin(input, options.ctx);
-    if (!joined.ok) return failure(fallback, state, joined.reason);
+    if (!joined.ok) return { ...failure(fallback, state, joined.reason), join: joined.mismatch };
     const { projection, incomingByFullIndex, canonicalMessages } = joined;
+    const matched = incomingByFullIndex.filter((incomingIndex) => incomingIndex >= 0).length;
+    const join: JoinMismatch = { missingExpected: 0, unexpectedIncoming: input.length - matched };
     const indexResult = buildProtocolUnits(projection.messages);
     if (!("units" in indexResult)) return failure(fallback, state, indexResult.reason);
 
@@ -97,10 +105,10 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
     const labeled = injectInlineLabels(applyPersistedRedactions(canonicalMessages, availableState), indexResult.units, snapshot);
     const rendered = replaceBlocksWithOrigins(labeled, indexResult.units, snapshot, availableState);
     const transformed = mergeProjectedOutput(input, incomingByFullIndex, rendered.byProjectedIndex);
-    if (!validateProtocol(transformed)) return failure(fallback, state, "protocol_invalid");
+    if (!validateProtocol(transformed)) return { ...failure(fallback, state, "protocol_invalid"), join };
     const wire = adapter.canonicalWire(transformed);
     const wireValidation = adapter.validateWire(wire);
-    if (!wireValidation.ok) return failure(fallback, state, "provider_adapter_unsupported");
+    if (!wireValidation.ok) return { ...failure(fallback, state, "provider_adapter_unsupported"), join };
     const beforeEstimate = estimateTokens(input).total;
     const afterEstimate = estimateTokens(transformed).total;
     return {
@@ -116,6 +124,7 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
       // true source message that changed; the value is diagnostic only.
       changedPrefix: firstChangedMessage(input, transformed),
       confidence: options.ctx.getContextUsage()?.tokens != null ? "reported" : "heuristic",
+      join,
     };
   } catch (error) {
     const reason = error instanceof Error && error.message === "alias_overflow" ? "alias_overflow" : "projection_unsupported";
@@ -127,14 +136,16 @@ type CompleteProjection = Extract<ProjectionResult, { ok: true }>;
 
 type JoinedProjection =
   | { ok: true; projection: CompleteProjection; incomingByFullIndex: number[]; canonicalMessages: AgentMessage[] }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; mismatch?: JoinMismatch };
 
 function resolveProjectionAndJoin(input: readonly AgentMessage[], ctx: ExtensionContext): JoinedProjection {
   const projection = projectSessionManager(ctx.sessionManager);
   if (!projection.ok) return projection;
   const visible = buildProviderVisibleProjection(projection.messages);
   const join = joinProjectedMessages(visible.messages, input);
-  if (!join.ok) return join;
+  // Mismatch counting re-fingerprints the input, so it runs only on the rare
+  // failure path where the user needs an explanation.
+  if (!join.ok) return { ...join, mismatch: describeJoinMismatch(visible.messages, input) };
   const incomingByFullIndex = mapVisibleJoinToFull(projection.messages.length, visible.fullIndexes, join.incomingByExpected);
   const canonicalMessages = projection.messages.map((item, fullIndex) => {
     const incomingIndex = incomingByFullIndex[fullIndex];

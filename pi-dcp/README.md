@@ -40,6 +40,8 @@ Threshold decisions are persisted as `nudge.requested` v2 operations. On the nex
 
 `/dcp context` reports the last nudge evaluation and the turn on which a nudge was last inserted. `/dcp debug` adds the non-sensitive inputs used for that decision: reported token usage, context window, resolved minimum/maximum/critical token thresholds, turns since the last nudge, whether the current turn was already nudged, the selected severity, and the last transform result. Reasons include `usage_unavailable`, `below_minimum`, `interval_not_elapsed`, `nothing_compressible`, `potential_savings_below_minimum`, `semantic_interval_not_elapsed`, `already_nudged_this_turn`, and `ready`. No nudge text, summaries, tool arguments, paths, or provider credentials are logged.
 
+`/dcp debug` also counts raw requests for the current session: how many requests were sent uncompressed, grouped by reason, plus the last join result. `missing session messages` above zero means session messages did not reach pi-dcp unchanged, usually because another extension's `context` handler changed them; pi-dcp then fails closed and sends that request raw. `/dcp context` shows the short raw-request count.
+
 Nudges are scheduled after an agent settles and delivered through the next successful context transformation. A debug command run before any context transformation reports that no context transform has been recorded; run it after an agent request when diagnosing a missing nudge.
 
 ### Notification channels

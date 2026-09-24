@@ -10,6 +10,7 @@ import { defaults } from "../../src/config/defaults.ts";
 import { emptyState } from "../../src/state/reducer.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
 import { registerLifecycle } from "../../src/lifecycle.ts";
+import { debugCommand } from "../../src/commands/debug.ts";
 import { DCP_SYSTEM_SECTION } from "../../src/prompts/defaults.ts";
 import { sha256 } from "../../src/util/hash.ts";
 
@@ -861,6 +862,53 @@ describe("extension capability gate", () => {
     expect(diagnostics).toHaveLength(2);
     expect(diagnostics[0]).toMatchObject({ reason: "projection_unsupported" });
     expect(notices).toEqual(["pi-dcp: context transform disabled: projection_unsupported"]);
+  });
+
+  it("counts raw requests and explains session messages changed before DCP", async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => Promise<any>>();
+    const runtime = createRuntime();
+    registerLifecycle({ on: (name: string, handler: (event: any, ctx: any) => Promise<any>) => { handlers.set(name, handler); } } as any, runtime);
+    const messages = [
+      { role: "user", content: "first", timestamp: 1 },
+      { role: "assistant", content: [{ type: "text", text: "done" }], provider: "test", model: "model", api: "test", stopReason: "stop", timestamp: 2 },
+      { role: "user", content: "latest", timestamp: 3 },
+    ] as any[];
+    const entries = messages.map((message, index) => ({ type: "message", id: `entry-${index + 1}`, parentId: index ? `entry-${index}` : null, timestamp: new Date(index + 1).toISOString(), message }));
+    const ctx = {
+      ui: { notify: () => undefined },
+      model: { provider: "test", id: "model", api: "test", contextWindow: 10_000 },
+      getContextUsage: () => ({ tokens: null, contextWindow: 10_000 }),
+      sessionManager: { buildSessionProjection: () => buildSessionProjection(entries as any, "entry-3"), getLeafId: () => "entry-3" },
+    } as any;
+    const extra = { role: "custom", customType: "other-extension", content: "added", display: false, timestamp: 0 };
+
+    // A tolerated extra is counted but does not make the request raw.
+    await handlers.get("context")?.({ messages: [extra, ...messages] }, ctx);
+    expect(runtime.contextStats).toMatchObject({ requests: 1, rawRequests: 0, lastJoin: { missingExpected: 0, unexpectedIncoming: 1 } });
+
+    // An earlier handler rewrote a session message: DCP fails closed and the
+    // counters plus the notice name the likely cause.
+    const edited = [{ ...messages[0], content: "first, decorated by another extension" }, messages[1], messages[2]];
+    await handlers.get("context")?.({ messages: edited }, ctx);
+    expect(runtime.contextStats).toMatchObject({
+      requests: 2,
+      rawRequests: 1,
+      rawByReason: { join_ambiguous: 1 },
+      lastRawReason: "join_ambiguous",
+      lastJoin: { missingExpected: 1, unexpectedIncoming: 1 },
+    });
+    expect(runtime.pendingFallbackNotice).toContain("1 session message(s) did not reach pi-dcp unchanged");
+
+    // Requests passed through while DCP is disabled are raw as well.
+    runtime.valid = false;
+    runtime.lastReadiness = { ready: false, reason: "extension_disabled", generation: runtime.generation };
+    await handlers.get("context")?.({ messages }, ctx);
+    expect(runtime.contextStats.rawByReason).toEqual({ join_ambiguous: 1, extension_disabled: 1 });
+
+    const notices: string[] = [];
+    await debugCommand({ getContextUsage: () => undefined, ui: { notify: (text: string) => notices.push(text) } } as any, { getActiveTools: () => [] } as any, runtime);
+    expect(notices[0]).toContain("raw requests: 2 of 3; last=extension_disabled at turn 0; by reason: join_ambiguous=1, extension_disabled=1");
+    expect(notices[0]).toContain("last join: missing session messages=1; pass-through extras=1 (another extension may have changed context)");
   });
 
   it("does not inject transient nudges during context transformation", () => {
