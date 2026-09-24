@@ -2,8 +2,17 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fingerprintMessage } from "./fingerprint.ts";
 import type { ProjectedMessage, JoinResult } from "./types.ts";
 
-export function joinProjectedMessages(expected: readonly ProjectedMessage[], incoming: readonly AgentMessage[]): JoinResult {
-  const incomingFingerprints = incoming.map(fingerprintMessage);
+/**
+ * Fingerprint the `context` input once per request. Pi structured-clones the
+ * input before extension handlers run, so these objects are never the
+ * projection's objects and must be hashed; the pipeline passes the result to
+ * both the join and, on failure, the mismatch diagnostic.
+ */
+export function fingerprintIncoming(incoming: readonly AgentMessage[]): string[] {
+  return incoming.map(fingerprintMessage);
+}
+
+export function joinProjectedMessages(expected: readonly ProjectedMessage[], incoming: readonly AgentMessage[], incomingFingerprints: readonly string[] = fingerprintIncoming(incoming)): JoinResult {
   // Duplicate fingerprints among `expected` are not preemptively rejected:
   // equal-fingerprint messages are content-identical by construction, so any
   // order-preserving pairing between them produces the same labeled output.
@@ -35,12 +44,9 @@ export interface JoinMismatch {
  * messages, but a session message that is absent from its input was changed or
  * removed before DCP saw it - usually by an earlier `context` handler.
  */
-export function describeJoinMismatch(expected: readonly ProjectedMessage[], incoming: readonly AgentMessage[]): JoinMismatch {
+export function describeJoinMismatch(expected: readonly ProjectedMessage[], incoming: readonly AgentMessage[], incomingFingerprints: readonly string[] = fingerprintIncoming(incoming)): JoinMismatch {
   const available = new Map<string, number>();
-  for (const message of incoming) {
-    const fingerprint = fingerprintMessage(message);
-    available.set(fingerprint, (available.get(fingerprint) || 0) + 1);
-  }
+  for (const fingerprint of incomingFingerprints) available.set(fingerprint, (available.get(fingerprint) || 0) + 1);
   let missingExpected = 0;
   for (const item of expected) {
     const count = available.get(item.fingerprint) || 0;

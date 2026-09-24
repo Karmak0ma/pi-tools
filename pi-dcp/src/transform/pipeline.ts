@@ -4,7 +4,7 @@ import { deepClone } from "../util/clone.ts";
 import { hashJson } from "../util/hash.ts";
 import { buildProtocolUnits } from "../identity/protocol.ts";
 import { projectSessionManager, type ProjectionResult } from "../identity/project.ts";
-import { describeJoinMismatch, joinProjectedMessages, type JoinMismatch } from "../identity/join.ts";
+import { describeJoinMismatch, fingerprintIncoming, joinProjectedMessages, type JoinMismatch } from "../identity/join.ts";
 import { createBaselineSnapshot, modelKey } from "../identity/snapshot.ts";
 import type { BaselineSnapshot, CanonicalIndex, ProjectedMessage } from "../identity/types.ts";
 import { markAvailability, type ReducedState } from "../state/reducer.ts";
@@ -142,10 +142,11 @@ function resolveProjectionAndJoin(input: readonly AgentMessage[], ctx: Extension
   const projection = projectSessionManager(ctx.sessionManager);
   if (!projection.ok) return projection;
   const visible = buildProviderVisibleProjection(projection.messages);
-  const join = joinProjectedMessages(visible.messages, input);
-  // Mismatch counting re-fingerprints the input, so it runs only on the rare
-  // failure path where the user needs an explanation.
-  if (!join.ok) return { ...join, mismatch: describeJoinMismatch(visible.messages, input) };
+  const incomingFingerprints = fingerprintIncoming(input);
+  const join = joinProjectedMessages(visible.messages, input, incomingFingerprints);
+  // Mismatch counting runs only on the rare failure path where the user needs
+  // an explanation, and reuses the join's fingerprints.
+  if (!join.ok) return { ...join, mismatch: describeJoinMismatch(visible.messages, input, incomingFingerprints) };
   const incomingByFullIndex = mapVisibleJoinToFull(projection.messages.length, visible.fullIndexes, join.incomingByExpected);
   const canonicalMessages = projection.messages.map((item, fullIndex) => {
     const incomingIndex = incomingByFullIndex[fullIndex];

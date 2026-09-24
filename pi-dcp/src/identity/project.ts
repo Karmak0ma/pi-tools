@@ -126,8 +126,16 @@ function hostMessagesMatch(rawMessages: readonly unknown[], projected: readonly 
     if (!isValidProjectedMessage(value)) return false;
     if (!isProviderDroppedAssistantMessage(value)) providerMessages.push(value);
   }
+  // Pi builds the flat list as `entries.flatMap(entry => entry.messages)`, so
+  // each flat message is normally the same object that appendProjectedMessages
+  // already fingerprinted. fingerprintMessage is a pure function of the
+  // message, so the same object needs no second hash; this removed one full
+  // fingerprint pass per request. A host that builds the list from different
+  // objects still gets the full content comparison and fails closed on any
+  // difference.
   return providerMessages.length === projected.length
-    && providerMessages.every((message, index) => fingerprintMessage(message) === projected[index]?.fingerprint);
+    && providerMessages.every((message, index) => message === projected[index]?.message
+      || fingerprintMessage(message) === projected[index]?.fingerprint);
 }
 
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {

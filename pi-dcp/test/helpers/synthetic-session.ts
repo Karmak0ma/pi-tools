@@ -200,8 +200,12 @@ export function buildSyntheticSession(options: SyntheticSessionOptions = DEFAULT
  * provider boundary drops.
  */
 export function contextEventMessages(entries: readonly unknown[], leafId: string): AgentMessage[] {
-  return buildSessionProjection(entries as any, leafId).messages.filter((message) => message.role !== "system"
-    && !(message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")));
+  // Pi's ExtensionRunner.emitContext structured-clones the messages before any
+  // handler runs. Clone here too: without it the input would share objects with
+  // the session projection, and an identity-based shortcut would look faster in
+  // the benchmark than it is in real Pi.
+  return structuredClone(buildSessionProjection(entries as any, leafId).messages.filter((message) => message.role !== "system"
+    && !(message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted"))));
 }
 
 export interface ContextHarness {

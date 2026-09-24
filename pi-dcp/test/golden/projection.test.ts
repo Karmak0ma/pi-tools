@@ -123,10 +123,21 @@ describe("Pi session projection adapter", () => {
 
   it("fails closed when a host projection loses source/message alignment", () => {
     const result = projectHostSessionProjection(() => ({
-      entries: [{ sourceEntry: { type: "message", id: "user-1", parentId: null, timestamp }, messages: [{ role: "user", content: "question", timestamp: 1 }] }],
+      entries: [{ sourceEntry: { type: "message", id: "user-1", parentId: null, timestamp, message: { role: "user", content: "question", timestamp: 1 } }, messages: [{ role: "user", content: "question", timestamp: 1 }] }],
       messages: [],
     }));
 
     expect(result).toEqual({ ok: false, reason: "projection_unsupported" });
+  });
+
+  it("compares flat host messages by content when they are not the per-entry objects", () => {
+    // Pi normally shares objects between `entries[].messages` and `messages`,
+    // which lets DCP skip a second fingerprint. A host that copies them must
+    // still be checked by content, in both directions.
+    const message = { role: "user", content: "question", timestamp: 1 };
+    const host = (flat: unknown) => ({ entries: [{ sourceEntry: { type: "message", id: "user-1", parentId: null, timestamp, message }, messages: [message] }], messages: [flat] });
+
+    expect(projectHostSessionProjection(() => host(structuredClone(message))).ok).toBe(true);
+    expect(projectHostSessionProjection(() => host({ ...message, content: "changed" }))).toEqual({ ok: false, reason: "projection_unsupported" });
   });
 });
