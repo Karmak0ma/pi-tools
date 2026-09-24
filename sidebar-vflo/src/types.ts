@@ -1,7 +1,7 @@
-export type SidebarPanelId = "model" | "activity" | "context" | "limits" | "usage" | "todos" | "subagents";
+export type SidebarPanelId = "model" | "context" | "limits" | "usage" | "todos" | "subagents" | "diff";
+// Panels whose list can be expanded/collapsed by clicking on them.
+export type ExpandablePanelId = "todos" | "diff";
 export type SidebarColorPreset = "monokai" | "catppuccin" | "dracula";
-
-export type ActivityState = "ready" | "working" | "warning" | "error";
 
 export interface SidebarConfig {
 	showSidebarOnStartup: boolean;
@@ -67,22 +67,36 @@ export interface LimitsState {
 	note?: string;
 }
 
-export interface ActivitySnapshot {
-	state: ActivityState;
-	label: string;
-	activeTools: string[];
+// One changed file in the working tree, relative to HEAD.
+//
+// `added`/`removed` are null when git gives no line counts: binary files, and
+// untracked files. Untracked files are listed but their lines are NOT counted
+// on purpose: counting would mean reading every new file after every tool run,
+// and an un-ignored build folder could make that very slow.
+export interface DiffFile {
+	path: string;
+	added: number | null;
+	removed: number | null;
+	untracked: boolean;
+}
+
+// What the Diff panel shows. The snapshot holds `undefined` instead of this
+// when the session folder is not a git repository (or git is missing); the
+// panel is then hidden, because "no changes" would be a false statement.
+export interface DiffSummary {
+	files: DiffFile[];
 }
 
 export interface SidebarSnapshot {
 	model: ModelState | undefined;
 	thinkingLevel: string | undefined;
-	activity: ActivitySnapshot;
 	context: ContextUsage | undefined;
 	// Subscription rate-limit state for the current model/provider.
 	limits: LimitsState;
 	usage: TokenUsage;
 	todos: TodoItem[];
 	subagents: SubagentItem[];
+	diff: DiffSummary | undefined;
 }
 
 export const DEFAULT_CONFIG: SidebarConfig = {
@@ -91,11 +105,11 @@ export const DEFAULT_CONFIG: SidebarConfig = {
 	width: 44,
 	panels: {
 		model: true,
-		activity: true,
 		context: true,
 		limits: true,
 		usage: true,
 		todos: true,
 		subagents: true,
+		diff: true,
 	},
 };

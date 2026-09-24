@@ -11,14 +11,14 @@ The extension is intentionally independent of pi-atelier's runtime state. `pi-at
 The sidebar has seven independently toggleable panels, in this order:
 
 1. **Model** — provider/model identifier and current thinking level.
-2. **Activity** — ready/working state, current activity label, and active tool names.
-3. **Context** — current context-window tokens, capacity, a fill bar, and percentage. Pi can report unknown tokens/percentage immediately after compaction, so the panel displays `?` rather than inventing a value.
-4. **Limits** — subscription rate-limit buckets for the current provider (e.g. the 5-hour and weekly windows used by Anthropic and OpenAI Codex, or GitHub Copilot's monthly premium-request quota), each as a label, a remaining-percentage figure, and its own meter bar. Unlike the Context bar, which fills as usage grows, each Limits bar *empties* as the remaining allowance shrinks. The panel is hidden **only** when the provider has no subscription semantics (plain API-key billing). For a subscription provider the panel is always shown: when numbers are missing or stale it renders a short status note (`Waiting for usage data…`, `8m ago`, `refresh failed: …`) instead of disappearing, because a silently vanishing panel hides real failures.
-5. **Session usage** — cumulative assistant usage reconstructed from the current session branch: input, output, cache-read, and cache-hit percentage. Cache hit is `cacheRead / (input + cacheRead + cacheWrite)`.
-6. **Todos** — the latest valid `@juicesharp/rpiv-todo` tool snapshot, including pending, in-progress, and completed tasks. Collapsed to 8 items by default; click the panel (fullscreen TUI mode) or press `alt+t` (any TUI mode) to expand it to the full list.
-7. **Subagents** — tasks observed from `subagents-vflo`'s `subagent` tool events.
+2. **Context** — current context-window tokens, capacity, a fill bar, and percentage. Pi can report unknown tokens/percentage immediately after compaction, so the panel displays `?` rather than inventing a value.
+3. **Limits** — subscription rate-limit buckets for the current provider (e.g. the 5-hour and weekly windows used by Anthropic and OpenAI Codex, or GitHub Copilot's monthly premium-request quota), each as a label, a remaining-percentage figure, and its own meter bar. Unlike the Context bar, which fills as usage grows, each Limits bar *empties* as the remaining allowance shrinks. The panel is hidden **only** when the provider has no subscription semantics (plain API-key billing). For a subscription provider the panel is always shown: when numbers are missing or stale it renders a short status note (`Waiting for usage data…`, `8m ago`, `refresh failed: …`) instead of disappearing, because a silently vanishing panel hides real failures.
+4. **Session usage** — cumulative assistant usage reconstructed from the current session branch: input, output, cache-read, and cache-hit percentage. Cache hit is `cacheRead / (input + cacheRead + cacheWrite)`.
+5. **Todos** — the latest valid `@juicesharp/rpiv-todo` tool snapshot, including pending, in-progress, and completed tasks. Collapsed to 8 items by default; click the panel (fullscreen TUI mode only) to expand it to the full list.
+6. **Subagents** — tasks observed from `subagents-vflo`'s `subagent` tool events.
+7. **Diff** — uncommitted changes in the session's git repository: a summary line (`N files  +A -R`, additions green, removals red) and one row per file with its own counts. Collapsed to 5 files by default; click the panel (fullscreen TUI mode only) to list all files. See "Diff panel" below.
 
-Panels are width-safe and height-aware. Model, activity, and context are required when enabled; lower-priority panels (including Limits) may be omitted when the terminal is too short to render all enabled content. All rendered lines are truncated/padded to the overlay width.
+Panels are width-safe and height-aware. Model and context are required when enabled; lower-priority panels (including Limits) may be omitted when the terminal is too short to render all enabled content. All rendered lines are truncated/padded to the overlay width.
 
 ## Lifecycle and rendering
 
@@ -26,24 +26,34 @@ Panels are width-safe and height-aware. Model, activity, and context are require
 - `session_start` loads user configuration and, in TUI mode, starts one persistent `ctx.ui.custom()` overlay.
 - The overlay is anchored at `top-right`, is non-capturing, and uses a copied/adapted `SplitPaneController` from pi-atelier to reserve the sidebar width in both regular and fullscreen Pi renderers.
 - `session_shutdown` closes the overlay and restores the renderer/layout root. No footer API is called at any point.
-- Events update in-memory state and request a TUI render. There are no filesystem watchers or subprocesses.
+- Events update in-memory state and request a TUI render. There are no filesystem watchers. The only subprocess is `git`, run for the Diff panel on specific events (see "Diff panel" below).
 - One bounded, session-scoped timer polls subscription/limits data while the sidebar is visible (see "Subscription/limits refresh" below); it is the extension's only background timer and it is always cleared before the process could be kept alive by it.
 - One passive terminal-input listener observes already-flowing mouse reports in fullscreen mode to support Todos-panel click-to-expand (see "Todos click-to-expand" below); it never enables terminal mouse tracking itself.
 
-The default width is 44 columns, constrained to 28–72 by the split controller. The pane automatically disappears when the terminal cannot preserve the minimum main content width. The `alt+s` shortcut and `/sidebar [show|hide|toggle]` control visibility.
+The default width is 44 columns, constrained to 28–72 by the split controller. The pane automatically disappears when the terminal cannot preserve the minimum main content width. The `alt+s` shortcut and `/sidebar [show|hide|toggle]` control visibility. There is deliberately no keyboard shortcut to expand panels; expansion is click-only.
 
 ## Refresh cadence
 
 - **Context** — `ctx.getContextUsage()` is re-derived fresh on every render, so the panel is only as current as the last render pass. To keep it visibly live, the extension requests a render on every context-adjacent lifecycle event it can observe: `agent_start`, `turn_start`, `turn_end`, `before_provider_request`, `message_start`, `message_update`, `message_end`, `agent_end`, `agent_settled`, `tool_execution_start/update/end`, `tool_result`, `session_compact`, and `session_tree`. There is no dedicated "context changed" event in Pi's extension API, so this list is deliberately broad rather than exhaustively precise.
 - **Limits (subscription usage)** — the sidebar performs **no** provider request. Provider usage endpoints are rate limited hard (Anthropic's `/api/oauth/usage` answers `429` to a second call made a few seconds after the first, and stays locked out for minutes), so a second poller does not get its own copy of the data — it makes both pollers fail at random. `pi-usage-vflo` is therefore the single owner of the network call: it publishes every success and every failure to `~/.pi/agent/usage-vflo-shared.json`, and the sidebar only reads that file, on `session_start`, on `model_select`, and on a 30-second timer while the sidebar is visible. Reading a small local file is cheap, so the cadence is about how fast the panel picks up data the usage extension already fetched (it refreshes every 5 minutes). The timer is `unref`'d (never keeps the process alive on its own), is cleared whenever the sidebar is hidden or the session ends, and is not restarted until the sidebar becomes visible again. It also stops for providers without subscription semantics, whose limits can never exist.
 
-## Todos click-to-expand
+## Diff panel
 
-The Todos panel caps its list at 8 items by default. Clicking anywhere on the rendered panel — fullscreen TUI mode only — or pressing `alt+t` (both TUI modes) toggles between the capped and full list.
+The panel shows what `git diff HEAD` plus `git status` would show, for the whole repository that contains the session folder:
 
-The click path only works in Pi's fullscreen (alt-screen) renderer, because that is the only mode where Pi already enables terminal mouse reporting for its own scrolling/selection handling. Sidebar VFLO never calls the terminal mouse-tracking escape sequences itself; it registers a passive `ctx.ui.onTerminalInput` listener that only inspects SGR mouse reports Pi's own renderer is already emitting, and it only ever consumes a report that both (a) is an unmodified primary-button press and (b) lands within the last-rendered Todos panel's bounds — every other report (motion, release, wheel, modified clicks, clicks outside the panel, or any click while a real capturing dialog like the `/sidebar` settings menu is open) passes through completely untouched. In regular (non-fullscreen/scrollback) TUI mode, Pi does not enable mouse tracking, so native terminal text selection and copy/paste are unaffected there, and the click path is intentionally a no-op — `alt+t` is the only way to expand Todos in that mode.
+- **Tracked changes:** `git --no-optional-locks diff --numstat -z --no-renames HEAD`. This covers staged and unstaged changes. In a new repository without a commit, `HEAD` does not exist, so the command is repeated against git's empty tree. `--no-optional-locks` stops git from rewriting the index in the background, which could make the agent's own git commands fail with `index.lock exists`. `--no-renames` keeps one path per record (a rename shows as one deleted and one added file).
+- **Untracked files:** `git ls-files --others --exclude-standard -z --full-name :/`. These are listed with the label `new`, but their lines are **not** counted: counting would mean reading every new file on every refresh, and an un-ignored build folder could make that slow. So the `+` total does not include lines in new files. Binary files show `bin` and also add no lines.
+- **Not a repository / git missing / git timeout (5 s):** the panel is hidden. It never shows "No changes" when it cannot know.
 
-A private-field feature check (`prioritizeInputListener` in `src/input-priority.ts`, vendored from the sibling `tool-expansion` extension) re-orders Pi's internal fullscreen input-listener set each render so the sidebar's click handler observes the mouse report before Pi's own viewport listener does. If a future Pi version changes that private shape, the check fails closed (returns `false`) and the click path silently becomes a no-op — `alt+t` still works as the universal fallback in both modes.
+Refresh happens on `session_start`, after each `edit`, `write`, or `bash` tool ends, on `agent_settled`, when the sidebar becomes visible, and when the panel is switched on in settings. There is no timer, so changes made outside pi appear at the next of these events. Only one git refresh runs at a time; a request made during a refresh runs once when it ends. No refresh runs while the sidebar is hidden or the panel is disabled.
+
+## Click-to-expand (Todos and Diff)
+
+The Todos panel caps its list at 8 items and the Diff panel at 5 files by default. Clicking anywhere on either rendered panel toggles it between the capped and full list. This works in fullscreen TUI mode only; there is no keyboard alternative, so in regular TUI mode both panels stay collapsed.
+
+The click path only works in Pi's fullscreen (alt-screen) renderer, because that is the only mode where Pi already enables terminal mouse reporting for its own scrolling/selection handling. Sidebar VFLO never calls the terminal mouse-tracking escape sequences itself; it registers a passive `ctx.ui.onTerminalInput` listener that only inspects SGR mouse reports Pi's own renderer is already emitting, and it only ever consumes a report that both (a) is an unmodified primary-button press and (b) lands within the last-rendered bounds of the Todos or Diff panel — every other report (motion, release, wheel, modified clicks, clicks outside the panel, or any click while a real capturing dialog like the `/sidebar` settings menu is open) passes through completely untouched. In regular (non-fullscreen/scrollback) TUI mode, Pi does not enable mouse tracking, so native terminal text selection and copy/paste are unaffected there, and the click path is intentionally a no-op.
+
+A private-field feature check (`prioritizeInputListener` in `src/input-priority.ts`, vendored from the sibling `tool-expansion` extension) re-orders Pi's internal fullscreen input-listener set each render so the sidebar's click handler observes the mouse report before Pi's own viewport listener does. If a future Pi version changes that private shape, the check fails closed (returns `false`) and the click path silently becomes a no-op and the panels stay collapsed.
 
 ## Configuration
 
@@ -61,12 +71,12 @@ Example:
   "width": 44,
   "panels": {
     "model": true,
-    "activity": true,
     "context": true,
     "limits": true,
     "usage": true,
     "todos": true,
-    "subagents": true
+    "subagents": true,
+    "diff": true
   }
 }
 ```

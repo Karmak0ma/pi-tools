@@ -1,6 +1,15 @@
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ThemeColor } from "@earendil-works/pi-coding-agent";
-import type { LimitsState, SidebarConfig, SidebarPanelId, SidebarSnapshot, SubagentItem, TodoItem } from "./types.js";
+import type {
+	DiffSummary,
+	ExpandablePanelId,
+	LimitsState,
+	SidebarConfig,
+	SidebarPanelId,
+	SidebarSnapshot,
+	SubagentItem,
+	TodoItem,
+} from "./types.js";
 
 export interface SidebarTheme {
 	fg(color: ThemeColor, text: string): string;
@@ -148,15 +157,6 @@ function limitsRows(limits: LimitsState, theme: SidebarTheme, width: number): st
 	}).concat(noteRows);
 }
 
-function activityRows(snapshot: SidebarSnapshot, theme: SidebarTheme, width: number): string[] {
-	const state = snapshot.activity.state;
-	const role: Role = state === "error" ? "error" : state === "warning" ? "warning" : state === "working" ? "working" : "success";
-	const symbol = state === "error" ? "✕" : state === "warning" ? "▲" : state === "working" ? "◆" : "●";
-	const rows = [theme.bold(paint(theme, role, `${symbol} ${safe(snapshot.activity.label, state)}`))];
-	for (const tool of snapshot.activity.activeTools.slice(0, 3)) rows.push(paint(theme, "muted", `Tool · ${safe(tool)}`));
-	return rows;
-}
-
 function contextRows(snapshot: SidebarSnapshot, theme: SidebarTheme, width: number): string[] {
 	const usage = snapshot.context;
 	if (!usage) return [paint(theme, "dim", "Context unavailable")];
@@ -185,7 +185,7 @@ function usageRows(snapshot: SidebarSnapshot, theme: SidebarTheme, width: number
 	];
 }
 
-// `expanded` is driven by the mouse click / alt+t toggle in index.ts. When
+// `expanded` is driven by a mouse click on the panel (index.ts). When
 // false, the list caps at 8 items (existing compact behavior) so the panel
 // does not dominate a short terminal. When true, every todo is emitted; the
 // final safeHeight-based clipping in renderSidebar() still protects against
@@ -200,7 +200,7 @@ function todoRows(todos: readonly TodoItem[], theme: SidebarTheme, width: number
 		const marker = todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "◐" : "○";
 		rows.push(fit(`${paint(theme, role, marker)} ${paint(theme, "accent", `#${todo.id}`)} ${paint(theme, role, safe(todo.subject))}`, width));
 	}
-	if (!expanded && todos.length > 8) rows.push(paint(theme, "dim", `… ${todos.length - 8} more (click or alt+t)`));
+	if (!expanded && todos.length > 8) rows.push(paint(theme, "dim", `… ${todos.length - 8} more (click to expand)`));
 	return rows;
 }
 
@@ -213,6 +213,59 @@ function subagentRows(items: readonly SubagentItem[], theme: SidebarTheme, width
 		const detail = item.task ? paint(theme, "dim", ` · ${safe(item.task)}`) : "";
 		return [fit(pair(head + detail, status, width), width)];
 	});
+}
+
+// How many changed files the Diff panel lists while collapsed.
+const DIFF_COLLAPSED_FILES = 5;
+
+// Shortens a path from the START ("…/src/render.ts"), because the end of a
+// path (the file name) is the part the user needs to recognise the file.
+function fitPathStart(path: string, width: number): string {
+	if (width <= 0) return "";
+	if (visibleWidth(path) <= width) return path;
+	if (width === 1) return "…";
+	const chars = Array.from(path);
+	let tail = "";
+	for (let index = chars.length - 1; index >= 0; index -= 1) {
+		const next = chars[index] + tail;
+		if (visibleWidth(next) > width - 1) break;
+		tail = next;
+	}
+	return `…${tail}`;
+}
+
+// `+12 -3` with the usual diff colors: additions green, removals red.
+function lineCounts(theme: SidebarTheme, added: number, removed: number): string {
+	return `${paint(theme, "success", `+${added}`)} ${paint(theme, "error", `-${removed}`)}`;
+}
+
+// Summary line (`3 files  +120 -45`) plus one row per changed file. Collapsed
+// to DIFF_COLLAPSED_FILES rows; a click on the panel shows all files. As for
+// Todos, renderSidebar()'s final height cut still protects a short terminal.
+function diffRows(diff: DiffSummary, theme: SidebarTheme, width: number, expanded: boolean): string[] {
+	const { files } = diff;
+	if (files.length === 0) return [paint(theme, "dim", "No changes")];
+	// Untracked and binary files have no line counts (null) and add nothing to
+	// the totals; they still count as changed files.
+	const added = files.reduce((total, file) => total + (file.added ?? 0), 0);
+	const removed = files.reduce((total, file) => total + (file.removed ?? 0), 0);
+	const rows = [pair(paint(theme, "muted", `${files.length} ${files.length === 1 ? "file" : "files"}`), lineCounts(theme, added, removed), width)];
+	const visible = expanded ? files : files.slice(0, DIFF_COLLAPSED_FILES);
+	for (const file of visible) {
+		const counts = file.untracked
+			? paint(theme, "success", "new")
+			: file.added === null || file.removed === null
+				? paint(theme, "dim", "bin")
+				: lineCounts(theme, file.added, file.removed);
+		// Size the path to the space left next to the counts. pair() would
+		// cut the END of the line when it is too long, which hides the counts.
+		const pathWidth = Math.max(1, width - visibleWidth(counts) - 1);
+		rows.push(pair(paint(theme, "text", fitPathStart(clean(file.path), pathWidth)), counts, width));
+	}
+	if (!expanded && files.length > DIFF_COLLAPSED_FILES) {
+		rows.push(paint(theme, "dim", `… ${files.length - DIFF_COLLAPSED_FILES} more (click to expand)`));
+	}
+	return rows;
 }
 
 function panel(title: string, rows: readonly string[], width: number, theme: SidebarTheme): string[] {
@@ -233,10 +286,10 @@ interface PanelDefinition {
 
 export interface RenderedSidebar {
 	lines: string[];
-	// [startLine, endLine) within `lines`, 0-based, spanning the rendered Todos
-	// panel. Used by index.ts to hit-test mouse clicks against the panel.
-	// Undefined when the Todos panel is disabled or dropped by height-truncation.
-	todosRange?: [number, number];
+	// [startLine, endLine) within `lines`, 0-based, for each clickable panel
+	// that is on screen. index.ts uses these to hit-test mouse clicks. A panel
+	// has no entry when it is disabled, hidden, or cut by the height limit.
+	panelRanges: Partial<Record<ExpandablePanelId, [number, number]>>;
 }
 
 export function renderSidebar(
@@ -245,16 +298,15 @@ export function renderSidebar(
 	theme: SidebarTheme,
 	width: number,
 	height: number,
-	todosExpanded = false,
+	expanded: Partial<Record<ExpandablePanelId, boolean>> = {},
 ): RenderedSidebar {
 	const safeWidth = Math.max(4, Math.trunc(width));
 	const safeHeight = Math.max(0, Math.trunc(height));
-	if (safeHeight === 0) return { lines: [] };
+	if (safeHeight === 0) return { lines: [], panelRanges: {} };
 	const contentWidth = Math.max(2, safeWidth - 2);
 	const panelContentWidth = Math.max(1, contentWidth - 4);
 	const definitions: PanelDefinition[] = [
 		{ id: "model" as const, title: "Model", rows: modelRows(snapshot, theme, panelContentWidth), required: true },
-		{ id: "activity" as const, title: "Activity", rows: activityRows(snapshot, theme, panelContentWidth), required: true },
 		{ id: "context" as const, title: "Context", rows: contextRows(snapshot, theme, panelContentWidth), required: true },
 		// The panel is dropped only for providers without subscription windows
 		// (no buckets and nothing to say). Otherwise it stays visible and states
@@ -263,8 +315,13 @@ export function renderSidebar(
 			? [{ id: "limits" as const, title: "Limits", rows: limitsRows(snapshot.limits, theme, panelContentWidth), required: false }]
 			: []),
 		{ id: "usage" as const, title: "Session usage", rows: usageRows(snapshot, theme, panelContentWidth), required: false },
-		{ id: "todos" as const, title: "Todos", rows: todoRows(snapshot.todos, theme, panelContentWidth, todosExpanded), required: false },
+		{ id: "todos" as const, title: "Todos", rows: todoRows(snapshot.todos, theme, panelContentWidth, expanded.todos === true), required: false },
 		{ id: "subagents" as const, title: "Subagents", rows: subagentRows(snapshot.subagents, theme, panelContentWidth), required: false },
+		// Last in the list, so it is the first panel dropped on a short terminal.
+		// Hidden (not "No changes") when the folder is not a git repository.
+		...(snapshot.diff
+			? [{ id: "diff" as const, title: "Diff", rows: diffRows(snapshot.diff, theme, panelContentWidth, expanded.diff === true), required: false }]
+			: []),
 	].filter((definition) => config.panels[definition.id]);
 
 	let selected = [...definitions];
@@ -287,11 +344,16 @@ export function renderSidebar(
 		if (index < 0) break;
 		selected.splice(selected.length - 1 - index, 1);
 	}
-	let todosRange: [number, number] | undefined;
+	const panelRanges: RenderedSidebar["panelRanges"] = {};
 	let cursor = 0;
 	const lines = selected.flatMap((item) => {
 		const rendered = panelLines(item);
-		if (item.id === "todos") todosRange = [cursor, cursor + rendered.length];
+		if (item.id === "todos" || item.id === "diff") {
+			// Clip to what is visible after the final safeHeight cut. A panel
+			// that starts below the last visible line gets no range at all.
+			const end = Math.min(cursor + rendered.length, safeHeight);
+			if (cursor < end) panelRanges[item.id] = [cursor, end];
+		}
 		cursor += rendered.length;
 		return rendered;
 	});
@@ -300,8 +362,5 @@ export function renderSidebar(
 	const padded = Array.from({ length: safeHeight }, (_, index) => {
 		return `${paint(theme, "dim", "│")} ${pad(lines[index] ?? "", contentWidth)}`;
 	});
-	// Clip the range to what's actually visible after the final safeHeight cut.
-	if (todosRange && todosRange[0] >= safeHeight) todosRange = undefined;
-	else if (todosRange) todosRange = [todosRange[0], Math.min(todosRange[1], safeHeight)];
-	return { lines: padded, todosRange };
+	return { lines: padded, panelRanges };
 }

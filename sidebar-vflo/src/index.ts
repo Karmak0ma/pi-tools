@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { adapterForProvider, readSharedProviderEntry } from "pi-usage-vflo/src/index.js";
 import { matchesKey, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 import { closeOverlayCustomUi } from "./overlay-close.js";
+import { loadDiff } from "./diff.js";
 import { limitsFromEntry } from "./limits.js";
 import { renderSidebar, type SidebarTheme } from "./render.js";
 import {
@@ -21,7 +22,8 @@ import { prioritizeInputListener } from "./input-priority.js";
 import { isUnmodifiedPrimaryPress, parseSgrMouseEvent } from "./mouse.js";
 import {
 	DEFAULT_CONFIG,
-	type ActivityState,
+	type DiffSummary,
+	type ExpandablePanelId,
 	type SidebarConfig,
 	type SidebarPanelId,
 	type LimitsState,
@@ -40,28 +42,38 @@ const CONFIG_PATH = join(homedir(), ".pi", "agent", "sidebar-vflo.json");
 
 interface Runtime {
 	ctx: ExtensionContext;
+	// Kept for `pi.exec`, which runs git for the Diff panel.
+	pi: ExtensionAPI;
+	// True after session end. Async work (the git refresh) checks it so a
+	// late result is never written into a runtime that is gone.
+	disposed: boolean;
 	config: SidebarConfig;
 	sidebarVisible: boolean;
-	activity: SidebarSnapshot["activity"];
 	todos: TodoItem[];
 	subagents: SubagentItem[];
-	activeToolCalls: Map<string, string>;
 	subagentBatches: Map<string, SubagentItem[]>;
 	limits: LimitsState;
 	subscriptionPollTimer?: NodeJS.Timeout;
+	// Latest git diff summary; undefined hides the Diff panel (see types.ts).
+	diff: DiffSummary | undefined;
+	// Set while a git refresh runs. A refresh requested meanwhile only sets
+	// `diffRefreshQueued`, so at most one git process runs at a time and the
+	// last request is never lost (it runs once the current one ends).
+	diffRefreshRunning: boolean;
+	diffRefreshQueued: boolean;
 	overlayGeneration: number;
 	overlayStarting: boolean;
 	tui?: TUI;
 	split?: SplitPaneController;
 	overlayHandle?: OverlayHandle;
 	closeOverlay?: () => void;
-	// Todos panel expand/collapse state, toggled by clicking the panel
-	// (fullscreen mode only) or the alt+t shortcut (both modes).
-	todosExpanded: boolean;
-	// [startLine, endLine) of the last-rendered Todos panel within the
-	// sidebar's output, used to hit-test mouse clicks. Undefined when the
-	// panel isn't currently rendered.
-	todosRange?: [number, number];
+	// Expand/collapse state of the clickable panels (Todos, Diff), toggled by
+	// clicking the panel. Clicks only work in fullscreen mode; there is
+	// deliberately no keyboard shortcut.
+	expanded: Record<ExpandablePanelId, boolean>;
+	// [startLine, endLine) of each clickable panel in the last frame on screen,
+	// used to hit-test mouse clicks. A panel not on screen has no entry.
+	panelRanges: Partial<Record<ExpandablePanelId, [number, number]>>;
 	terminalInputListener?: (data: string) => { consume?: boolean; data?: string } | undefined;
 	unsubscribeTerminalInput?: () => void;
 	// Whether our terminal input listener has successfully been moved ahead of
@@ -114,13 +126,40 @@ function snapshot(runtime: Runtime): SidebarSnapshot {
 				  }
 			: undefined,
 		thinkingLevel: runtime.ctx.thinkingLevel,
-		activity: runtime.activity,
 		context,
 		limits: runtime.limits,
 		usage: sumBranchUsage(runtime.ctx.sessionManager.getBranch()),
 		todos: runtime.todos,
 		subagents: runtime.subagents,
+		diff: runtime.diff,
 	};
+}
+
+// Tools that can change files on disk. Only these trigger a git refresh after
+// they end, to avoid starting git after every read/grep/todo call.
+const FILE_CHANGING_TOOLS = new Set(["edit", "write", "bash"]);
+
+// Re-reads the git diff for the Diff panel. Skipped when nobody can see the
+// panel; setSidebarVisible() and the settings menu call this again when the
+// panel becomes visible, so the data is fresh when it appears.
+function refreshDiff(runtime: Runtime): void {
+	if (!runtime.sidebarVisible || !panelEnabled(runtime.config, "diff")) return;
+	if (runtime.diffRefreshRunning) {
+		runtime.diffRefreshQueued = true;
+		return;
+	}
+	runtime.diffRefreshRunning = true;
+	runtime.diffRefreshQueued = false;
+	void loadDiff((command, args, options) => runtime.pi.exec(command, args, options), runtime.ctx.cwd)
+		.then((diff) => {
+			if (runtime.disposed) return;
+			runtime.diff = diff;
+			requestRender(runtime);
+		})
+		.finally(() => {
+			runtime.diffRefreshRunning = false;
+			if (runtime.diffRefreshQueued && !runtime.disposed) refreshDiff(runtime);
+		});
 }
 
 // Reads the limits state for the current model from pi-usage-vflo's published
@@ -175,10 +214,6 @@ function requestRender(runtime: Runtime): void {
 	runtime.split?.requestRender();
 }
 
-function refreshActivity(runtime: Runtime, state: ActivityState, label: string): void {
-	runtime.activity = { state, label, activeTools: [...runtime.activeToolCalls.values()] };
-}
-
 function refreshSubagents(runtime: Runtime): void {
 	runtime.subagents = [...runtime.subagentBatches.values()].flat();
 }
@@ -190,14 +225,21 @@ function suppressTodoWidget(runtime: Runtime): void {
 	runtime.ctx.ui.setWidget("rpiv-todos", undefined);
 }
 
+// Keeps the settings input handler simple: Diff needs a refresh when turned
+// on, but panel visibility for the other panels is just a config toggle.
+function togglePanel(runtime: Runtime, panel: SidebarPanelId): void {
+	runtime.config.panels[panel] = !runtime.config.panels[panel];
+	if (panel === "diff") refreshDiff(runtime);
+}
+
 async function openSettings(runtime: Runtime): Promise<void> {
 	if (runtime.ctx.mode !== "tui") {
 		runtime.ctx.ui.notify("Sidebar settings require TUI mode", "warning");
 		return;
 	}
 	const panelLabels: Array<[SidebarPanelId, string]> = [
-		["model", "Model"], ["activity", "Activity"], ["context", "Context"], ["limits", "Limits"],
-		["usage", "Session usage"], ["todos", "Todos"], ["subagents", "Subagents"],
+		["model", "Model"], ["context", "Context"], ["limits", "Limits"],
+		["usage", "Session usage"], ["todos", "Todos"], ["subagents", "Subagents"], ["diff", "Diff"],
 	];
 	const presets: SidebarConfig["colorPreset"][] = ["monokai", "catppuccin", "dracula"];
 	// Captured from `onHandle` so this dialog can remove its own overlay entry
@@ -233,7 +275,7 @@ async function openSettings(runtime: Runtime): Promise<void> {
 						runtime.config.colorPreset = presets[(current + 1) % presets.length] ?? "monokai";
 					} else {
 						const panel = panelLabels[selected - 1]?.[0];
-						if (panel) runtime.config.panels[panel] = !runtime.config.panels[panel];
+						if (panel) togglePanel(runtime, panel);
 					}
 					void writeConfig(runtime.config);
 					requestRender(runtime);
@@ -258,6 +300,8 @@ function setSidebarVisible(runtime: Runtime, visible: boolean): void {
 		suppressTodoWidget(runtime);
 		// No point polling for subscription data nobody can see.
 		scheduleSubscriptionPoll(runtime);
+		// The diff is not refreshed while hidden, so it may be stale.
+		refreshDiff(runtime);
 	} else {
 		closeOverlay(runtime);
 		clearSubscriptionPoll(runtime);
@@ -296,7 +340,7 @@ function startOverlay(runtime: Runtime): void {
 				// sidebar cost ~3.2 ms of that budget while the sidebar content usually
 				// does not change at all while the user types. Keep the finished frame and
 				// reuse it until one of its inputs really changes.
-				let frame: { key: string; lines: string[]; todosRange?: [number, number] } | undefined;
+				let frame: { key: string; lines: string[]; panelRanges: Runtime["panelRanges"] } | undefined;
 				return {
 					render(width: number): string[] {
 						sidebarTheme.preset = runtime.config.colorPreset;
@@ -312,13 +356,13 @@ function startOverlay(runtime: Runtime): void {
 						// cheaper than rendering, and it compares by value: no missed update
 						// when a nested field (todo status, limit bucket, token counts) moves.
 						// Theme changes do not appear here; Pi calls invalidate() for those.
-						const key = JSON.stringify([width, rows, runtime.todosExpanded, runtime.config, state]);
+						const key = JSON.stringify([width, rows, runtime.expanded, runtime.config, state]);
 						if (frame?.key !== key) {
-							const { lines, todosRange } = renderSidebar(state, runtime.config, sidebarTheme, width, rows, runtime.todosExpanded);
-							frame = { key, lines, todosRange };
+							const { lines, panelRanges } = renderSidebar(state, runtime.config, sidebarTheme, width, rows, runtime.expanded);
+							frame = { key, lines, panelRanges };
 						}
 						// Mouse hit-testing reads this, so it must track the frame on screen.
-						runtime.todosRange = frame.todosRange;
+						runtime.panelRanges = frame.panelRanges;
 						return frame.lines;
 					},
 					// Pi calls this on theme changes and other global invalidations. The
@@ -377,7 +421,8 @@ function closeOverlay(runtime: Runtime): void {
 	runtime.tui = undefined;
 }
 
-// Parses raw terminal input for a mouse click landing on the Todos panel.
+// Parses raw terminal input for a mouse click landing on a clickable panel
+// (Todos or Diff), and toggles that panel between collapsed and expanded.
 // Fullscreen-mode only, and never enables mouse tracking itself — it only
 // observes SGR reports Pi's own fullscreen renderer is already generating.
 // Every non-matching report (release, motion, wheel, clicks elsewhere, a
@@ -395,16 +440,18 @@ function handleTerminalInput(runtime: Runtime, data: string): { consume?: boolea
 		// future pi-tui version may not expose the private shape we rely on) —
 		// fail open and let Pi handle the click as it normally would.
 		if (!runtime.inputPriorityReady) return undefined;
-		if (!runtime.todosRange) return undefined;
 		const sidebarWidth = runtime.split.getSidebarWidth();
 		const columns = tui.terminal.columns;
 		const leftCol0 = columns - sidebarWidth;
 		if (event.x < leftCol0) return undefined;
-		const [start, end] = runtime.todosRange;
-		if (event.y < start || event.y >= end) return undefined;
-		runtime.todosExpanded = !runtime.todosExpanded;
-		requestRender(runtime);
-		return { consume: true };
+		for (const id of ["todos", "diff"] as const) {
+			const range = runtime.panelRanges[id];
+			if (!range || event.y < range[0] || event.y >= range[1]) continue;
+			runtime.expanded[id] = !runtime.expanded[id];
+			requestRender(runtime);
+			return { consume: true };
+		}
+		return undefined;
 	} catch {
 		// A future TUI/terminal quirk must never break normal input handling.
 		return undefined;
@@ -412,6 +459,7 @@ function handleTerminalInput(runtime: Runtime, data: string): { consume?: boolea
 }
 
 function disposeRuntime(runtime: Runtime): void {
+	runtime.disposed = true;
 	clearSubscriptionPoll(runtime);
 	runtime.unsubscribeTerminalInput?.();
 	runtime.unsubscribeTerminalInput = undefined;
@@ -439,20 +487,25 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 		const runtime: Runtime = {
 			ctx,
 			config,
+			pi,
+			disposed: false,
 			sidebarVisible: ctx.mode === "tui" && config.showSidebarOnStartup,
-			activity: { state: "ready", label: "Ready", activeTools: [] },
 			todos: todoStateFromBranch(ctx),
 			subagents: [],
-			activeToolCalls: new Map(),
 			subagentBatches: new Map(),
 			limits: { buckets: [] },
+			diff: undefined,
+			diffRefreshRunning: false,
+			diffRefreshQueued: false,
 			overlayGeneration: 0,
 			overlayStarting: false,
-			todosExpanded: false,
+			expanded: { todos: false, diff: false },
+			panelRanges: {},
 			inputPriorityReady: false,
 		};
 		current = runtime;
 		startOverlay(runtime);
+		refreshDiff(runtime);
 		void refreshSubscription(runtime).then(() => scheduleSubscriptionPoll(runtime));
 		if (runtime.sidebarVisible) {
 			suppressTodoWidget(runtime);
@@ -491,16 +544,6 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerShortcut("alt+t", {
-		description: "Expand/collapse the Sidebar VFLO Todos panel",
-		handler: (ctx) => {
-			const runtime = runtimeFor(current, ctx);
-			if (!runtime) return;
-			runtime.todosExpanded = !runtime.todosExpanded;
-			requestRender(runtime);
-		},
-	});
-
 	pi.registerCommand("sidebar-reset", {
 		description: "Restore Sidebar VFLO panel defaults",
 		handler: async (_args, ctx) => {
@@ -526,34 +569,26 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 	pi.on("agent_start", (_event, ctx) => {
 		const runtime = runtimeFor(current, ctx);
 		if (!runtime) return;
-		runtime.activeToolCalls.clear();
-		refreshActivity(runtime, "working", "Thinking");
 		requestRender(runtime);
 	});
 	pi.on("turn_start", (_event, ctx) => {
 		const runtime = runtimeFor(current, ctx);
 		if (!runtime) return;
-		runtime.activeToolCalls.clear();
-		refreshActivity(runtime, "working", "Thinking");
 		requestRender(runtime);
 	});
 	pi.on("before_provider_request", (_event, ctx) => {
 		const runtime = runtimeFor(current, ctx);
 		if (!runtime) return;
-		refreshActivity(runtime, "working", "Responding");
 		requestRender(runtime);
 	});
 	pi.on("message_update", (_event, ctx) => {
 		const runtime = runtimeFor(current, ctx);
 		if (!runtime) return;
-		refreshActivity(runtime, "working", "Responding");
 		requestRender(runtime);
 	});
 	pi.on("tool_execution_start", (event, ctx) => {
 		const runtime = runtimeFor(current, ctx);
 		if (!runtime) return;
-		runtime.activeToolCalls.set(event.toolCallId, event.toolName);
-		refreshActivity(runtime, "working", `Running ${event.toolName}`);
 		if (event.toolName === "subagent") {
 			runtime.subagentBatches.set(event.toolCallId, subagentItemsFromStart(event.toolCallId, event.args));
 			refreshSubagents(runtime);
@@ -572,10 +607,8 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 	pi.on("tool_execution_end", (event, ctx) => {
 		const runtime = runtimeFor(current, ctx);
 		if (!runtime) return;
-		runtime.activeToolCalls.delete(event.toolCallId);
-		const activeTools = [...runtime.activeToolCalls.values()];
-		refreshActivity(runtime, "working", activeTools.length > 0 ? `Running ${activeTools[activeTools.length - 1]}` : "Responding");
 		if (event.toolName === "todo") suppressTodoWidget(runtime);
+		if (FILE_CHANGING_TOOLS.has(event.toolName)) refreshDiff(runtime);
 		requestRender(runtime);
 	});
 	pi.on("tool_result", (event, ctx) => {
@@ -607,8 +640,9 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 	pi.on("agent_settled", (_event, ctx) => {
 		const runtime = runtimeFor(current, ctx);
 		if (!runtime) return;
-		runtime.activeToolCalls.clear();
-		refreshActivity(runtime, "ready", "Ready");
+		// Catches changes no single tool event explains (for example a
+		// subagent or another extension writing files during the run).
+		refreshDiff(runtime);
 		requestRender(runtime);
 	});
 	pi.on("model_select", (_event, ctx) => {
