@@ -4,8 +4,9 @@
  * Resolves which extensions should be loaded by child subagent processes.
  *
  * Strategy: read a user-provided config file (subagents-vflo_settings.json) that
- * explicitly lists the extensions the user wants subagents to have access to.
- * The format matches ~/.pi/agent/settings.json (packages array).
+ * explicitly lists the extensions the user wants subagents to have access to
+ * and optional model/thinking defaults for built-in agents. The packages format
+ * matches ~/.pi/agent/settings.json (packages array).
  *
  * This gives users full control over what runs in subagent child processes
  * without needing a blocklist heuristic.
@@ -14,6 +15,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import {
+  THINKING_LEVELS,
+  type BuiltinAgentModelSettings,
+  type BuiltinAgentThinkingSettings,
+  type ThinkingLevel,
+} from "./types.js";
 
 // ─── Config File Resolution ──────────────────────────────────────────────────
 
@@ -26,20 +33,60 @@ const CONFIG_FILENAME = "subagents-vflo_settings.json";
 interface SubagentSettings {
   /** Extensions to load in child subagent processes (same format as pi settings.packages) */
   packages?: Array<string | { source: string; extensions?: string[] }>;
+  /** Default models for the built-in agents. */
+  models?: Record<string, unknown>;
+  /** Default thinking levels for the built-in agents. */
+  thinking?: Record<string, unknown>;
 }
 
 function getConfigPath(): string {
   return path.join(os.homedir(), ".pi", "agent", CONFIG_FILENAME);
 }
 
-function readConfig(): SubagentSettings | null {
+function readConfig(configPath = getConfigPath()): SubagentSettings | null {
   try {
-    const configPath = getConfigPath();
     const raw = fs.readFileSync(configPath, "utf-8");
     return JSON.parse(raw) as SubagentSettings;
   } catch {
     return null;
   }
+}
+
+/**
+ * Read model and thinking defaults for built-in agents from the shared settings.
+ *
+ * Keep these separate from child extension resolution: models and thinking
+ * levels are applied per delegated task, while extension package paths are
+ * cached for the parent session. Ignore malformed values so a bad setting does
+ * not break dispatch.
+ */
+export function getConfiguredAgentSettings(configPath = getConfigPath()): {
+  models: BuiltinAgentModelSettings;
+  thinking: BuiltinAgentThinkingSettings;
+} {
+  const settings = readConfig(configPath);
+  const models = settings?.models;
+  const thinking = settings?.thinking;
+  const configured: {
+    models: BuiltinAgentModelSettings;
+    thinking: BuiltinAgentThinkingSettings;
+  } = { models: {}, thinking: {} };
+
+  for (const name of ["explore", "build"] as const) {
+    const model = models && typeof models === "object" && !Array.isArray(models)
+      ? models[name]
+      : undefined;
+    if (typeof model === "string" && model.trim()) configured.models[name] = model.trim();
+
+    const level = thinking && typeof thinking === "object" && !Array.isArray(thinking)
+      ? thinking[name]
+      : undefined;
+    if (typeof level === "string" && THINKING_LEVELS.includes(level as ThinkingLevel)) {
+      configured.thinking[name] = level as ThinkingLevel;
+    }
+  }
+
+  return configured;
 }
 
 // ─── Package Extension Resolution ────────────────────────────────────────────

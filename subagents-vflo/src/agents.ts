@@ -12,9 +12,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { getConfiguredAgentSettings } from "./child-extensions.js";
 import {
   type AgentConfig,
   type AgentSource,
+  type BuiltinAgentName,
   DEFAULT_BUILD_TOOLS,
   THINKING_LEVELS,
   type ThinkingLevel,
@@ -22,10 +24,10 @@ import {
 
 // ─── Built-in Fallback Agents ────────────────────────────────────────────────
 
-const BUILTIN_AGENTS: AgentConfig[] = [
+const BUILTIN_AGENTS: Array<AgentConfig & { name: BuiltinAgentName }> = [
   {
     name: "explore",
-    description: "Fast read-only codebase reconnaissance using the configured Luna model",
+    description: "Fast read-only codebase reconnaissance",
     tools: ["read", "grep", "find", "ls", "bash"],
     model: "openai-codex/gpt-5.6-luna",
     thinking: "medium",
@@ -161,6 +163,12 @@ export interface AgentDiscoveryResult {
  * Precedence: project > user > builtin
  */
 export function discoverAgents(cwd: string): AgentDiscoveryResult {
+  const configured = getConfiguredAgentSettings();
+  const builtInAgents = BUILTIN_AGENTS.map((agent) => ({
+    ...agent,
+    model: configured.models[agent.name] ?? agent.model,
+    thinking: configured.thinking[agent.name] ?? agent.thinking,
+  }));
   const userDir = path.join(getAgentDir(), "agents");
   const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 
@@ -170,8 +178,9 @@ export function discoverAgents(cwd: string): AgentDiscoveryResult {
   // Build agent map with precedence: project > user > builtin
   const agentMap = new Map<string, AgentConfig>();
 
-  // Start with builtins (lowest priority)
-  for (const agent of BUILTIN_AGENTS) {
+  // Start with builtins (lowest priority). Settings can change their model
+  // and thinking level without replacing their tools or prompts.
+  for (const agent of builtInAgents) {
     agentMap.set(agent.name, agent);
   }
 

@@ -41,6 +41,9 @@ export const DEFAULT_BUILD_TOOLS: AllowedChildBuiltin[] = ["read", "bash", "edit
 
 export type AgentSource = "builtin" | "user" | "project";
 
+export type BuiltinAgentName = "explore" | "build";
+export type BuiltinAgentModelSettings = Partial<Record<BuiltinAgentName, string>>;
+
 export interface AgentConfig {
   name: string;
   description: string;
@@ -54,8 +57,14 @@ export interface AgentConfig {
 
 // ─── Thinking Levels ─────────────────────────────────────────────────────────
 
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+/**
+ * `max` is a Pi-level value, but individual models may not support it. Keep it
+ * in the shared setting schema; Pi clamps a valid effort to the chosen model's
+ * supported levels when the child starts.
+ */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+export type BuiltinAgentThinkingSettings = Partial<Record<BuiltinAgentName, ThinkingLevel>>;
 
 // ─── Task Types ──────────────────────────────────────────────────────────────
 

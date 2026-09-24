@@ -13,6 +13,7 @@ import { discoverAgents, findAgent, formatAgentList } from "./agents.js";
 import { renderCall, renderResult } from "./render.js";
 import { type ModelRegistry, buildToolResolutionOptions, resolveCwd, resolveModel, resolveTools, type ToolResolutionOptions } from "./resolver.js";
 import { mapWithConcurrencyLimit } from "./runner.js";
+import { buildMultiTaskToolResult } from "./multi-task-result.js";
 import { createBackend } from "./backends.js";
 import { ChildExtensionUIBroker } from "./extension-ui-broker.js";
 import { ExtensionUIDialogPresenter } from "./extension-ui-presenter.js";
@@ -45,7 +46,7 @@ const TaskItemSchema = Type.Object({
   model: Type.Optional(
     Type.String({
       description:
-        'Optional model override. Accepted forms: exact "provider/model-id" or exact unique bare model-id. If omitted, build inherits the parent session model, explore uses openai-codex/gpt-5.6-luna with low thinking effort, and custom agents may use a model from frontmatter. Fuzzy aliases are not allowed.',
+        'Optional model override. Accepted forms: exact "provider/model-id" or exact unique bare model-id. If omitted, built-in agents use their configured default (or the bundled default), custom agents use their frontmatter model, then the parent model is used as fallback. Fuzzy aliases are not allowed.',
     }),
   ),
   cwd: Type.Optional(Type.String({ description: "Working directory override" })),
@@ -54,7 +55,7 @@ const TaskItemSchema = Type.Object({
       THINKING_LEVELS.map((level) => Type.Literal(level)),
       {
         description:
-          'Optional thinking effort level for the subagent. Values: "off", "minimal", "low", "medium", "high", "xhigh". If omitted, uses the model\'s default thinking level.',
+          'Optional thinking effort level for the subagent. Values: "off", "minimal", "low", "medium", "high", "xhigh", "max". If omitted, built-in agents use their configured or bundled level; custom agents use the model\'s default.',
       },
     ),
   ),
@@ -71,14 +72,16 @@ const SubagentParams = Type.Object({
 // ─── Extension Entry ─────────────────────────────────────────────────────────
 
 /**
- * Read the parent's storage directory without making persistence a runtime
- * requirement. In-memory sessions return an empty directory, while older or
- * custom hosts may omit the accessor or reject the lookup; both cases are
- * handled by the backend's temporary-storage fallback.
+ * Read one parent session path without requiring a persistent session manager.
+ * In-memory or custom hosts may omit an accessor or reject the lookup; the
+ * child backend can still use its temporary-storage fallback in that case.
  */
-function getParentSessionDir(ctx: Pick<ExtensionContext, "sessionManager">): string | undefined {
+function getParentSessionPath(
+  ctx: Pick<ExtensionContext, "sessionManager">,
+  accessor: "getSessionDir" | "getSessionFile",
+): string | undefined {
   try {
-    return ctx.sessionManager?.getSessionDir?.();
+    return ctx.sessionManager?.[accessor]?.();
   } catch {
     return undefined;
   }
@@ -213,13 +216,13 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       `Use subagent proactively for: independent read-only research, broad codebase reconnaissance, high-volume command output that would clutter the main context, parallel multi-domain investigation where each branch can return a concise summary, and independent review or verification after implementation with the read-only explore agent.`,
       `Do not use subagent for: simple answers, quick targeted edits, latency-sensitive one-step work, tasks needing frequent user back-and-forth, or parallel implementation editing the same files (serialize write-heavy work instead). Do not spawn a build agent just to rename one symbol in a known file; edit it directly.`,
-      `Only set tasks[i].model when the user explicitly asks for a different model. If model is omitted, build inherits the parent session model, explore uses openai-codex/gpt-5.6-luna with low thinking effort, and custom agents may use a model from their frontmatter.`,
-      `Only set tasks[i].thinking when the user explicitly asks for a different thinking effort level. Values: "off", "minimal", "low", "medium", "high", "xhigh". If omitted, the child uses the model's default thinking level.`,
+      `Only set tasks[i].model when the user explicitly asks for a different model. If omitted, built-in agents use their configured default (or the bundled default), custom agents may use a model from their frontmatter, and the parent model is the final fallback.`,
+      `Only set tasks[i].thinking when the user explicitly asks for a different thinking effort level. Values: "off", "minimal", "low", "medium", "high", "xhigh", "max". If omitted, built-in agents use their configured or bundled level; custom agents use the model's default.`,
       `When using subagent, provide highly detailed task descriptions so the agent can work autonomously. Specify what to return. Example: { "tasks": [{ "agent": "explore", "task": "Research auth-related source files. Report paths and open questions. Do not edit files." }, { "agent": "explore", "task": "Research auth-related tests. Report coverage gaps. Do not edit files." }] }`,
     ],
     parameters: SubagentParams,
 
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       const tasks = params.tasks as TaskItem[];
       // Capture the broker for this invocation. A session switch can replace
       // the extension-level broker while stale child callbacks are still
@@ -371,7 +374,7 @@ export default function (pi: ExtensionAPI) {
       };
       if (signal) signal.addEventListener("abort", cancelInvocation, { once: true });
 
-      const parentSessionDir = getParentSessionDir(ctx);
+      const parentSessionDir = getParentSessionPath(ctx, "getSessionDir");
 
       let results: PersistedTaskSummary[];
       try {
@@ -673,38 +676,12 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      // Multi-task: structured, parent-readable output
-      const taskSections = results.map((r) => {
-        const failed = isTaskFailed(r);
-        const status = failed ? "failed" : "completed";
-        const parts: string[] = [`[${r.agent}] ${status}`];
-        if (r.errorMessage) parts.push(`Error: ${r.errorMessage}`);
-        if (r.finalOutput) {
-          const output = r.finalOutput.length > 4000 ? `${r.finalOutput.slice(0, 4000)}\n... (truncated)` : r.finalOutput;
-          parts.push(output);
-        } else if (!r.errorMessage) {
-          parts.push("(no output)");
-        }
-        if (r.stderrPreview) {
-          parts.push(`stderr: ${r.stderrPreview}`);
-        }
-        return parts.join("\n\n");
+      // Keep the large-text recovery pointer beside the preview, while preserving
+      // complete output strings in details for session-log extraction.
+      return buildMultiTaskToolResult(results, {
+        toolCallId,
+        sessionFile: getParentSessionPath(ctx, "getSessionFile"),
       });
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Tasks: ${successCount}/${results.length} succeeded\n\n${taskSections.join("\n\n---\n\n")}`,
-          },
-        ],
-        details: {
-          mode: "tasks",
-          taskCount: results.length,
-          summaries: results,
-          overallFailed: successCount === 0,
-        } as PersistedSubagentToolDetails,
-      };
     },
 
     renderCall(args, theme, _context) {

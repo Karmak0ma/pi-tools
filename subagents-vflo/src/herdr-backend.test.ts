@@ -292,7 +292,11 @@ describe("HerdrBackend happy path", () => {
     vi.stubEnv(NESTING_DEPTH_ENV, "0");
     const fake = new FakeHerdr();
     const events: any[] = [];
-    const handle = await makeBackend(fake).spawn(makeSpec({ onEvent: (event) => events.push(event) }));
+    const handle = await makeBackend(fake).spawn(makeSpec({
+      resolvedModel: "openai-codex/gpt-6-luna",
+      thinking: "max",
+      onEvent: (event) => events.push(event),
+    }));
 
     // Spawn sequence: split → agent start → prompt, in order.
     expect(fake.splits).toHaveLength(1);
@@ -315,7 +319,14 @@ describe("HerdrBackend happy path", () => {
     expect(args[0]).toBe("--session-dir");
     expect(args).toContain("--no-extensions");
     expect(args.slice(args.indexOf("-e"), args.indexOf("-e") + 2)).toEqual(["-e", "/ext/a.ts"]);
-    expect(args.slice(args.indexOf("--model"), args.indexOf("--model") + 2)).toEqual(["--model", "test-provider/test-model"]);
+    expect(args.slice(args.indexOf("--model"), args.indexOf("--model") + 2)).toEqual([
+      "--model",
+      "openai-codex/gpt-6-luna",
+    ]);
+    expect(args.slice(args.indexOf("--thinking"), args.indexOf("--thinking") + 2)).toEqual([
+      "--thinking",
+      "max",
+    ]);
     expect(args.slice(args.indexOf("--tools"), args.indexOf("--tools") + 2)).toEqual(["--tools", "read,bash"]);
     expect(args).toContain("--append-system-prompt");
 

@@ -185,14 +185,38 @@ lifecycle and final-output classification. Backend selection lives in
 ## Built-in Agents
 
 ### `explore`
-Fast read-only codebase reconnaissance. Uses openai-codex/gpt-5.6-luna with low thinking effort by default.
+Fast read-only codebase reconnaissance. Its bundled model is `openai-codex/gpt-5.6-luna`; its bundled thinking level is `medium`.
 
 **Tools:** `read`, `bash`, `find`, `ls`, `grep`
 
 ### `build`
-General-purpose agent with full coding capabilities. Inherits the parent session model by default.
+General-purpose agent with full coding capabilities. Its bundled model is `openai-codex/gpt-5.6-luna`; its bundled thinking level is `xhigh`.
 
 **Tools:** `read`, `bash`, `edit`, `write`
+
+You can override the built-in agents' models and thinking levels in
+`~/.pi/agent/subagents-vflo_settings.json`:
+
+```json
+{
+  "models": {
+    "explore": "openai-codex/gpt-5.6-luna",
+    "build": "openai-codex/gpt-5.6-luna"
+  },
+  "thinking": {
+    "explore": "medium",
+    "build": "max"
+  }
+}
+```
+
+Use an exact model ID available in the parent pi session. Omit a model key to
+keep that agent's bundled model. Valid thinking levels are `off`, `minimal`,
+`low`, `medium`, `high`, `xhigh`, and `max`. `max` is model-specific; Pi clamps
+an unsupported level to one the selected model supports. Omit a thinking key to
+keep that agent's bundled thinking level. Invalid or blank values are ignored.
+These settings change only built-in defaults; a user or project agent named
+`explore` or `build` still overrides the matching built-in agent.
 
 ## Custom Agents
 
@@ -277,7 +301,7 @@ The inspector shows:
 
 ## Model Resolution
 
-Models are resolved against the models that are actually available in the current pi session. Provider extensions needed by child processes can be listed in `~/.pi/agent/subagents-vflo_settings.json`; for example, add `npm:opencode-pi` when using the `opencode-cli` models. The same file is also the extension pool that decides which extension tools children can use — see [Allowed Tools](#allowed-tools).
+Models are resolved against the models that are actually available in the current pi session. Set built-in Explore and Build defaults with the `models` object in `~/.pi/agent/subagents-vflo_settings.json`; this can be in the same file as `packages`, which lists provider or tool extensions loaded by child processes. For example, add `npm:opencode-pi` to `packages` when using the `opencode-cli` models. The `packages` list also decides which extension tools children can use — see [Allowed Tools](#allowed-tools).
 
 Resolution order is:
 
@@ -289,9 +313,9 @@ Bare model ids prefer the parent provider when that provider offers the requeste
 
 In practice this means:
 
-- `build` inherits the parent session model by default
-- built-in `explore` uses `openai-codex/gpt-5.6-luna` with low thinking effort
-- custom `.md` agents may specify their own default model in frontmatter
+- Built-in `explore` and `build` use their configured model defaults; if a setting is omitted, both use the bundled default `openai-codex/gpt-5.6-luna`.
+- The built-in thinking defaults are `medium` for `explore` and `xhigh` for `build`.
+- Custom `.md` agents may specify their own default model in frontmatter. A custom agent named `explore` or `build` overrides that built-in and its settings-file model default.
 
 Warnings are emitted whenever resolution falls back from an unavailable task or agent model to the next level.
 
@@ -324,6 +348,12 @@ Returns a summary showing:
 - Per-task results with status icons
 - Error messages for failed tasks
 - Aggregate token usage
+
+Each task's text preview is capped at 12,000 characters. If it is longer and
+the parent session has a persistent log, the result includes a `jq` command that
+extracts the complete text from that session JSONL file. The complete text is
+retained in the tool result's `details.summaries[index].finalOutput` field.
+Single-task results still return their full text without this batch preview cap.
 
 ### Persisted Details
 Structured summaries are stored in the tool call's `details` field for later reference, including:

@@ -196,6 +196,8 @@ describe("runChild extension UI transport", () => {
     const result = await runChild({
       resolvedTools: ["bash"],
       resolvedCwd: "/tmp",
+      resolvedModel: "openai-codex/gpt-6-luna",
+      thinking: "max",
       agentName: "worker",
       agentPrompt: "",
       taskText: "task",
@@ -217,6 +219,14 @@ describe("runChild extension UI transport", () => {
 
     expect(result.exitCode).toBe(0);
     expect(spawnedArgs).not.toContain("--no-session");
+    expect(spawnedArgs.slice(spawnedArgs.indexOf("--model"), spawnedArgs.indexOf("--model") + 2)).toEqual([
+      "--model",
+      "openai-codex/gpt-6-luna",
+    ]);
+    expect(spawnedArgs.slice(spawnedArgs.indexOf("--thinking"), spawnedArgs.indexOf("--thinking") + 2)).toEqual([
+      "--thinking",
+      "max",
+    ]);
     expect(spawnedEnv?.PI_SESSION_FILE).toBeUndefined();
     // A top-level parent (no marker) spawns a first-generation child.
     expect(spawnedEnv?.[NESTING_DEPTH_ENV]).toBe("1");

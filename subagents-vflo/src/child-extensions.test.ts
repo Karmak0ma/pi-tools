@@ -3,10 +3,58 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  getConfiguredAgentSettings,
   resolveExtensionEntryPoints,
   resolvePackageDir,
   warnOnUnresolvedChildExtensions,
 } from "./child-extensions.js";
+
+describe("getConfiguredAgentSettings", () => {
+  let dir: string | undefined;
+
+  afterEach(() => {
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  it("reads model and thinking defaults for both built-in agents", () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-models-"));
+    const configPath = path.join(dir, "settings.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        packages: ["npm:provider-extension"],
+        models: { explore: " provider/explore ", build: "provider/build", reviewer: "provider/ignored" },
+        thinking: { explore: "medium", build: "max", reviewer: "high" },
+      }),
+    );
+
+    expect(getConfiguredAgentSettings(configPath)).toEqual({
+      models: { explore: "provider/explore", build: "provider/build" },
+      thinking: { explore: "medium", build: "max" },
+    });
+  });
+
+  it("ignores missing, malformed, and invalid settings", () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-models-"));
+    const configPath = path.join(dir, "settings.json");
+
+    const emptySettings = { models: {}, thinking: {} };
+    expect(getConfiguredAgentSettings(configPath)).toEqual(emptySettings);
+    fs.writeFileSync(configPath, "not json");
+    expect(getConfiguredAgentSettings(configPath)).toEqual(emptySettings);
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ models: { explore: "  ", build: 42 }, thinking: { explore: " ", build: 42 } }),
+    );
+    expect(getConfiguredAgentSettings(configPath)).toEqual(emptySettings);
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ models: { explore: "  ", build: 42 }, thinking: { explore: "invalid", build: 42 } }),
+    );
+    expect(getConfiguredAgentSettings(configPath)).toEqual(emptySettings);
+  });
+});
 
 describe("resolvePackageDir", () => {
   it("expands Pi-style home-relative package paths", () => {
