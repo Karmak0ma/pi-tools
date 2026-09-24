@@ -292,11 +292,25 @@ export interface HerdrClient {
   agentStart(name: string, paneId: string, agentArgs: string[], timeoutMs: number): Promise<void>;
   /**
    * Wait until Herdr observes an agent state. The Herdr backend uses
-   * `idle` before the first prompt as a startup gate; it does not use Herdr's
-   * prompt-confirmation stall mode because that fixed 5s observation window
-   * races Pi's startup handshake.
+   * `idle` before the first prompt only as the FALLBACK startup gate, when
+   * the child runs without Pi's lifecycle hook. That gate is known to be
+   * racy: see `agentGet` and docs/design-herdr-backend.md. It does not use
+   * Herdr's prompt-confirmation stall mode because that fixed 5s observation
+   * window races Pi's startup handshake.
    */
   agentWait(target: string, status: HerdrAgentStatus, timeoutMs: number): Promise<void>;
+  /**
+   * One snapshot of an agent's state as Herdr sees it.
+   *
+   * `lifecycleHookAuthority` is the readiness signal for the first prompt.
+   * Herdr reports `idle` for a Pi agent long before Pi can take input: with
+   * no hook report yet, it uses `default_known_agent_idle_fallback`, a guess.
+   * A prompt typed during that window lands in the editor but is never
+   * submitted. Pi's lifecycle hook sends its first report from Pi's
+   * `session_start`, which Pi emits only after its real submit handler is
+   * installed, so hook authority proves the editor accepts Enter.
+   */
+  agentGet(target: string): Promise<{ agentStatus?: string; lifecycleHookAuthority: boolean }>;
   /** Type a prompt into the agent's terminal and press Enter. */
   agentPrompt(target: string, text: string): Promise<void>;
   /** Pane state including agent_status (idle/working/blocked); throws on unexpected errors. */
@@ -352,6 +366,22 @@ export class HerdrCli implements HerdrClient {
         timeoutMs + DEFAULT_COMMAND_TIMEOUT_MS,
       ),
     );
+  }
+
+  async agentGet(target: string): Promise<{ agentStatus?: string; lifecycleHookAuthority: boolean }> {
+    const result = parseCliResult("agent get", await this.run(["agent", "get", target], DEFAULT_COMMAND_TIMEOUT_MS));
+    const agent = result?.agent ?? result;
+    return {
+      agentStatus: typeof agent?.agent_status === "string" ? agent.agent_status : undefined,
+      // Verified live on herdr 0.9.0: this field is absent while Herdr uses
+      // its idle fallback guess, and `true` once the hook owns the state
+      // (`herdr agent explain` then shows
+      // `screen_detection_skip_reason: full_lifecycle_hook_authority`). It is
+      // not a documented contract. A strict `=== true` makes a renamed field
+      // fail closed: startup times out with a clear error instead of typing
+      // into a Pi that is not ready.
+      lifecycleHookAuthority: agent?.screen_detection_skipped === true,
+    };
   }
 
   async agentPrompt(target: string, text: string): Promise<void> {

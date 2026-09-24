@@ -65,7 +65,7 @@ export interface HerdrBackendOptions {
   pollIntervalMs?: number;
   /** Idle time after an errored child turn before the task fails. */
   errorSettleGraceMs?: number;
-  /** Combined budget for agent start and the following idle readiness wait. */
+  /** Combined budget for agent start and the following readiness gate (see startHerdrAgent). */
   agentStartTimeoutMs?: number;
   /** Maximum time after the initial prompt to observe working or blocked state. */
   startupActivityTimeoutMs?: number;
@@ -112,14 +112,20 @@ function deriveSessionName(agentName: string): string {
  * file-based alternative exists, but changes the task framing to
  * `<file name="...">...</file>`. Keeping the task as a normal prompt
  * preserves the same plain-message framing as the RPC backend; readiness is
- * handled explicitly by the idle gate and the monitor deadline instead.
+ * handled explicitly by the readiness gate and the monitor deadline instead.
+ *
+ * `herdrIntegration` is resolved by the caller, not here, because the same
+ * answer also selects the readiness gate: the hook-authority gate can only
+ * open if this argv loads the hook.
  */
-function buildChildArgs(spec: SubagentSpec, sessionDir: string, promptFilePath: string | null): string[] {
+function buildChildArgs(
+  spec: SubagentSpec,
+  sessionDir: string,
+  promptFilePath: string | null,
+  herdrIntegration: string | null,
+): string[] {
   const args: string[] = ["--session-dir", sessionDir, "--no-extensions"];
   const configuredExtensions = spec.childExtensionPaths ?? [];
-  // Resolve relative PI_CODING_AGENT_DIR values as the child Pi process will:
-  // the pane's cwd can differ from the parent's cwd.
-  const herdrIntegration = resolveHerdrAgentStateExtension(process.env, spec.resolvedCwd);
   const herdrIntegrationKey = herdrIntegration ? canonicalEntryPath(herdrIntegration) : undefined;
   let integrationAlreadyConfigured = false;
 
@@ -673,11 +679,34 @@ export function createHerdrBackend(options: HerdrBackendOptions): SubagentBacken
 }
 
 /**
- * Start one child and wait for its interactive TUI to settle at idle.
+ * Upper bound for the hook-authority poll cadence. Short because every poll
+ * step is added directly to the subagent's startup latency; one `agent get`
+ * call is cheap. Tests with a faster `pollIntervalMs` poll at that rate.
+ */
+const MAX_READINESS_POLL_INTERVAL_MS = 250;
+
+/**
+ * Start one child and wait until its Pi can accept the first prompt.
+ *
+ * WHY `agent start` and `idle` are not enough: Herdr says a Pi agent is
+ * ready and `idle` from a guess (`default_known_agent_idle_fallback`) as
+ * soon as it sees the Pi process, about 4s after launch, even while Pi still
+ * loads its extensions. On a cold start (cold disk cache, several children
+ * loading about a dozen extensions at the same time) Pi is still loading
+ * then. The typed prompt shows in the editor, but its Enter never submits
+ * it, and the startup deadline later fails the child. Reproduced on demand
+ * with an extension that blocks Pi's load for 6-8s; see
+ * docs/design-herdr-backend.md, "Initial prompt readiness".
+ *
+ * With Pi's lifecycle hook loaded, the gate therefore waits for the hook to
+ * own the state (`lifecycleHookAuthority`) AND report `idle`. The hook's
+ * first report comes from Pi's `session_start`, which Pi emits only after
+ * its real submit handler is installed. Without the hook there is no
+ * reliable signal, so the old `idle` wait stays as a best-effort fallback.
  *
  * The configured timeout is one combined readiness budget. Herdr's command
- * runner adds transport slack to each call, but the idle wait receives only
- * the time left after `agent start` returns.
+ * runner adds transport slack to each call, but the readiness gate receives
+ * only the time left after `agent start` returns.
  */
 async function startHerdrAgent(
   cli: HerdrClient,
@@ -685,29 +714,67 @@ async function startHerdrAgent(
   paneId: string,
   agentArgs: string[],
   timings: ResolvedTimings,
+  loadsLifecycleHook: boolean,
 ): Promise<string> {
   const agentName = deriveHerdrAgentName(spec.agentName);
   const readinessDeadline = Date.now() + timings.agentStartTimeoutMs;
   await cli.agentStart(agentName, paneId, agentArgs, timings.agentStartTimeoutMs);
   if (spec.signal?.aborted) throw new Error("Subagent aborted during startup");
 
-  // `agent start` detects an interactive Pi process, but the TUI may still be
-  // settling. Wait for Herdr's detector to report idle before typing the task.
   const remainingReadinessMs = readinessDeadline - Date.now();
   if (remainingReadinessMs <= 0) {
-    throw new Error("Subagent readiness timed out before the idle gate: agent start exhausted the combined readiness budget");
+    throw new Error("Subagent readiness timed out before the readiness gate: agent start exhausted the combined readiness budget");
   }
-  await cli.agentWait(agentName, "idle", remainingReadinessMs);
+  if (loadsLifecycleHook) {
+    await waitForLifecycleHookIdle(cli, spec, agentName, paneId, readinessDeadline, timings);
+  } else {
+    await cli.agentWait(agentName, "idle", remainingReadinessMs);
+  }
   if (spec.signal?.aborted) throw new Error("Subagent aborted during startup");
   return agentName;
 }
 
 /**
+ * Poll Herdr until Pi's lifecycle hook owns the agent state and reports idle.
+ *
+ * A poll loop, not `herdr agent wait`: the wait command matches the status
+ * only, and the fallback guess already says `idle`. Errors from `agent get`
+ * are not retried. They mean the agent or the Herdr server is gone, and the
+ * caller closes the pane and rejects the spawn.
+ */
+async function waitForLifecycleHookIdle(
+  cli: HerdrClient,
+  spec: SubagentSpec,
+  agentName: string,
+  paneId: string,
+  readinessDeadline: number,
+  timings: ResolvedTimings,
+): Promise<void> {
+  const pollIntervalMs = Math.min(timings.pollIntervalMs, MAX_READINESS_POLL_INTERVAL_MS);
+  while (true) {
+    const snapshot = await cli.agentGet(agentName);
+    if (snapshot.lifecycleHookAuthority && snapshot.agentStatus === "idle") return;
+    if (spec.signal?.aborted) throw new Error("Subagent aborted during startup");
+    if (Date.now() + pollIntervalMs > readinessDeadline) {
+      // Name both facts: an operator who sees this must know whether Pi
+      // never loaded the hook (authority false) or loaded it but never
+      // settled (authority true, status not idle).
+      throw new Error(
+        `Subagent readiness timed out for Herdr agent "${agentName}" in pane "${paneId}": ` +
+          `Pi's lifecycle hook did not report idle within ${timings.agentStartTimeoutMs}ms ` +
+          `(last seen: hook authority ${snapshot.lifecycleHookAuthority}, status ${snapshot.agentStatus ?? "unknown"})`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+}
+
+/**
  * Spawn one subagent as an interactive pi session in a new Herdr pane.
  *
- * Startup is a strict sequence — split pane, start agent, wait for idle,
- * inject task — where any command failure closes the leftover pane and
- * rejects. Once the prompt is accepted, the child monitor owns the explicit
+ * Startup is a strict sequence — split pane, start agent, wait until Pi can
+ * take input (see startHerdrAgent), inject task — where any command failure
+ * closes the leftover pane and rejects. Once the prompt is accepted, the child monitor owns the explicit
  * startup-activity deadline and all later task observation.
  */
 async function spawnSubagentInHerdr(
@@ -737,7 +804,10 @@ async function spawnSubagentInHerdr(
   // script's own path as the first positional argument. Pi treats the first
   // positional argument as the interactive initial prompt, so passing that
   // through here would hand the child its own executable path as its task.
-  const agentArgs = buildChildArgs(spec, sessionDir, promptFilePath);
+  // Resolve relative PI_CODING_AGENT_DIR values as the child Pi process will:
+  // the pane's cwd can differ from the parent's cwd.
+  const herdrIntegration = resolveHerdrAgentStateExtension(process.env, spec.resolvedCwd);
+  const agentArgs = buildChildArgs(spec, sessionDir, promptFilePath, herdrIntegration);
 
   let paneId = "";
   try {
@@ -745,7 +815,7 @@ async function spawnSubagentInHerdr(
     paneId = pane.paneId;
     if (spec.signal?.aborted) throw new Error("Subagent aborted during startup");
 
-    const agentName = await startHerdrAgent(cli, spec, paneId, agentArgs, timings);
+    const agentName = await startHerdrAgent(cli, spec, paneId, agentArgs, timings, herdrIntegration !== null);
 
     // Deliver the task as the child's first prompt. The monitor below reports
     // a specific startup timeout if Herdr never observes the child begin it.

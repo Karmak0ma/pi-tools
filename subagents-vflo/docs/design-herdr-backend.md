@@ -97,8 +97,8 @@ The authoritative observation surface for task completion remains the child's
    grace fails the task, mirroring the RPC runner; every new session message
    resets the grace so pi's automatic in-turn retries are tolerated.
 5. Startup failures are caught synchronously: `pane split` / `agent start` /
-   `agent wait --until idle` / initial `agent prompt` reject → spawn rejects →
-   task error. A startup command failure may leave an empty pane → parent
+   the readiness gate (see "Initial-prompt readiness") / initial
+   `agent prompt` reject → spawn rejects → task error. A startup command failure may leave an empty pane → parent
    closes it (`herdr pane close`), best effort.
 6. After the initial prompt is accepted, the monitor waits for Herdr to report
    `working` or `blocked`. If neither that state nor an assistant session
@@ -174,11 +174,21 @@ classification.
 - `herdr agent start <name> --kind pi --pane <id> -- <pi args...>` waits until
   the pi TUI is detected (`interactive_ready`). Name rules:
   `[a-z][a-z0-9_-]{0,31}`, unique among live agents. On `agent_not_ready` the
-  name stays reserved.
+  name stays reserved. **"Ready" does not mean Pi takes input**: see
+  "Initial-prompt readiness".
 - `herdr agent wait <name|pane> --until <status> --timeout <ms>` waits for
   an observed agent state (`idle`, `working`, `blocked`, `done`, or
-  `unknown`). The backend uses `--until idle` once after `agent start`, before
-  submitting the first task prompt.
+  `unknown`). It matches the status only, so it also accepts Herdr's fallback
+  guess. The backend uses `--until idle` only as the fallback readiness gate
+  for children without the managed lifecycle hook.
+- `herdr agent get <name>` → `{result:{agent:{agent_status, ...}}}`. While Herdr
+  guesses the state, `screen_detection_skipped` and `agent_session` are
+  absent, and `herdr agent explain <name>` shows
+  `fallback_reason: default_known_agent_idle_fallback`. When the lifecycle
+  hook owns the state, `screen_detection_skipped: true` and `agent_session`
+  are present, and `explain` shows
+  `screen_detection_skip_reason: full_lifecycle_hook_authority`. These fields
+  are not a documented Herdr contract; `docs/smoke-herdr-cli.mjs` checks them.
 - `herdr agent prompt <name|pane> <text>` types the text (bracketed paste) and
   presses Enter; it is used in fire-and-forget mode and fails with
   `agent_blocked` if the child sits at a dialog. The backend does not use
@@ -199,28 +209,35 @@ classification.
 
 ## Initial-prompt readiness and startup deadline
 
-Right after `agent start` reports the pane ready, Pi's TUI may still be
-finishing its one-time terminal handshake (a kitty-keyboard-protocol
-capability query sent at startup). A prompt typed during that short window
-can visibly land in the input box while the terminating Enter is swallowed:
-the pane looks ready, the task text sits there, but no turn starts. This is a
-first-prompt startup race; later steering happens after the handshake.
+The first task prompt is typed into the child's terminal by
+`herdr agent prompt` (bracketed paste, then Enter as a separate write about
+300ms later). This only works if Pi's editor already takes input. The
+backend must therefore know when Pi is ready, and Herdr's "ready" and
+`idle` do not tell it that (see the investigation below).
 
-The backend deliberately does **not** use Herdr's confirmed
-`agent prompt --wait` mode here. Herdr has a fixed 5-second observation
-window for that mode, and a stall response does not prove whether the text
-was submitted. Pressing a blind corrective Enter was also removed: it was
-never verified against a real stall and could send an unexpected key to the
-child.
+The startup sequence in `src/herdr-backend.ts` is:
 
-The startup sequence in `src/herdr-backend.ts` is now:
+1. `agent start` waits for Herdr to detect an interactive Pi process. This is
+   NOT proof that Pi takes input.
+2. The readiness gate (`startHerdrAgent`):
+   - **With the managed lifecycle hook** (the normal case): poll
+     `herdr agent get <name>` every 250ms (`waitForLifecycleHookIdle`) until
+     `screen_detection_skipped === true` (the hook owns the state) AND
+     `agent_status === "idle"`. The hook sends its first report from Pi's
+     `session_start` event. Pi emits `session_start` only after it replaces
+     its startup submit handler with the real one, so a hook-owned `idle`
+     proves that Enter submits.
+   - **Without the hook** (the file is not installed): `agent wait <name>
+     --until idle`. This is the old gate. It can still lose the first prompt
+     on a slow start, because there is no reliable readiness signal without
+     the hook.
 
-1. `agent start` waits for Herdr to detect an interactive Pi process.
-2. `agent wait <name> --until idle --timeout <remaining readiness budget>`
-   waits for Herdr's detector to report a settled idle pane before input is
-   sent. The `agentStartTimeoutMs` setting is one combined budget for `agent
-   start` plus this idle wait; the backend passes only the remaining time to
-   the second command. This is a readiness gate, not task completion.
+   The `agentStartTimeoutMs` setting (60s by default) is one combined budget
+   for `agent start` plus the gate. The gate gets only the time left. If the
+   hook never reports idle in time, the spawn rejects with
+   `Subagent readiness timed out for Herdr agent <name> in pane <pane>: Pi's
+   lifecycle hook did not report idle within ...ms (last seen: hook authority
+   <bool>, status <status>)` and the pane is closed.
 3. `agent prompt <name> <task>` submits the task in fire-and-forget mode.
    The session JSONL remains the authority for the task's result.
 4. `HerdrChildMonitor` starts a one-shot startup-activity deadline (30 seconds
@@ -234,9 +251,98 @@ The startup sequence in `src/herdr-backend.ts` is now:
 The deadline is a notification/backstop, not a recovery attempt. It prevents
 a prompt that never starts from leaving the parent request pending forever,
 while keeping Herdr status separate from task completion: only a normal
-`stop` message in the session JSONL completes the delegated task. If this
-idle gate still produces real startup failures, a state-checked Enter
-backstop can be considered later with live evidence.
+`stop` message in the session JSONL completes the delegated task.
+
+The backend deliberately does **not** use Herdr's confirmed
+`agent prompt --wait` mode. Herdr has a fixed 5-second observation window for
+that mode, and a stall response does not prove whether the text was
+submitted. It also does not send a corrective Enter: the investigation below
+shows the root cause is sending too early, and a blind Enter would only hide
+that.
+
+### Investigation: "did not observe working or blocked state" (2026-09)
+
+**Symptom.** Sometimes a spawn failed after about 36s with the startup-timeout
+message above. The child pane showed the task text in Pi's editor, not
+submitted, as if Enter was never pressed. A retry of the same task a few
+minutes later succeeded.
+
+**Pattern in the session logs.** The failures came after a long idle period,
+and the whole batch failed together (for example 0 of 4 `build` children).
+Total time was about 6s of startup plus the 30s deadline.
+
+**Earlier explanations that were wrong or incomplete.**
+
+- "Pi's kitty-keyboard capability query swallows the Enter." This was the
+  reason the idle gate was added. The gate did not stop the failures, because
+  it passes on the same fallback guess (below).
+- A blind corrective Enter, `agent prompt --wait`, the task as an argv
+  positional, and the task as an `@file` positional were tried or rejected
+  earlier (see this section and "Rejected alternative" below).
+
+**Root cause (reproduced on demand).**
+
+1. Before Pi's lifecycle hook reports anything, Herdr has no real state for
+   the agent. For a known agent kind it then says `idle` from a guess:
+   `herdr agent explain` shows
+   `fallback_reason: default_known_agent_idle_fallback`. A Pi started with
+   `--no-extensions` and no hook is still reported "ready" and `idle`
+   after about 5s.
+2. `herdr agent start` returns "ready" on that guess about 3.9s after
+   launch, whether or not Pi has finished loading. `agent wait --until idle`
+   then returns within milliseconds, also on the guess.
+3. Pi loads all its extensions before it takes terminal input, and installs
+   its real submit handler only after that. (While it starts, Pi's editor
+   uses a startup submit handler that keeps the text and shows "Startup is
+   still in progress".) On a warm start this is done before 3.9s. On a cold
+   start (cold disk cache, several children each loading about a dozen
+   extensions at the same time) it is not.
+4. The prompt is typed while Pi is still loading. The text reaches the
+   editor, but the Enter never submits it. The most likely mechanism: the
+   terminal changes the carriage return to a line feed before Pi takes
+   control of input, and Pi's editor inserts a line feed as a new line.
+   The editor shows a blank line after the text, which agrees with this. The
+   fix does not depend on this detail.
+5. Pi then sits idle with the text in its editor, and the 30s startup
+   deadline fails the task.
+
+**Reproduction.** A child extension that blocks Pi's load for 6-8s
+(`Atomics.wait` at module load), then the old sequence `agent start` →
+`agent wait --until idle` → `agent prompt "/hotkeys"`: 3 of 3 runs left
+`/hotkeys` in the editor. At send time `agent get` showed
+`screen_detection_skipped: null` and no `agent_session`.
+
+**Fix verification.**
+
+- The same slow start with the hook-authority gate: 3 of 3 submitted. The gate
+  opened at 6.6-8.6s instead of 3.9s.
+- The real backend (`createHerdrBackend` with `HerdrCli`) against real Herdr
+  with an 8s slow load: 2 of 2 tasks (multi-line text) were submitted at about
+  8.85s and completed.
+- Unit tests pin the gate: the fallback guess and a hook-owned non-idle state
+  do not open it; a hook that never takes over fails the spawn and closes the
+  pane; without the hook, the old `idle` wait is used.
+
+**Alternatives considered for the fix.**
+
+- *Chosen: gate on hook authority.* The smallest change that removes the
+  cause. The risk is that `screen_detection_skipped` is not a documented
+  Herdr contract. The check is strict (`=== true`), so if Herdr renames the
+  field, every hooked spawn fails with a clear readiness timeout instead of
+  losing its prompt without a sign. `docs/smoke-herdr-cli.mjs` checks the
+  field against the real binary.
+- *A child-side ready file.* A small child extension writes a file on
+  `session_start` and the parent waits for it. This does not depend on
+  Herdr fields, but it adds a second handshake. It is the fallback plan if
+  Herdr changes the field.
+- *Deliver the task inside Pi* (a child extension reads a task file and calls
+  `pi.sendUserMessage`). No key presses at all; a prototype worked. It needs
+  a parent→child file handshake after `agent start`, because `agent start`
+  blocks until the agent is idle, and a child that starts its own turn at
+  startup would hold `agent start` for the whole turn. This is the most
+  robust option, but it is more code than the problem needs now.
+- *State-checked Enter retry.* Rejected: it hides the cause, and the stray
+  line feed stays in the task text.
 
 ### Rejected alternative: task text via argv
 
@@ -262,7 +368,7 @@ including newlines, but it changes what the model sees: pi wraps file
 content as `<file name="...">...</file>` in the first message instead of
 delivering it as a plain instruction, a real framing change from how the RPC
 backend (`src/runner.ts`, `sendCommand(taskText, "prompt")`) delivers the
-same task today. The idle-gate plus startup-deadline approach was chosen
+same task today. The readiness-gate plus startup-deadline approach was chosen
 instead because it preserves that plain-message framing and every task shape
 (including multi-line and arbitrary-content tasks) with no new argv-encoding
 constraints.
@@ -291,20 +397,20 @@ constraints.
   (split → start → prompt) can only mark the instance aborted; the spawn may
   still finish and later complete. The RPC backend has the same race with a
   much smaller window.
-- **The idle gate is a readiness hint, not a proof that every terminal
-  handshake has finished.** Herdr may report idle from its lifecycle detector
-  while Pi is completing another startup detail, and installations without
-  the managed lifecycle hook use weaker screen detection. The startup
-  activity deadline is the explicit backstop: if Herdr never reports working
-  or blocked after the prompt, the parent receives a specific failure instead
-  of waiting forever. A state-checked Enter recovery is intentionally deferred
-  until a real failure trace shows that the gate and deadline are insufficient;
-  the timed-out pane is closed as part of failed-startup cleanup.
-- **Requires a Herdr version with `agent wait`.** Verified against 0.9.0.
-  The backend uses `agent wait --until idle --timeout ...` before the first
-  prompt. There is no runtime feature detection or version check for this;
-  an older Herdr that lacks the command fails startup, and the backend closes
-  the leftover pane.
+- **The readiness gate depends on an undocumented Herdr field.** The
+  hook-authority gate reads `screen_detection_skipped` from `agent get`
+  (verified on 0.9.0). If Herdr renames or removes it, every spawn with the
+  managed hook fails with `Subagent readiness timed out ... hook authority
+  false`. Run `docs/smoke-herdr-cli.mjs` after a Herdr upgrade.
+- **Without the managed hook, the first prompt can still be lost.** The
+  fallback gate (`agent wait --until idle`) accepts Herdr's idle guess, so a
+  slow Pi start can leave the task unsubmitted in the editor. The startup
+  activity deadline then reports it. Install
+  `~/.pi/agent/extensions/herdr-agent-state.ts` to avoid this.
+- **Requires a Herdr version with `agent get` and `agent wait`.** Verified
+  against 0.9.0. There is no runtime feature detection or version check; an
+  older Herdr that lacks a command fails startup, and the backend closes the
+  leftover pane.
 - **Managed hook load is part of startup.** The resolver skips an absent hook,
   but Pi treats an explicit `-e` path that disappears or fails to load as a
   startup error. The backend surfaces that error and closes the pane instead

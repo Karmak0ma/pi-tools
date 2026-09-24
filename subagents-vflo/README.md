@@ -136,9 +136,12 @@ interactive Pi sessions instead of headless RPC children:
   with `herdr pane split --current --no-focus` so it never steals keyboard
   focus. The first task of a batch splits right; later tasks split down (and a
   narrow parent always splits down).
-- The child is launched with `herdr agent start <name> --kind pi`. The backend
-  then waits for `herdr agent wait --until idle` before sending the first task
-  prompt, avoiding the prompt-confirmation race during Pi startup. Model,
+- The child is launched with `herdr agent start <name> --kind pi`. Herdr says
+  "ready" and `idle` from a guess before Pi can take input, so the backend
+  sends the first task prompt only when Pi's lifecycle hook reports `idle`
+  (`herdr agent get` shows `screen_detection_skipped: true`). Without this
+  gate, a slow (cold) start left the task unsubmitted in the child's editor.
+  See "Initial-prompt readiness" in `docs/design-herdr-backend.md`. Model,
   tools, thinking level, cwd, agent system prompt, and configured child
   extensions are preserved from RPC mode; the nesting-depth marker is injected
   into the pane env. Herdr also loads its managed `herdr-agent-state.ts`
@@ -151,7 +154,7 @@ interactive Pi sessions instead of headless RPC children:
 
 The parent decides task completion through the child's **session JSONL**.
 Herdr's `idle`/`done` pane status remains a UI-seen state, not task semantics;
-its `idle` state gates the first prompt, and its later `working`/`blocked` state
+a hook-reported `idle` gates the first prompt, and a later `working`/`blocked` state
 cancels a 30-second startup-activity deadline:
 
 - A turn that settles normally (`stop`) completes the task and delivers the

@@ -1,7 +1,8 @@
 /**
  * Live smoke test for the exact Herdr argv sequences the Herdr backend sends.
- * Run from inside a Herdr pane only. Creates one pane, boots a bare pi TUI,
- * waits for Herdr to report the child idle, submits a real prompt in
+ * Run from inside a Herdr pane only. Creates one pane, boots a pi TUI with the
+ * managed lifecycle hook, waits until the hook owns an idle state (the
+ * backend's readiness gate), submits a real prompt in
  * fire-and-forget mode, then closes the pane and verifies the child is gone.
  * Cleans up after itself.
  *
@@ -92,11 +93,24 @@ try {
   const state = await herdr(["pane", "get", paneId]);
   console.log("pane state ok, agent_status:", state.result.pane.agent_status);
 
-  // Mirrors spawnSubagentInHerdr's explicit readiness gate. This is separate
-  // from task completion: it only ensures the child is settled before the
-  // first prompt is typed.
-  await herdr(["agent", "wait", name, "--until", "idle", "--timeout", "60000"]);
-  console.log("agent idle");
+  // Mirrors waitForLifecycleHookIdle in src/herdr-backend.ts. `agent start`
+  // and `agent wait --until idle` both accept Herdr's fallback guess, which
+  // says idle while Pi may still be loading; a prompt typed then is never
+  // submitted. Only a hook-owned idle state proves Pi takes input. This
+  // smoke run loads the user's normal extensions (no --no-extensions), so the
+  // managed hook in ~/.pi/agent/extensions is loaded. If this loop times out,
+  // Herdr has probably renamed `screen_detection_skipped`: the backend would
+  // then fail every hooked spawn with a readiness timeout.
+  const gateDeadline = Date.now() + 60_000;
+  while (true) {
+    const agent = (await herdr(["agent", "get", name])).result.agent;
+    if (agent.screen_detection_skipped === true && agent.agent_status === "idle") break;
+    if (Date.now() > gateDeadline) {
+      throw new Error(`readiness contract drift: hook authority never seen: ${JSON.stringify(agent)}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  console.log("agent idle under lifecycle-hook authority");
 
   // Mirrors submitInitialPrompt: submit without Herdr's fixed 5s prompt
   // confirmation race. The session JSONL and monitor deadline own the task

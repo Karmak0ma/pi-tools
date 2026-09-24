@@ -36,6 +36,15 @@ class FakeHerdr implements HerdrClient {
   agentWaitError: Error | undefined;
   agentPromptError: Error | undefined;
   waits: Array<{ target: string; status: string; timeoutMs: number }> = [];
+  /** Queued `agent get` snapshots; the default is a hook-owned idle agent. */
+  agentGetResults: Array<{ agentStatus?: string; lifecycleHookAuthority: boolean }> = [];
+  defaultAgentSnapshot: { agentStatus?: string; lifecycleHookAuthority: boolean } = {
+    agentStatus: "idle",
+    lifecycleHookAuthority: true,
+  };
+  agentGetCalls = 0;
+  /** `agentGetCalls` at the moment each prompt was typed, to prove ordering. */
+  agentGetCallsAtPrompt: number[] = [];
   failPaneClose = false;
 
   async paneSplit(options: { direction: "right" | "down"; cwd: string; env: Record<string, string> }) {
@@ -57,7 +66,13 @@ class FakeHerdr implements HerdrClient {
     this.waits.push({ target, status, timeoutMs });
   }
 
+  async agentGet(_target: string) {
+    this.agentGetCalls++;
+    return this.agentGetResults.shift() ?? this.defaultAgentSnapshot;
+  }
+
   async agentPrompt(target: string, text: string) {
+    this.agentGetCallsAtPrompt.push(this.agentGetCalls);
     if (this.agentPromptError) throw this.agentPromptError;
     this.prompts.push({ target, text });
   }
@@ -106,6 +121,16 @@ afterEach(() => {
   vi.unstubAllEnvs();
   for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
+
+/** Put Pi's managed lifecycle hook where the backend resolves it. */
+function installManagedHook(): void {
+  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-vflo-herdr-"));
+  tempDirs.push(agentDir);
+  const integrationPath = path.join(agentDir, "extensions", "herdr-agent-state.ts");
+  fs.mkdirSync(path.dirname(integrationPath), { recursive: true });
+  fs.writeFileSync(integrationPath, "// test integration");
+  vi.stubEnv(PI_CODING_AGENT_DIR_VAR, agentDir);
+}
 
 function makeSpec(overrides: Partial<SubagentSpec> = {}): SubagentSpec {
   return {
@@ -711,9 +736,52 @@ describe("HerdrBackend failure handling", () => {
 // ─── Initial prompt readiness and startup deadline ──────────────────────────
 
 describe("HerdrBackend initial prompt readiness", () => {
-  it("waits for idle before submitting the first prompt and does not use confirmation mode", async () => {
+  // Regression for the live failure "did not observe working or blocked state
+  // after the initial prompt": Herdr said `idle` from its fallback guess while
+  // Pi was still loading, and the typed task sat unsubmitted in the editor.
+  it("with the lifecycle hook, holds the first prompt until the hook owns an idle state", async () => {
+    installManagedHook();
+    const fake = new FakeHerdr();
+    // Herdr's fallback guess (idle, no hook authority) must not open the gate,
+    // and neither may a hook-owned state that is not idle yet.
+    fake.agentGetResults = [
+      { agentStatus: "idle", lifecycleHookAuthority: false },
+      { agentStatus: "idle", lifecycleHookAuthority: false },
+      { agentStatus: "working", lifecycleHookAuthority: true },
+    ];
+    const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
+
+    expect(fake.agentGetCallsAtPrompt).toEqual([4]);
+    expect(fake.waits).toEqual([]);
+    expect(fake.prompts).toEqual([{ target: fake.started[0].name, text: "map the repo" }]);
+
+    appendAssistant(sessionDirOf(fake), { content: [{ type: "text", text: "done" }], stopReason: "stop" });
+    await expect(handle.result).resolves.toMatchObject({ lifecycle: "completed" });
+  });
+
+  it("with the lifecycle hook, fails startup and closes the pane when the hook never takes over", async () => {
+    installManagedHook();
+    const fake = new FakeHerdr();
+    fake.defaultAgentSnapshot = { agentStatus: "idle", lifecycleHookAuthority: false };
+    const backend = createHerdrBackend({
+      cli: fake,
+      pollIntervalMs: 10,
+      errorSettleGraceMs: 50,
+      agentStartTimeoutMs: 60,
+      startupActivityTimeoutMs: 500,
+    });
+
+    await expect(backend.spawn(makeSpec({ agentPrompt: "" })))
+      .rejects.toThrow("Pi's lifecycle hook did not report idle within 60ms (last seen: hook authority false, status idle)");
+    expect(fake.prompts).toEqual([]);
+    expect(fake.closedPanes).toHaveLength(1);
+  });
+
+  it("without the lifecycle hook, falls back to Herdr's idle wait and does not use confirmation mode", async () => {
     const fake = new FakeHerdr();
     const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
+
+    expect(fake.agentGetCalls).toBe(0);
 
     expect(fake.waits).toHaveLength(1);
     expect(fake.waits[0]).toMatchObject({ target: fake.started[0].name, status: "idle" });
@@ -815,7 +883,7 @@ describe("HerdrBackend initial prompt readiness", () => {
     expect(fake.closedPanes).toHaveLength(1);
   });
 
-  it("closes the pane when the idle readiness gate fails", async () => {
+  it("closes the pane when the fallback idle gate fails", async () => {
     const fake = new FakeHerdr();
     fake.agentWaitError = new Error("herdr agent wait failed: timeout");
 

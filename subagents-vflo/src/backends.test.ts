@@ -129,6 +129,7 @@ describe("createBackend selection", () => {
       paneSplit: async () => ({ paneId: "wJ:p1" }),
       agentStart: async () => {},
       agentWait: async () => {},
+      agentGet: async () => ({ agentStatus: "idle", lifecycleHookAuthority: true }),
       agentPrompt: async () => {},
       paneGet: async () => ({ state: "exists" as const, agentStatus: "working" }),
       paneClose: async () => {},

@@ -237,6 +237,25 @@ describe("HerdrCli", () => {
     expect(calls[0].timeoutMs).toBe(70_000);
   });
 
+  it("reports hook authority only when Herdr says screen detection is skipped", async () => {
+    // Shapes captured live from herdr 0.9.0 `agent get`: the fallback guess
+    // has no `screen_detection_skipped`; a hook-owned agent has it set true.
+    const outputs = [
+      { result: { agent: { name: "sa-x", agent_status: "idle", interactive_ready: true } } },
+      { result: { agent: { name: "sa-x", agent_status: "idle", screen_detection_skipped: true } } },
+    ];
+    const { runner, calls } = makeRunner(() => ({
+      exitCode: 0,
+      stdout: JSON.stringify(outputs.shift()),
+      stderr: "",
+    }));
+    const cli = new HerdrCli(runner);
+
+    await expect(cli.agentGet("sa-x")).resolves.toEqual({ agentStatus: "idle", lifecycleHookAuthority: false });
+    await expect(cli.agentGet("sa-x")).resolves.toEqual({ agentStatus: "idle", lifecycleHookAuthority: true });
+    expect(calls[0].args).toEqual(["agent", "get", "sa-x"]);
+  });
+
   it.each(ERROR_STREAMS)("rejects a prompt when the agent is blocked (%s)", async (stream) => {
     const runner = async (): Promise<HerdrCommandResult> =>
       errorResult({ error: { code: "agent_blocked", message: "at a dialog" } }, stream);
