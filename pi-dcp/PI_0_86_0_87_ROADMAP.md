@@ -1,9 +1,9 @@
 # Combined Pi 0.86–0.87 roadmap for pi-dcp
 
 **Date:** 2026-09-21
-**Current host:** Pi `0.87.0`
-**Current lockfile:** Pi packages pinned to `0.87.0`
-**Peer version:** exact `0.87.0`; the lockfile is the certification artifact
+**Current host:** Pi `0.87.1`
+**Current lockfile:** Pi packages pinned to `0.87.1`
+**Peer version:** exact `0.87.1`; the lockfile is the certification artifact
 **Support policy:** internal current-host certification only; no previous-version matrix
 
 This document combines the opportunities and compatibility decisions from:
@@ -20,7 +20,7 @@ The following work is complete:
 1. **Pi 0.86 structured system guidance.** DCP writes deterministic configuration-derived guidance to the owned `systemPromptOptions.sections` key `pi_dcp_context_compression`. Live nudges remain request-local context. DCP never returns a complete replacement `systemPrompt`.
 2. **Pi 0.87 canonical projection compatibility.** DCP requires `SessionManager.buildSessionProjection()` and uses a strict wrapper that preserves `sourceEntry.id`, projection ordinals, provider-dropped assistant identities, and fail-closed validation. Pi-applied `context_edit` entries are understood as host state, not as DCP messages. Older hosts are unsupported and fail closed.
 3. **Pi 0.87 system-free context compatibility.** DCP keeps the complete projection for protocol units, system barriers, block coverage, snapshots, and authorization. The `context` join uses only the provider-visible, non-system projection and maps the result back to the complete index. DCP does not manufacture hidden system messages. Any system messages supplied by the host remain untouched extras.
-4. **Pi 0.87 development validation.** The package and lockfile use Pi `0.87.0`. The full deterministic suite passes against that host version, including direct tests for context-edit omission/replacement and system-free/system-present context input.
+4. **Pi 0.87 development validation.** The package and lockfile use Pi `0.87.1`. The full deterministic suite passes against that host version, including direct tests for context-edit omission/replacement and system-free/system-present context input.
 
 The following is **not** complete:
 
@@ -44,7 +44,7 @@ The following is **not** complete:
 
 ## 0. Current-host certification and update process
 
-The internal extension certifies and requires the exact Pi `0.87.0` lockfile host. It is not a promise to support older Pi releases or an untested future version.
+The internal extension certifies and requires the exact Pi `0.87.1` lockfile host. It is not a promise to support older Pi releases or an untested future version.
 
 When Pi updates:
 
@@ -116,7 +116,7 @@ The immediate adapter is intentionally narrow. Future work should make its compa
 
 ### Required hardening
 
-- Differentially compare DCP's wrapper with the installed Pi 0.87.0 public projection helper.
+- Differentially compare DCP's wrapper with the installed Pi 0.87.1 public projection helper.
 - Compare source entry IDs, projection ordinals, message fingerprints, system checkpoints, and context-edit target identity.
 - Test latest-edit-wins behavior, branch navigation, edits targeting omitted or compacted entries, and malformed host output.
 - Test provider-dropped assistant entries separately from host-applied context omissions. A source ID omitted by Pi's provider projection remains known to DCP for block availability and anchors.

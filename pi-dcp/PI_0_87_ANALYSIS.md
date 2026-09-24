@@ -2,12 +2,12 @@
 
 **Date:** 2026-09-21
 **Pi host inspected:** `@earendil-works/pi-coding-agent` 0.87.0
-**pi-dcp development dependency:** 0.87.0
+**pi-dcp development dependency:** 0.87.1
 **Purpose:** Determine which Pi 0.87 changes pi-dcp should adopt, which changes require compatibility work, and which changes should remain outside the extension.
 
 ## Implementation status
 
-The Pi 0.87 compatibility repair is implemented. DCP requires Pi's provenance-preserving `buildSessionProjection()`, validates its output, and joins Pi 0.87's system-free `context` input against a mapped provider-visible projection while preserving system messages as canonical non-compressible barriers. The complete suite passes against the 0.87.0 lockfile. This internal extension certifies the current Pi 0.87.x host family only; no previous-version matrix is maintained.
+The Pi 0.87 compatibility repair is implemented. DCP requires Pi's provenance-preserving `buildSessionProjection()`, validates its output, and joins Pi 0.87's system-free `context` input against a mapped provider-visible projection while preserving system messages as canonical non-compressible barriers. The complete suite passes against the 0.87.1 lockfile. This internal extension certifies the current Pi 0.87.x host family only; no previous-version matrix is maintained.
 
 ## Executive recommendation
 
@@ -313,7 +313,7 @@ Pi 0.87 makes `SessionManager` canonical for provider context and no longer trea
 
 Before claiming Pi 0.87 support:
 
-1. Pin all four Pi development packages and peers to the current Pi 0.87.x family; the exact 0.87.0 lockfile is the certification artifact.
+1. Pin all four Pi development packages and peers to the current Pi 0.87.x family; the exact 0.87.1 lockfile is the certification artifact.
 2. Add a compatibility fixture for `context_edit` omission and replacement.
 3. Add a differential fixture comparing the DCP wrapper with `buildSessionProjection()` while preserving source-entry identity.
 4. Add a Pi 0.87 lifecycle fixture proving that the system-agnostic join handles both system-present and system-free `context` inputs without double transformation.
@@ -323,7 +323,7 @@ Before claiming Pi 0.87 support:
 8. Make the README and roadmap's current-host statement match the actual lockfile/test environment.
 9. Run the existing complete suite, differential compatibility tests, `git diff --check`, Ripwire quality delta, and lifecycle contract checks.
 
-The current `npm run check` certifies the pi-dcp package against the exact 0.87.0 development dependencies. It does not claim support for older Pi hosts or an untested future minor release.
+The current `npm run check` certifies the pi-dcp package against the exact 0.87.1 development dependencies. It does not claim support for older Pi hosts or an untested future minor release.
 
 ## Bottom line
 

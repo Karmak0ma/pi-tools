@@ -2,8 +2,8 @@
 
 **Status:** historical Pi 0.86 roadmap; structured-prompt Phase 1 and Pi 0.87 compatibility repair implemented, later capability phases remain open
 **Host version investigated:** `@earendil-works/pi-coding-agent` 0.86.1
-**Current lockfile host:** `@earendil-works/pi-coding-agent` 0.87.0
-**Current pi-dcp peer range:** Pi `0.87.0` exact
+**Current lockfile host:** `@earendil-works/pi-coding-agent` 0.87.1
+**Current pi-dcp peer range:** Pi `0.87.1` exact
 **Support policy:** internal latest-host certification only; no previous-version matrix
 **Primary audience:** maintainers and agents implementing the next pi-dcp phases
 **Combined roadmap:** `PI_0_86_0_87_ROADMAP.md`
@@ -21,7 +21,7 @@ This document records:
 5. a phased implementation and validation plan;
 6. the decisions that must be made before native-compaction behavior changes.
 
-This is a proposal, not authorization to implement every phase. The current repository tests against Pi 0.87.0 and certifies only the current Pi 0.87.x host family. The structured-prompt work and the Pi 0.87 projection/context compatibility repair are implemented; the remaining capability phases are future work. Phase 4 conflicts with the frozen first-release native-compaction contract and requires a separate explicit product decision before implementation.
+This is a proposal, not authorization to implement every phase. The current repository tests against Pi 0.87.1 and certifies only the current Pi 0.87.x host family. The structured-prompt work and the Pi 0.87 projection/context compatibility repair are implemented; the remaining capability phases are future work. Phase 4 conflicts with the frozen first-release native-compaction contract and requires a separate explicit product decision before implementation.
 
 ## 2. Executive recommendation
 
@@ -100,9 +100,9 @@ The current working implementation now:
 - retains DCP's special handling for errored, aborted, empty, and legacy-null assistant turns that the provider does not receive;
 - marks system protocol units permanently non-compressible;
 - includes system content, section patches, and tool declarations in heuristic token estimates;
-- pins development Pi packages, peer dependencies, and the current lockfile to exact 0.87.0 for the internal current-host policy.
+- pins development Pi packages, peer dependencies, and the current lockfile to exact 0.87.1 for the internal current-host policy.
 
-The historical plan text above described a multi-version policy. That policy is withdrawn: the lockfile and deterministic suite certify Pi 0.87.0 only, and a future Pi update requires updating the four pins and rerunning the suite rather than retaining a previous-version matrix.
+The historical plan text above described a multi-version policy. That policy is withdrawn: the lockfile and deterministic suite certify Pi 0.87.1 only, and a future Pi update requires updating the four pins and rerunning the suite rather than retaining a previous-version matrix.
 
 The regression tests are in `test/golden/projection.test.ts`.
 
@@ -349,13 +349,13 @@ It should not replace per-entry mapping.
 
 ### 6.7 Current-host certification
 
-The internal extension certifies the exact Pi `0.87.0` lockfile host and requires that exact version in all four peer dependencies. Every Pi update must refresh the four pins and rerun `npm ci` plus the complete deterministic suite. No 0.84.x, 0.85.x, or 0.86.x host matrix is maintained.
+The internal extension certifies the exact Pi `0.87.1` lockfile host and requires that exact version in all four peer dependencies. Every Pi update must refresh the four pins and rerun `npm ci` plus the complete deterministic suite. No 0.84.x, 0.85.x, or 0.86.x host matrix is maintained.
 
 Pi 0.87's public `buildSessionProjection()` is a required startup capability. A host without it is unsupported and disables DCP rather than selecting an older projection path. Tests for usage entries, persisted system state, legacy compaction metadata, and null normalization remain because those data shapes are still accepted by the certified Pi 0.87 host.
 
 ### 6.8 Completion criterion
 
-Phase 2 is complete when DCP delegates certified entry conversion to the current public helper, retains exact canonical provenance and fail-closed behavior, and the Pi 0.87.0 lockfile suite passes.
+Phase 2 is complete when DCP delegates certified entry conversion to the current public helper, retains exact canonical provenance and fail-closed behavior, and the Pi 0.87.1 lockfile suite passes.
 
 ## 7. Opportunity 3: cache-warming coordination
 
@@ -643,8 +643,8 @@ System messages define the instruction and tool environment under which later me
 
 The project selected the internal current-host policy on 2026-09-21:
 
-- the four Pi peer dependencies use exact `0.87.0`;
-- the lockfile pins and certifies exact Pi `0.87.0` behavior;
+- the four Pi peer dependencies use exact `0.87.1`;
+- the lockfile pins and certifies exact Pi `0.87.1` behavior;
 - Pi 0.87's `buildSessionProjection()` is a required startup capability;
 - older host APIs are unsupported and fail closed rather than receiving a compatibility claim;
 - no previous-version matrix or previous-host lifecycle tests are maintained;
