@@ -18,6 +18,7 @@ import {
 	sumBranchUsage,
 } from "./state.js";
 import { createSplitPaneController, type SplitPaneController } from "./split-pane.js";
+import { applyTodoSnapshot, todoDisplayFromBranch, visibleTodos, type TodoDisplayState } from "./todo-display.js";
 import { prioritizeInputListener } from "./input-priority.js";
 import { isUnmodifiedPrimaryPress, parseSgrMouseEvent } from "./mouse.js";
 import {
@@ -29,7 +30,6 @@ import {
 	type LimitsState,
 	type SidebarSnapshot,
 	type SubagentItem,
-	type TodoItem,
 } from "./types.js";
 
 // How often the sidebar re-reads pi-usage-vflo's published cache file. This is
@@ -49,7 +49,7 @@ interface Runtime {
 	disposed: boolean;
 	config: SidebarConfig;
 	sidebarVisible: boolean;
-	todos: TodoItem[];
+	todoDisplay: TodoDisplayState;
 	subagents: SubagentItem[];
 	subagentBatches: Map<string, SubagentItem[]>;
 	limits: LimitsState;
@@ -100,20 +100,6 @@ async function writeConfig(config: SidebarConfig): Promise<void> {
 	await writeFile(CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 }
 
-function todoStateFromBranch(ctx: ExtensionContext): TodoItem[] {
-	const branch = ctx.sessionManager.getBranch();
-	for (let index = branch.length - 1; index >= 0; index -= 1) {
-		const entry = branch[index] as unknown as Record<string, unknown>;
-		const message = entry?.type === "message" && typeof entry.message === "object" && entry.message !== null
-			? (entry.message as Record<string, unknown>)
-			: undefined;
-		if (message?.role !== "toolResult" || message.toolName !== "todo" || message.isError === true) continue;
-		const todos = normalizeTodoDetails(message.details);
-		if (todos !== undefined) return todos;
-	}
-	return [];
-}
-
 function snapshot(runtime: Runtime): SidebarSnapshot {
 	const model = runtime.ctx.model;
 	const context = runtime.ctx.getContextUsage();
@@ -129,7 +115,7 @@ function snapshot(runtime: Runtime): SidebarSnapshot {
 		context,
 		limits: runtime.limits,
 		usage: sumBranchUsage(runtime.ctx.sessionManager.getBranch()),
-		todos: runtime.todos,
+		todos: visibleTodos(runtime.todoDisplay),
 		subagents: runtime.subagents,
 		diff: runtime.diff,
 	};
@@ -490,7 +476,7 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 			pi,
 			disposed: false,
 			sidebarVisible: ctx.mode === "tui" && config.showSidebarOnStartup,
-			todos: todoStateFromBranch(ctx),
+			todoDisplay: todoDisplayFromBranch(ctx.sessionManager.getBranch()),
 			subagents: [],
 			subagentBatches: new Map(),
 			limits: { buckets: [] },
@@ -562,7 +548,7 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 	pi.on("session_tree", (_event, ctx) => {
 		const runtime = runtimeFor(current, ctx);
 		if (!runtime) return;
-		runtime.todos = todoStateFromBranch(ctx);
+		runtime.todoDisplay = todoDisplayFromBranch(ctx.sessionManager.getBranch());
 		requestRender(runtime);
 	});
 
@@ -618,7 +604,7 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 			if (event.isError) return;
 			const todos = normalizeTodoDetails(event.details);
 			if (todos === undefined) return;
-			runtime.todos = todos;
+			applyTodoSnapshot(runtime.todoDisplay, todos);
 			if (runtime.sidebarVisible && panelEnabled(runtime.config, "todos")) {
 				suppressTodoWidget(runtime);
 				requestRender(runtime);
@@ -672,9 +658,15 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 		const runtime = runtimeFor(current, ctx);
 		if (runtime) requestRender(runtime);
 	});
-	pi.on("turn_end", (_event, ctx) => {
+	pi.on("turn_end", (event, ctx) => {
 		const runtime = runtimeFor(current, ctx);
-		if (runtime) requestRender(runtime);
+		if (!runtime) return;
+		// Cancelled and failed model responses are not completed work turns.
+		// turnIndex resets for each agent run, so keep our own session count.
+		if (event.message.role === "assistant" && event.message.stopReason !== "aborted" && event.message.stopReason !== "error") {
+			runtime.todoDisplay.turns += 1;
+		}
+		requestRender(runtime);
 	});
 	pi.on("agent_end", (_event, ctx) => {
 		const runtime = runtimeFor(current, ctx);
