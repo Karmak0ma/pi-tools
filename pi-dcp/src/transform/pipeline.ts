@@ -1,6 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { deepClone } from "../util/clone.ts";
 import { hashJson } from "../util/hash.ts";
 import { buildProtocolUnits } from "../identity/protocol.ts";
 import { projectSessionManager, type ProjectionResult } from "../identity/project.ts";
@@ -51,9 +50,20 @@ export interface TransformResult {
 /**
  * Transform only canonical history. A transient nudge is appended by the
  * lifecycle after this function so it never affects joining or baselines.
+ *
+ * Message ownership, which lets this path avoid deep copies:
+ * - Pi structured-clones the `context` messages before any handler runs, so
+ *   `input` objects belong to this request and may be returned by reference.
+ * - No stage mutates an input object. A stage that changes a message changes
+ *   a copy (copy-on-write), so the raw fallback is the input, unchanged.
+ * - Session objects from the projection are never emitted: the output merge
+ *   only emits positions that matched an input message.
+ *
+ * test/performance/request-path.test.ts freezes input and session entries to
+ * enforce this. Earlier versions deep-cloned the full input four times.
  */
 export function transformOutgoingContext(input: readonly AgentMessage[], options: TransformOptions): TransformResult {
-  const fallback = deepClone([...input]);
+  const fallback = [...input];
   const state = options.state;
   if (state.corruptReason) return failure(fallback, state, state.corruptReason);
   try {
@@ -184,10 +194,10 @@ function mergeProjectedOutput(input: readonly AgentMessage[], incomingByExpected
     if (expectedIndex === undefined) {
       // Extras belong to other extensions. Preserve them byte-for-byte and do
       // not attach aliases, redact fields, or replace their content.
-      output.push(deepClone(input[incomingIndex]));
+      output.push(input[incomingIndex]);
       continue;
     }
-    output.push(...(byProjectedIndex[expectedIndex] || []).map((message) => deepClone(message)));
+    output.push(...(byProjectedIndex[expectedIndex] || []));
   }
   return output;
 }

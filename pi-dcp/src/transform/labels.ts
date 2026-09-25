@@ -58,15 +58,16 @@ export function hasProviderVisibleContent(message: AgentMessage): boolean {
 /**
  * Attach the local alias to the first message of each protocol unit. Labels
  * live beside the bytes they identify so the model can discover them without
- * a separately ordered catalog. The function clones every message because a
- * context transform must never mutate SessionManager's source messages.
+ * a separately ordered catalog. The input is never mutated: appendLabel copies
+ * the one message it changes, and every other message is returned by
+ * reference. Deep-cloning the whole input here cost a full copy per request.
  */
 export function injectInlineLabels(
   messages: readonly AgentMessage[],
   units: readonly ProtocolUnit[],
   snapshot: BaselineSnapshot,
 ): AgentMessage[] {
-  const output = deepClone([...messages]);
+  const output = [...messages];
   let cursor = 0;
   for (let unitIndex = 0; unitIndex < units.length && cursor < output.length; unitIndex++) {
     const messageCount = units[unitIndex].endProjectedIndex - units[unitIndex].startProjectedIndex + 1;

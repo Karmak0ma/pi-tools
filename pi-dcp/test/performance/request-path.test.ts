@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createSyntheticHarness } from "../helpers/synthetic-session.ts";
+import { buildSyntheticSession, contextEventMessages, createContextHarness } from "../helpers/synthetic-session.ts";
+import { currentHostSessionManager } from "../helpers/current-host.ts";
+import { deepFreeze } from "../../src/util/clone.ts";
 
 /**
  * SHA-256 of the transformed messages for the default synthetic session.
@@ -24,7 +26,15 @@ const sha256 = (value: unknown): string => createHash("sha256").update(JSON.stri
 
 describe("realistic request path", () => {
   it("runs the full transform on a large session and keeps its output stable", async () => {
-    const harness = createSyntheticHarness();
+    const session = buildSyntheticSession();
+    const incoming = contextEventMessages(session.entries, session.leafId);
+    const harness = createContextHarness(currentHostSessionManager(session.entries, session.leafId), incoming);
+    // The request path avoids deep copies by never mutating Pi's session
+    // objects or the `context` input (see transformOutgoingContext). Freeze
+    // both: ES modules are strict, so any write throws, the pipeline falls
+    // back to raw context, and the no-fallback check below fails.
+    deepFreeze(session.entries);
+    deepFreeze(incoming);
     const first = await harness.run();
 
     // The fixture must exercise the full path. A raw fallback would make both

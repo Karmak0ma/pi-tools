@@ -1,16 +1,49 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { deepClone } from "../util/clone.ts";
 import type { ReducedState } from "../state/reducer.ts";
 import { redactOldErrorArguments } from "../strategies/purge-errors.ts";
 import { adapterForQuestion } from "../questions/registry.ts";
 
 const CLEARED = "[Old tool result content cleared by pi-dcp]";
 const SUMMARY_MOVED = "[summary text removed by pi-dcp: it is delivered by the compressed block itself]";
+/**
+ * Apply persisted pruning to outgoing messages, copy-on-write.
+ *
+ * Only a message that is actually redacted is copied; every other message is
+ * returned by reference. The input is never mutated, because the pipeline may
+ * still fall back to it unchanged (see transformOutgoingContext). Copying the
+ * whole input here cost a full deep clone of every request.
+ */
 export function applyPersistedRedactions(messages: readonly AgentMessage[], state: ReducedState): AgentMessage[] {
-  const output = deepClone([...messages]); for (const message of output) {
-    if (message.role === "assistant") for (const part of message.content) if (part.type === "toolCall") { const prune = state.toolPrunes.get(part.id); if (prune?.oldErrorInput) part.arguments = redactOldErrorArguments(part.arguments) as Record<string, any>; const question = prune?.questionInput; if (question) { const adapter = adapterForQuestion(part.name, part.arguments); if (adapter) part.arguments = adapter.redact(part.arguments) as Record<string, any>; } if (part.name === "compress" && state.compressToolCallIds?.has(part.id)) part.arguments = redactCompressSummaries(part.arguments) as Record<string, any>; }
-    if (message.role === "toolResult") { const prune = state.toolPrunes.get(message.toolCallId); if (prune?.output) message.content = [{ type: "text", text: CLEARED }]; }
-  } return output;
+  return messages.map((message) => redactMessage(message, state));
+}
+
+function redactMessage(message: AgentMessage, state: ReducedState): AgentMessage {
+  if (message.role === "toolResult") {
+    return state.toolPrunes.get(message.toolCallId)?.output ? { ...message, content: [{ type: "text", text: CLEARED }] } : message;
+  }
+  if (message.role !== "assistant") return message;
+  let changed = false;
+  const content = message.content.map((part) => {
+    if (part.type !== "toolCall") return part;
+    const redacted = redactToolArguments(part.id, part.name, part.arguments, state);
+    if (redacted === part.arguments) return part;
+    changed = true;
+    return { ...part, arguments: redacted as Record<string, any> };
+  });
+  return changed ? { ...message, content } : message;
+}
+
+/** Returns the same object when nothing applies; every redactor is pure. */
+function redactToolArguments(id: string, name: string, argumentsValue: unknown, state: ReducedState): unknown {
+  const prune = state.toolPrunes.get(id);
+  let result = argumentsValue;
+  if (prune?.oldErrorInput) result = redactOldErrorArguments(result);
+  if (prune?.questionInput) {
+    const adapter = adapterForQuestion(name, result);
+    if (adapter) result = adapter.redact(result);
+  }
+  if (name === "compress" && state.compressToolCallIds?.has(id)) result = redactCompressSummaries(result);
+  return result;
 }
 
 /**

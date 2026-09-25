@@ -6,7 +6,6 @@ import { reconstructFromBranch } from "./state/reconstruct.ts";
 import { projectSessionManager } from "./identity/project.ts";
 import { buildProtocolUnits } from "./identity/protocol.ts";
 import { hashJson } from "./util/hash.ts";
-import { deepClone } from "./util/clone.ts";
 import { transformOutgoingContext } from "./transform/pipeline.ts";
 import { evaluateNudge, gateContextNudgeOnEligibility } from "./transform/metadata.ts";
 import { buildNudgeMessage } from "./prompts/nudge.ts";
@@ -246,8 +245,14 @@ function setConfiguredCompressionTool(runtime: DcpRuntime, active: boolean): voi
   } catch { /* tool activation must never break the agent turn */ }
 }
 
+/**
+ * Pi structured-clones the `context` messages for this request and DCP never
+ * mutates them, so a raw request returns them unchanged in a new array. A deep
+ * copy was once taken here on every request, including successful ones that
+ * never used it.
+ */
 async function transformContext(event: ContextEvent, ctx: ExtensionContext, runtime: DcpRuntime): Promise<{ messages: AgentMessage[] }> {
-  const fallback = deepClone(event.messages);
+  const fallback = [...event.messages];
   if (!runtime.valid) {
     const nudge = buildNudgeMessage(runtime);
     recordContextOutcome(runtime, runtime.lastReadiness?.reason || "extension_disabled");

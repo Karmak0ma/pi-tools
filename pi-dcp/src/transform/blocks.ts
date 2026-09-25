@@ -1,5 +1,4 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { deepClone } from "../util/clone.ts";
 import type { BaselineSnapshot, ProtocolUnit } from "../identity/types.ts";
 import type { ReducedState } from "../state/reducer.ts";
 import { formatLabelTag } from "./labels.ts";
@@ -53,6 +52,9 @@ export interface BlockRenderResult {
 }
 
 export function replaceBlocksWithOrigins(messages: readonly AgentMessage[], units: readonly ProtocolUnit[], snapshot: BaselineSnapshot, state: ReducedState): BlockRenderResult {
+  // No copies here: each replacement message is built fresh by
+  // activeBlockReplacements, and uncovered messages are passed through by
+  // reference. Upstream stages already copied every message they changed.
   const replacements = activeBlockReplacements(messages, units, snapshot, state);
   const byStart = new Map(replacements.map((replacement) => [replacement.start, replacement]));
   const byProjectedIndex = messages.map(() => [] as AgentMessage[]);
@@ -60,7 +62,7 @@ export function replaceBlocksWithOrigins(messages: readonly AgentMessage[], unit
     const unit = units[unitIndex];
     const replacement = byStart.get(unitIndex);
     if (replacement) {
-      byProjectedIndex[unit.startProjectedIndex]?.push(deepClone(replacement.message));
+      byProjectedIndex[unit.startProjectedIndex]?.push(replacement.message);
       for (let covered = replacement.start + 1; covered <= replacement.end; covered++) {
         const coveredUnit = units[covered];
         if (!coveredUnit) continue;
@@ -71,7 +73,7 @@ export function replaceBlocksWithOrigins(messages: readonly AgentMessage[], unit
     }
     for (let projected = unit.startProjectedIndex; projected <= unit.endProjectedIndex; projected++) {
       const message = messages[projected];
-      if (message) byProjectedIndex[projected]?.push(deepClone(message));
+      if (message) byProjectedIndex[projected]?.push(message);
     }
   }
   return { messages: byProjectedIndex.flat(), byProjectedIndex };
