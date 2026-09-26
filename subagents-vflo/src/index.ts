@@ -89,6 +89,8 @@ function getParentSessionPath(
 
 export default function (pi: ExtensionAPI) {
   const tracker = new SubagentTracker();
+  // Source of unique task ids for this extension runtime (see task id creation).
+  let taskSequence = 0;
   let broker: ChildExtensionUIBroker;
   let tuiManager: SubagentTuiManager;
   let abortInstanceForManager: (instance: RuntimeSubagentInstance) => void = () => {};
@@ -309,7 +311,11 @@ export default function (pi: ExtensionAPI) {
       // Generate unique task IDs and create tracker instances immediately
       const batchId = tracker.nextBatchId();
       const taskInstances = tasks.map((task, index) => {
-        const id = `task-${Date.now()}-${index}`;
+        // A runtime-wide counter, never reset: `Date.now()` collided when two
+        // calls started in the same millisecond, and a per-session counter
+        // would let a stale child callback from a replaced session update a
+        // new task that reused its id.
+        const id = `task-${++taskSequence}`;
         const agent = findAgent(agents, task.agent);
         const instance = createInstance({
           id,
@@ -347,7 +353,14 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (validationErrors.length === taskInstances.length) {
-        // All tasks failed validation
+        // All tasks failed validation. The instances were already added to
+        // the tracker (so the first update can show them), so they must be
+        // closed here too; otherwise the inspector keeps listing tasks that
+        // stay "queued" forever.
+        for (const { index, error } of validationErrors) {
+          tracker.updateStatus(taskInstances[index].id, "error", { lifecycle: "failed", errorMessage: error });
+        }
+        updater.immediate();
         return {
           content: [
             {
@@ -883,48 +896,6 @@ class ThrottledUpdater {
     if (this.tuiManager?.isActive) {
       this.tuiManager.requestRender();
     }
-  }
-}
-
-/** Legacy wrapper for call sites that don't use the throttled class (validation errors, etc.) */
-function emitUpdate(
-  onUpdate: ((partial: any) => void) | undefined,
-  tracker: SubagentTracker,
-  totalCount: number,
-  taskIds: string[],
-  tuiManager?: SubagentTuiManager,
-): void {
-  if (!onUpdate && !tuiManager) return;
-
-  const invocationIds = new Set(taskIds);
-  const allInstances = tracker.getOrdered().filter((i) => invocationIds.has(i.id));
-  const doneCount = allInstances.filter(
-    (i) => i.status === "completed" || i.status === "error" || i.status === "aborted",
-  ).length;
-  const runningCount = allInstances.filter((i) => i.status === "running").length;
-
-  const liveSummaries: LiveTaskSummary[] = allInstances.map((i) => ({ ...i.summary }));
-
-  if (onUpdate) {
-    onUpdate({
-      content: [
-        {
-          type: "text",
-          text: `Tasks: ${doneCount}/${totalCount} done, ${runningCount} running...`,
-        },
-      ],
-      details: {
-        mode: "tasks",
-        live: true,
-        taskCount: totalCount,
-        summaries: liveSummaries,
-      } as LiveSubagentToolDetails,
-    });
-  }
-
-  // Notify TUI manager to re-render if active
-  if (tuiManager?.isActive) {
-    tuiManager.requestRender();
   }
 }
 
