@@ -10,7 +10,7 @@ vi.mock("typebox", () => {
 import { ChildExtensionUIBroker, type ChildUIDialogPresenter, type QueuedChildUIRequest } from "./extension-ui-broker.js";
 import type { ChildExtensionUIDialogRequest, ChildExtensionUIResponse } from "./rpc-extension-ui.js";
 import type { ChildExtensionUIChannel } from "./runner.js";
-import { trackActiveChildToolCalls } from "./index.js";
+import { trackActiveChildToolCalls } from "./task-events.js";
 
 function owner() {
   return { instanceId: "task-1", agent: "build", task: "run the requested task", cwd: "/tmp" };

@@ -159,11 +159,26 @@ export class SubagentTracker {
   updateStatus(id: string, status: TaskStatus, extra?: Partial<LiveTaskSummary>): void {
     const instance = this.instances.get(id);
     if (!instance) return;
-    instance.status = status;
-    instance.summary.status = status;
-    if (extra) {
-      Object.assign(instance.summary, extra);
-    }
+    setInstanceStatus(instance, status, extra);
+  }
+}
+
+/**
+ * Set an instance's status and keep the summary copy in sync.
+ *
+ * `status` is stored twice (instance and summary) because the summary is
+ * the snapshot sent to the tool row. Every status write goes through here so
+ * the two copies cannot drift apart.
+ */
+export function setInstanceStatus(
+  instance: RuntimeSubagentInstance,
+  status: TaskStatus,
+  extra?: Partial<LiveTaskSummary>,
+): void {
+  instance.status = status;
+  instance.summary.status = status;
+  if (extra) {
+    Object.assign(instance.summary, extra);
   }
 }
 

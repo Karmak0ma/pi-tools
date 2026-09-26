@@ -2,7 +2,11 @@
  * Subagent Extension — Entry Point
  *
  * Delegates tasks to specialized subagents with isolated context windows.
- * Each task runs as a separate pi subprocess.
+ * Each task runs as a separate pi subprocess (or Herdr pane).
+ *
+ * This file is the adapter between Pi and the task manager: it registers the
+ * tool, the inspector shortcuts, and the session hooks. Task lifecycles
+ * (resolve, spawn, observe, cancel) live in task-manager.ts.
  *
  * Adapted from the official pi subagent example.
  */
@@ -11,13 +15,14 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { discoverAgents, findAgent, formatAgentList } from "./agents.js";
 import { renderCall, renderResult } from "./render.js";
-import { type ModelRegistry, buildToolResolutionOptions, resolveCwd, resolveModel, resolveTools, type ToolResolutionOptions } from "./resolver.js";
-import { mapWithConcurrencyLimit } from "./runner.js";
+import { type ModelRegistry, buildToolResolutionOptions } from "./resolver.js";
 import { buildMultiTaskToolResult } from "./multi-task-result.js";
 import { createBackend } from "./backends.js";
 import { ChildExtensionUIBroker } from "./extension-ui-broker.js";
 import { ExtensionUIDialogPresenter } from "./extension-ui-presenter.js";
-import { SubagentTracker, createInstance, type RuntimeSubagentInstance } from "./tracker.js";
+import { SubagentTaskManager } from "./task-manager.js";
+import { Throttle } from "./throttle.js";
+import { SubagentTracker, setInstanceStatus } from "./tracker.js";
 import {
   type LiveSubagentToolDetails,
   type LiveTaskSummary,
@@ -25,16 +30,11 @@ import {
   MAX_TOTAL_TASKS,
   type PersistedSubagentToolDetails,
   type PersistedTaskSummary,
-  type SubagentLifecycleState,
   type TaskItem,
-  type TaskStatus,
   THINKING_LEVELS,
-  contextTokensFromUsage,
-  emptyUsage,
   isTaskFailed,
 } from "./types.js";
 import { SubagentTuiManager } from "./tui.js";
-import type { ActiveChildToolCall } from "./rpc-extension-ui.js";
 export { INSPECTOR_VISIBILITY_CHANNEL } from "./tui.js";
 export type { InspectorVisibilityEvent } from "./tui.js";
 
@@ -89,11 +89,7 @@ function getParentSessionPath(
 
 export default function (pi: ExtensionAPI) {
   const tracker = new SubagentTracker();
-  // Source of unique task ids for this extension runtime (see task id creation).
-  let taskSequence = 0;
-  let broker: ChildExtensionUIBroker;
   let tuiManager: SubagentTuiManager;
-  let abortInstanceForManager: (instance: RuntimeSubagentInstance) => void = () => {};
 
   const reportBrokerDiagnostic = (message: string, owner?: { instanceId: string }): void => {
     const instance = owner ? tracker.get(owner.instanceId) : undefined;
@@ -106,36 +102,54 @@ export default function (pi: ExtensionAPI) {
     if (tuiManager.isActive) tuiManager.requestRender();
   };
 
-  const createBroker = (): ChildExtensionUIBroker => new ChildExtensionUIBroker({
-    onDiagnostic: reportBrokerDiagnostic,
-    onPendingCountChange(instanceId, count) {
-      const instance = tracker.get(instanceId);
-      if (!instance) return;
-      instance.pendingUIRequestCount = count;
-      if (tuiManager.isActive) tuiManager.requestRender();
-    },
-  });
-
-  broker = createBroker();
-  tuiManager = new SubagentTuiManager(tracker, (instance) => abortInstanceForManager(instance));
-
   // One execution backend per extension runtime. Herdr detection happens once
   // (see selectBackendKind): inside a Herdr workspace subagents spawn as real
   // pi sessions in new panes; otherwise the original RPC runner is used. All
   // session-scoped state (watchers, panes, processes) is disposed through
-  // tracker.killAll on shutdown/switch, so nothing is re-created here.
-  const backend = createBackend();
+  // manager.resetSession on shutdown/switch, so nothing is re-created here.
+  const manager = new SubagentTaskManager({
+    tracker,
+    backend: createBackend(),
+    maxConcurrent: MAX_CONCURRENT,
+    createBroker: () =>
+      new ChildExtensionUIBroker({
+        onDiagnostic: reportBrokerDiagnostic,
+        onPendingCountChange(instanceId, count) {
+          const instance = tracker.get(instanceId);
+          if (!instance) return;
+          instance.pendingUIRequestCount = count;
+          if (tuiManager.isActive) tuiManager.requestRender();
+        },
+      }),
+    createPresenter: (uiContext, owner) =>
+      new ExtensionUIDialogPresenter(uiContext, {
+        isInspectorActive: () => tuiManager.isActive,
+        isInspectorOverlayFocused: () => tuiManager.isOverlayFocusedVisible,
+        focusInspectorOverlayForDialog: () => tuiManager.focusInspectorOverlayForDialog(),
+        onDiagnostic: (message) => reportBrokerDiagnostic(message, owner),
+      }),
+  });
 
-  abortInstanceForManager = (instance) => {
+  // Inspector abort (x key). It aborts through the child's control and marks
+  // the task aborted at once, so the inspector reacts before the backend
+  // result arrives. The backend result later overwrites these fields.
+  tuiManager = new SubagentTuiManager(tracker, (instance) => {
     if (instance.status !== "running") return;
-    broker.cancelOwner(instance.id, "abort");
+    manager.broker.cancelOwner(instance.id, "abort");
     instance.control?.abort();
-    instance.status = "aborted";
-    instance.summary.status = "aborted";
-    instance.summary.lifecycle = "closed";
-    instance.summary.isPartial = false;
+    setInstanceStatus(instance, "aborted", { lifecycle: "closed", isPartial: false });
     tuiManager.requestRender();
-  };
+  });
+
+  // The inspector observes every task, whichever call started it, so it
+  // subscribes to the manager directly rather than to a tool call's updates.
+  const inspectorRefresh = new Throttle(() => {
+    if (tuiManager.isActive) tuiManager.requestRender();
+  });
+  manager.onChange((change) => {
+    if (change.urgency === "immediate") inspectorRefresh.immediate();
+    else inspectorRefresh.throttled();
+  });
 
   // Mark final tool results as real tool failures when execute recorded an overall failure.
   // Pi runtime only treats thrown errors or tool_result patches as actual isError results.
@@ -149,14 +163,8 @@ export default function (pi: ExtensionAPI) {
   // ─── Session Lifecycle ───────────────────────────────────────────────────
 
   const disposeSessionRuntime = async () => {
-    const oldBroker = broker;
-    await oldBroker.dispose();
     if (tuiManager.isActive) tuiManager.exit();
-    await tracker.killAll();
-    tracker.clear();
-    // A session replacement must not inherit callbacks closed over the old
-    // broker. New executions use this fresh session-scoped broker.
-    broker = createBroker();
+    await manager.resetSession();
   };
 
   pi.on("session_shutdown", async (_event, _ctx) => {
@@ -167,7 +175,7 @@ export default function (pi: ExtensionAPI) {
     await disposeSessionRuntime();
   });
 
-  // ─── TUI Shortcuts / Commands (Phase 3) ──────────────────────────────────
+  // ─── TUI Shortcuts / Commands ────────────────────────────────────────────
 
   const openInspector = async (ctx: any) => {
     if (!tuiManager.isAvailable) {
@@ -226,475 +234,74 @@ export default function (pi: ExtensionAPI) {
 
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const tasks = params.tasks as TaskItem[];
-      // Capture the broker for this invocation. A session switch can replace
-      // the extension-level broker while stale child callbacks are still
-      // unwinding; those callbacks must never reach the fresh broker.
-      const executionBroker = broker;
 
       // Validate task count
       if (tasks.length > MAX_TOTAL_TASKS) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Too many tasks (${tasks.length}). Maximum is ${MAX_TOTAL_TASKS}. Please reduce batch size.`,
-            },
-          ],
-          details: {
-            mode: "tasks",
-            taskCount: tasks.length,
-            summaries: [],
-            overallFailed: true,
-          } as PersistedSubagentToolDetails,
-        };
+        return failedToolResult(
+          `Too many tasks (${tasks.length}). Maximum is ${MAX_TOTAL_TASKS}. Please reduce batch size.`,
+          tasks.length,
+        );
       }
 
-      // Discover agents
-      const discovery = discoverAgents(ctx.cwd);
-      const agents = discovery.agents;
+      const agents = discoverAgents(ctx.cwd).agents;
+
+      // When no task names a known agent, nothing can run: answer at once and
+      // create no tasks. (Partially valid batches run; the manager fails the
+      // unknown ones individually with the same message.)
+      const unknownAgentErrors = tasks
+        .map((task, index) => ({ task, index }))
+        .filter(({ task }) => !findAgent(agents, task.agent))
+        .map(({ task, index }) => `Task ${index + 1}: Agent "${task.agent}" not found. Available agents:\n${formatAgentList(agents)}`);
+      if (unknownAgentErrors.length === tasks.length) {
+        return failedToolResult(unknownAgentErrors.join("\n\n"), tasks.length);
+      }
+
       const availableModels = await ctx.modelRegistry.getAvailable();
-
-      // Build model registry adapter from documented public APIs.
-      const registry: ModelRegistry = {
-        resolve(modelStr: string) {
-          // Resolve only against currently available models.
-          if (modelStr.includes("/")) {
-            const [provider, ...rest] = modelStr.split("/");
-            const id = rest.join("/");
-            // Try exact provider/id match first
-            const found = availableModels.find((m) => m.provider === provider && m.id === id);
-            if (found) return { provider: found.provider, id: found.id };
-
-            // Fallback: the specified provider (e.g. "openai", "anthropic") may not exist
-            // as an actual provider if the user has a proxy provider (e.g. "github-copilot")
-            // that serves those models. Try matching by model id alone.
-            const byId = availableModels.filter((m) => m.id === id);
-            if (byId.length === 1) {
-              return { provider: byId[0].provider, id: byId[0].id };
-            }
-            return undefined;
-          }
-
-          // For bare model ids, prefer the parent provider when it offers that model.
-          const parentProvider = ctx.model?.provider;
-          if (parentProvider) {
-            const providerMatch = availableModels.find((m) => m.provider === parentProvider && m.id === modelStr);
-            if (providerMatch) {
-              return { provider: providerMatch.provider, id: providerMatch.id };
-            }
-          }
-
-          // Otherwise require a unique available bare-id match across providers.
-          const matches = availableModels.filter((m) => m.id === modelStr);
-          if (matches.length === 1) {
-            return { provider: matches[0].provider, id: matches[0].id };
-          }
-          return undefined;
-        },
-        getParentModel() {
-          const model = ctx.model;
-          if (model?.provider && model?.id) {
-            return { provider: model.provider, id: model.id };
-          }
-          return undefined;
-        },
-      };
-
-      // Get parent active tool names for inheritance from documented ExtensionAPI method.
-      const parentActiveToolNames = pi.getActiveTools();
-
-      // Two-key tool model (see ToolResolutionOptions): the settings file
-      // decides which extensions are loaded into children, the agent's
-      // tools: frontmatter decides which of the available tools are active.
-      const toolResolutionOptions: ToolResolutionOptions = buildToolResolutionOptions(pi);
-
-      // Generate unique task IDs and create tracker instances immediately
-      const batchId = tracker.nextBatchId();
-      const taskInstances = tasks.map((task, index) => {
-        // A runtime-wide counter, never reset: `Date.now()` collided when two
-        // calls started in the same millisecond, and a per-session counter
-        // would let a stale child callback from a replaced session update a
-        // new task that reused its id.
-        const id = `task-${++taskSequence}`;
-        const agent = findAgent(agents, task.agent);
-        const instance = createInstance({
-          id,
-          batchId,
-          agent: task.agent,
-          source: agent?.source || "builtin",
-          task: task.task,
-          cwd: ctx.cwd,
-          model: undefined,
-        });
-        tracker.add(instance);
-        return { id, task, instance };
+      const taskIds = manager.start(tasks, {
+        agents,
+        registry: createModelRegistry(availableModels, ctx.model),
+        availableModels,
+        // Parent active tool names, for inheritance.
+        parentActiveToolNames: pi.getActiveTools(),
+        // Two-key tool model (see ToolResolutionOptions): the settings file
+        // decides which extensions are loaded into children, the agent's
+        // tools: frontmatter decides which of the available tools are active.
+        toolResolutionOptions: buildToolResolutionOptions(pi),
+        cwd: ctx.cwd,
+        parentSessionDir: getParentSessionPath(ctx, "getSessionDir"),
+        uiContext: ctx,
       });
 
-      const taskIds = taskInstances.map(({ id }) => id);
+      // Live tool row: show this call's tasks, throttled like the inspector.
+      // The row is hidden behind the inspector overlay, so skip it while the
+      // inspector is open.
+      const invocationIds = new Set(taskIds);
+      const rowRefresh = new Throttle(() => {
+        if (!onUpdate || tuiManager.isActive) return;
+        onUpdate(liveToolUpdate(tracker, taskIds));
+      });
+      const unsubscribe = manager.onChange((change) => {
+        if (!invocationIds.has(change.taskId)) return;
+        if (change.urgency === "immediate") rowRefresh.immediate();
+        else rowRefresh.throttled();
+      });
+      rowRefresh.immediate();
 
-      // Create throttled updater for this execution
-      const updater = new ThrottledUpdater(onUpdate, tracker, taskInstances.length, taskIds, tuiManager);
-
-      // Emit initial update showing all tasks as queued
-      updater.immediate();
-
-      // Pre-validate all tasks
-      const validationErrors: Array<{ index: number; error: string }> = [];
-
-      for (let i = 0; i < taskInstances.length; i++) {
-        const { task } = taskInstances[i];
-        const agent = findAgent(agents, task.agent);
-        if (!agent) {
-          validationErrors.push({
-            index: i,
-            error: `Agent "${task.agent}" not found. Available agents:\n${formatAgentList(agents)}`,
-          });
-        }
-      }
-
-      if (validationErrors.length === taskInstances.length) {
-        // All tasks failed validation. The instances were already added to
-        // the tracker (so the first update can show them), so they must be
-        // closed here too; otherwise the inspector keeps listing tasks that
-        // stay "queued" forever.
-        for (const { index, error } of validationErrors) {
-          tracker.updateStatus(taskInstances[index].id, "error", { lifecycle: "failed", errorMessage: error });
-        }
-        updater.immediate();
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: validationErrors.map((e) => `Task ${e.index + 1}: ${e.error}`).join("\n\n"),
-            },
-          ],
-          details: {
-            mode: "tasks",
-            taskCount: taskInstances.length,
-            summaries: [],
-            overallFailed: true,
-          } as PersistedSubagentToolDetails,
-        };
-      }
-
-      // Execute tasks with concurrency control. One listener covers the whole
-      // batch because the tool signal can abort several child processes at
-      // once; register it before runChild adds its own listener.
-      const cancelInvocation = () => {
-        for (const { instance } of taskInstances) {
-          executionBroker.cancelOwner(instance.id, "abort");
-        }
-      };
-      if (signal) signal.addEventListener("abort", cancelInvocation, { once: true });
-
-      const parentSessionDir = getParentSessionPath(ctx, "getSessionDir");
+      // Blocking call: aborting the tool call (Escape) cancels its tasks.
+      const cancelInvocation = () => manager.cancel(taskIds);
+      signal?.addEventListener("abort", cancelInvocation, { once: true });
+      if (signal?.aborted) cancelInvocation();
 
       let results: PersistedTaskSummary[];
       try {
-        results = await mapWithConcurrencyLimit(
-          taskInstances,
-          MAX_CONCURRENT,
-          async ({ id, task, instance }, index) => {
-          // Check if abort was signaled before starting this queued task
-          if (signal?.aborted) {
-            tracker.updateStatus(id, "aborted", { lifecycle: "closed", errorMessage: "Aborted before start" });
-            updater.immediate();
-            return makeErrorSummaryFromInstance(instance, "Aborted before start");
-          }
-
-          const agent = findAgent(agents, task.agent);
-          if (!agent) {
-            // Pre-validated failure
-            const err = validationErrors.find((e) => e.index === index);
-            const errorMsg = err?.error || "Agent not found";
-            tracker.updateStatus(id, "error", { lifecycle: "failed", errorMessage: errorMsg });
-            updater.immediate();
-            return makeErrorSummary(id, task, errorMsg);
-          }
-
-          // Instance already created during pre-allocation
-          instance.source = agent.source;
-          instance.summary.source = agent.source;
-
-          // Resolve model
-          const modelResult = resolveModel(task, agent, registry);
-          instance.warnings.push(...modelResult.warnings);
-          instance.summary.warnings = [...instance.warnings];
-
-          if (!modelResult.model) {
-            tracker.updateStatus(id, "error", {
-              lifecycle: "failed",
-              errorMessage: "No model available",
-            });
-            updater.immediate();
-            return makeErrorSummaryFromInstance(instance, "No model available");
-          }
-          instance.model = modelResult.model;
-          instance.summary.model = modelResult.model;
-          // Resolve the same model metadata used by the parent registry so the
-          // inspector can show context capacity before the first response.
-          const modelParts = modelResult.model.split("/");
-          const resolvedModel = availableModels.find(
-            (availableModel) =>
-              availableModel.provider === modelParts[0] &&
-              availableModel.id === modelParts.slice(1).join("/"),
-          );
-          instance.contextWindow = resolvedModel?.contextWindow;
-
-          // Resolve tools (two-key validation; see ToolResolutionOptions)
-          const toolResult = resolveTools(agent, parentActiveToolNames, toolResolutionOptions);
-          instance.warnings.push(...toolResult.warnings);
-          instance.summary.warnings = [...instance.warnings];
-
-          if (toolResult.error) {
-            tracker.updateStatus(id, "error", { lifecycle: "failed", errorMessage: toolResult.error });
-            updater.immediate();
-            return makeErrorSummaryFromInstance(instance, toolResult.error);
-          }
-
-          // Resolve cwd
-          const cwdResult = resolveCwd(task, ctx.cwd);
-          if (cwdResult.error) {
-            tracker.updateStatus(id, "error", { lifecycle: "failed", errorMessage: cwdResult.error });
-            updater.immediate();
-            return makeErrorSummaryFromInstance(instance, cwdResult.error);
-          }
-          instance.cwd = cwdResult.cwd;
-          instance.summary.cwd = cwdResult.cwd;
-          instance.thinking = task.thinking ?? agent.thinking;
-          instance.tools = [...toolResult.tools];
-
-          // Mark the delegated task as live. This compatibility status stays
-          // `running` even when its current Pi turn later becomes
-          // `interrupted`; the separate lifecycle field carries that detail
-          // without disabling inspector steering.
-          tracker.updateStatus(id, "running", { lifecycle: "running" });
-
-          // Emit streaming update (immediate — status transition)
-          updater.immediate();
-
-          // Run the child through the selected execution backend (Herdr pane
-          // or RPC subprocess). Spawn resolves once runtime handles exist;
-          // handle.result carries the terminal child semantics.
-          try {
-            const handle = await backend.spawn({
-              resolvedModel: modelResult.model,
-              resolvedTools: toolResult.tools,
-              resolvedCwd: cwdResult.cwd,
-              agentName: agent.name,
-              agentPrompt: agent.systemPrompt,
-              taskText: task.task,
-              thinking: instance.thinking,
-              childExtensionPaths: toolResolutionOptions.childExtensionPaths,
-              parentSessionDir,
-              signal,
-              // Pane geometry hint (Herdr only): first task right, the rest
-              // stacked down so a concurrent batch cannot shrink the parent
-              // pane into a sliver.
-              splitDirection: index === 0 ? "right" : "down",
-              onEvent(event) {
-                instance.events.push(event);
-
-                // The RPC request has no toolCallId. Keep a runtime snapshot
-                // of every active call so the broker can show all available
-                // context without claiming a false correlation. Assistant
-                // messages are processed before the child enters its tool hook,
-                // so this also covers the dialog's pre-execution window.
-                const activeToolCallChanged = trackActiveChildToolCalls(instance.activeToolCalls, event);
-                if (activeToolCallChanged && event.type !== "message_end" && event.type !== "agent_settled") {
-                  updater.immediate();
-                }
-
-                if (event.type === "agent_start") {
-                  tracker.updateStatus(id, "running", {
-                    lifecycle: "running",
-                    isPartial: true,
-                    errorMessage: undefined,
-                    stopReason: undefined,
-                  });
-                  updater.immediate();
-                }
-
-                // Update live summary for streaming text. The same callback
-                // remains attached after the first turn so inspector messages
-                // can update the existing transcript as well.
-                if (event.type === "message_start" && event.message?.role === "assistant") {
-                  instance.summary.isPartial = true;
-                }
-                if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-                  instance.summary.isPartial = true;
-                  instance.summary.latestOutput += event.assistantMessageEvent.delta ?? "";
-                  updater.throttled();
-                }
-                if (event.type === "message_end" && event.message?.role === "assistant") {
-                  const msg = event.message;
-                  updateLiveUsage(instance, msg);
-                  instance.summary.lifecycle = lifecycleAfterAssistantMessage(
-                    instance.summary.lifecycle,
-                    msg.stopReason,
-                  );
-                  let messageText = "";
-                  if (Array.isArray(msg.content)) {
-                    for (const part of msg.content) {
-                      if (part.type === "text") messageText += (messageText ? "\n" : "") + part.text;
-                      if (part.type === "toolCall") {
-                        const argsStr = JSON.stringify(part.arguments || {});
-                        instance.summary.toolCalls.push({
-                          name: part.name,
-                          argsPreview: argsStr.length > 80 ? argsStr.slice(0, 80) + "..." : argsStr,
-                        });
-                      }
-                    }
-                  }
-                  // The live view may show an interrupted turn's partial
-                  // transcript. The terminal result overwrites this field
-                  // with the final normal stop text before persistence, so
-                  // incomplete text cannot become the parent result.
-                  if (messageText) instance.summary.latestOutput = messageText;
-                  instance.summary.isPartial = false;
-                  updater.immediate();
-                }
-                if (event.type === "agent_settled") {
-                  // `agent_settled` is a Pi turn boundary, not the shared
-                  // delegated-task terminal signal. Herdr can emit the same
-                  // shape for a turn that was interrupted, and the RPC
-                  // backend still performs process-close classification after
-                  // this event. The awaited handle.result is authoritative.
-                  tracker.updateStatus(id, "running", { isPartial: false });
-                  updater.immediate();
-                }
-                if (event.type === "subagent_turn_aborted") {
-                  // Herdr: the child's turn was interrupted (Escape in its
-                  // pane) but the session lives — an interrupted turn is
-                  // never a completion; the final result decides the outcome.
-                  tracker.updateStatus(id, "running", {
-                    lifecycle: "interrupted",
-                    isPartial: false,
-                    stopReason: "aborted",
-                  });
-                  updater.immediate();
-                }
-              },
-              onExtensionUIRequest(request, channel) {
-                const owner = {
-                  instanceId: instance.id,
-                  agent: instance.agent,
-                  task: instance.task,
-                  cwd: instance.cwd,
-                };
-                const presenter = new ExtensionUIDialogPresenter(ctx, {
-                  isInspectorActive: () => tuiManager.isActive,
-                  isInspectorOverlayFocused: () => tuiManager.isOverlayFocusedVisible,
-                  focusInspectorOverlayForDialog: () => tuiManager.focusInspectorOverlayForDialog(),
-                  onDiagnostic: (message) => reportBrokerDiagnostic(message, owner),
-                });
-                executionBroker.enqueue({
-                  owner,
-                  request,
-                  channel,
-                  presenter,
-                  activeToolCalls: Array.from(instance.activeToolCalls.values()),
-                });
-                instance.pendingUIRequestCount = executionBroker.getOwnerPendingCount(instance.id);
-                updater.immediate();
-              },
-              onStderr(data) {
-                instance.stderr += data;
-                instance.summary.stderrPreview = instance.stderr.slice(0, 500);
-                updater.throttled();
-              },
-            });
-
-            // Herdr instances carry no process (the pane hosts the child);
-            // control still routes abort/steer through the backend.
-            instance.process = handle.process;
-            instance.control = handle.control;
-
-            const childResult = await handle.result;
-            releaseChildRuntime(executionBroker, instance);
-
-            // Update instance with results
-            instance.summary.usage = childResult.usage;
-            instance.summary.latestOutput = childResult.finalOutput;
-            instance.summary.toolCalls = childResult.toolCalls;
-            instance.summary.lifecycle = childResult.lifecycle;
-            instance.summary.stopReason = childResult.stopReason;
-            instance.summary.errorMessage = childResult.errorMessage;
-            instance.summary.model = childResult.model || instance.model;
-
-            // Lifecycle is the logical task contract. A raw process exit code
-            // is not enough: the child may close noisily after a valid final
-            // stop, while a closed task may have exit code zero.
-            const isError = childResult.lifecycle !== "completed" || isTaskFailed(childResult);
-
-            if (isError) {
-              tracker.updateStatus(id, childResult.stopReason === "aborted" ? "aborted" : "error", {
-                lifecycle: childResult.lifecycle,
-              });
-            } else {
-              tracker.updateStatus(id, "completed", { lifecycle: "completed" });
-            }
-
-            // Emit update after completion (immediate — status transition)
-            updater.immediate();
-
-            return makePersistedSummary(instance);
-          } catch (err: any) {
-            tracker.updateStatus(id, "error", {
-              lifecycle: "failed",
-              errorMessage: err.message || "Unknown error",
-            });
-            updater.immediate();
-            return makeErrorSummaryFromInstance(instance, err.message || "Unknown error");
-          } finally {
-            // handle.result has settled; releaseChildRuntime cleared the
-            // steering handles. Backends own child teardown (RPC: stdin close
-            // + signals; Herdr: pane lifecycle) — nothing left to clean up.
-          }
-          },
-        );
+        results = await manager.wait(taskIds);
       } finally {
+        unsubscribe();
         signal?.removeEventListener("abort", cancelInvocation);
+        rowRefresh.flush();
       }
 
-      // Flush any pending throttled updates before building final result
-      updater.flush();
-
-      // Build final result
-      const successCount = results.filter((r) => !isTaskFailed(r)).length;
-
-      // Single-task: lean output
-      if (results.length === 1) {
-        const r = results[0];
-        const isFailed = successCount === 0;
-        let outputText = r.finalOutput || "";
-        // Surface the failure reason for the parent agent
-        if (isFailed && r.errorMessage) {
-          outputText = outputText
-            ? `${outputText}\n\nError: ${r.errorMessage}`
-            : `Error: ${r.errorMessage}`;
-          if (r.stderrPreview) {
-            outputText += `\nstderr: ${r.stderrPreview}`;
-          }
-        }
-        if (!outputText) outputText = "(no output)";
-        return {
-          content: [{ type: "text", text: outputText }],
-          details: {
-            mode: "tasks",
-            taskCount: 1,
-            summaries: results,
-            overallFailed: isFailed,
-          } as PersistedSubagentToolDetails,
-        };
-      }
-
-      // Keep the large-text recovery pointer beside the preview, while preserving
-      // complete output strings in details for session-log extraction.
-      return buildMultiTaskToolResult(results, {
-        toolCallId,
-        sessionFile: getParentSessionPath(ctx, "getSessionFile"),
-      });
+      return buildToolResult(results, toolCallId, getParentSessionPath(ctx, "getSessionFile"));
     },
 
     renderCall(args, theme, _context) {
@@ -709,323 +316,120 @@ export default function (pi: ExtensionAPI) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/**
- * Track both the assistant's announced call and the executor's later snapshot
- * in one map. The shared id makes the executor update replace the provisional
- * entry instead of making the modal show duplicate calls.
- *
- * Arguments are deliberately kept only in this runtime map. They are needed
- * for the approval modal, but must not enter persisted summaries, diagnostics,
- * or error text.
- */
-export function trackActiveChildToolCalls(
-  activeToolCalls: Map<string, ActiveChildToolCall>,
-  event: any,
-): boolean {
-  let changed = false;
-
-  // Current RPC streaming events do not carry a cumulative assistant message.
-  // toolcall_end is the first streaming event with the complete ToolCall shape.
-  if (event.type === "message_update" && event.assistantMessageEvent?.type === "toolcall_end") {
-    changed = announceActiveChildToolCall(activeToolCalls, event.assistantMessageEvent.toolCall) || changed;
-  }
-
-  // message_end is authoritative and carries ToolCall fields as id/name/
-  // arguments, not the tool_execution_* fields used by the executor.
-  if (event.type === "message_end" && event.message?.role === "assistant" && Array.isArray(event.message.content)) {
-    for (const part of event.message.content) {
-      if (part?.type === "toolCall") {
-        changed = announceActiveChildToolCall(activeToolCalls, part) || changed;
-      }
-    }
-  }
-
-  // The executor's event is authoritative when it arrives. Preserve the
-  // announcement timestamp so FIFO presentation order does not jump when the
-  // same call is upgraded in place.
-  if (event.type === "tool_execution_start" && event.toolCallId) {
-    const toolCallId = String(event.toolCallId);
-    const previous = activeToolCalls.get(toolCallId);
-    activeToolCalls.set(toolCallId, {
-      toolCallId,
-      toolName: String(event.toolName || previous?.toolName || "unknown"),
-      args: event.args ?? event.arguments ?? previous?.args,
-      startedAt: previous?.startedAt ?? Date.now(),
-    });
-    changed = true;
-  }
-
-  if (event.type === "tool_execution_end" && event.toolCallId) {
-    changed = activeToolCalls.delete(String(event.toolCallId)) || changed;
-  }
-
-  if (event.type === "tool_result_end") {
-    const fallbackToolCallId = event.toolCallId || event.message?.toolCallId;
-    if (fallbackToolCallId) {
-      changed = activeToolCalls.delete(String(fallbackToolCallId)) || changed;
-    }
-  }
-
-  if (event.type === "agent_end" || event.type === "agent_settled") {
-    // A guardrail can block an announced call before execution events exist.
-    // Clear at the end of that agent run as a terminal fallback; process exit
-    // cleanup remains the protection for an aborted child that emits no end.
-    if (activeToolCalls.size > 0) {
-      activeToolCalls.clear();
-      changed = true;
-    }
-  }
-
-  return changed;
-}
-
-function announceActiveChildToolCall(
-  activeToolCalls: Map<string, ActiveChildToolCall>,
-  part: any,
-): boolean {
-  if (
-    part?.type !== "toolCall" ||
-    typeof part.id !== "string" ||
-    part.id.length === 0 ||
-    typeof part.name !== "string" ||
-    part.name.length === 0
-  ) {
-    return false;
-  }
-
-  const previous = activeToolCalls.get(part.id);
-  activeToolCalls.set(part.id, {
-    toolCallId: part.id,
-    toolName: part.name,
-    args: part.arguments ?? {},
-    startedAt: previous?.startedAt ?? Date.now(),
-  });
-  return true;
-}
-
-/**
- * Throttled update emitter. Streaming events (text_delta, stderr) are rate-limited
- * to avoid flooding pi's TUI with re-renders. Status transitions and message_end
- * events are emitted immediately.
- */
-class ThrottledUpdater {
-  private lastEmitTime = 0;
-  private pendingTimer: ReturnType<typeof setTimeout> | null = null;
-  private readonly THROTTLE_MS = 150;
-
-  constructor(
-    private onUpdate: ((partial: any) => void) | undefined,
-    private tracker: SubagentTracker,
-    private totalCount: number,
-    private taskIds: string[],
-    private tuiManager?: SubagentTuiManager,
-  ) {}
-
-  /** Emit immediately — use for status transitions and completion events. */
-  immediate(): void {
-    this.cancelPending();
-    this.lastEmitTime = Date.now();
-    this.doEmit();
-  }
-
-  /** Throttled emit — use for text_delta and stderr events. */
-  throttled(): void {
-    const now = Date.now();
-    const elapsed = now - this.lastEmitTime;
-    if (elapsed >= this.THROTTLE_MS) {
-      this.lastEmitTime = now;
-      this.doEmit();
-    } else if (!this.pendingTimer) {
-      this.pendingTimer = setTimeout(() => {
-        this.pendingTimer = null;
-        this.lastEmitTime = Date.now();
-        this.doEmit();
-      }, this.THROTTLE_MS - elapsed);
-    }
-  }
-
-  /** Flush any pending throttled update and clean up. */
-  flush(): void {
-    if (this.pendingTimer) {
-      clearTimeout(this.pendingTimer);
-      this.pendingTimer = null;
-      this.doEmit();
-    }
-  }
-
-  private cancelPending(): void {
-    if (this.pendingTimer) {
-      clearTimeout(this.pendingTimer);
-      this.pendingTimer = null;
-    }
-  }
-
-  private doEmit(): void {
-    if (!this.onUpdate && !this.tuiManager) return;
-
-    const invocationIds = new Set(this.taskIds);
-    const allInstances = this.tracker.getOrdered().filter((i) => invocationIds.has(i.id));
-    const doneCount = allInstances.filter(
-      (i) => i.status === "completed" || i.status === "error" || i.status === "aborted",
-    ).length;
-    const runningCount = allInstances.filter((i) => i.status === "running").length;
-
-    const liveSummaries: LiveTaskSummary[] = allInstances.map((i) => ({ ...i.summary }));
-
-    if (this.onUpdate) {
-      // When inspector is active, suppress tool-row updates (hidden behind overlay)
-      if (!this.tuiManager?.isActive) {
-        this.onUpdate({
-          content: [
-            {
-              type: "text",
-              text: `Tasks: ${doneCount}/${this.totalCount} done, ${runningCount} running...`,
-            },
-          ],
-          details: {
-            mode: "tasks",
-            live: true,
-            taskCount: this.totalCount,
-            summaries: liveSummaries,
-          } as LiveSubagentToolDetails,
-        });
-      }
-    }
-
-    // Notify TUI manager to re-render if active
-    if (this.tuiManager?.isActive) {
-      this.tuiManager.requestRender();
-    }
-  }
-}
-
-/** Map one assistant message boundary to the live delegated-task lifecycle. */
-function lifecycleAfterAssistantMessage(
-  current: SubagentLifecycleState,
-  stopReason: string | undefined,
-): SubagentLifecycleState {
-  switch (stopReason) {
-    case "aborted":
-      return "interrupted";
-    case "error":
-    case "toolUse":
-      return "waiting";
-    case "stop":
-      return "completed";
-    case undefined:
-      return "running";
-    default:
-      return current;
-  }
-}
-
-/**
- * Copy usage from each completed assistant response into the live summary.
- *
- * RPC streaming events intentionally omit cumulative partial assistant
- * snapshots, so `message_end` is the earliest authoritative point at which
- * token counts are available. Updating here keeps the inspector current after
- * every model turn instead of waiting for the child process to exit.
- */
-function updateLiveUsage(instance: { summary: LiveTaskSummary }, message: any): void {
-  const usage = message?.usage;
-  if (!usage) return;
-
-  const current = instance.summary.usage;
-  current.input += usage.input || 0;
-  current.output += usage.output || 0;
-  current.cacheRead += usage.cacheRead || 0;
-  current.cacheWrite += usage.cacheWrite || 0;
-  current.cost += usage.cost?.total || 0;
-  current.turns++;
-
-  const contextTokens = contextTokensFromUsage(usage);
-  if (contextTokens > 0) current.contextTokens = contextTokens;
-}
-
-/**
- * Release a child's runtime handles once its backend result has settled:
- * cancel any dialog still queued for it and drop the steering references.
- * (Replaces the old onProcessReady/onProcessExit callbacks; the backend
- * guarantees the result resolves exactly once per child.)
- */
-function releaseChildRuntime(
-  broker: ChildExtensionUIBroker,
-  instance: RuntimeSubagentInstance,
-): void {
-  broker.cancelOwner(instance.id, "exit");
-  instance.activeToolCalls.clear();
-  instance.pendingUIRequestCount = 0;
-  instance.process = undefined;
-  instance.control = undefined;
-}
-
-function makePersistedSummary(instance: {
-  agent: string;
-  source: string;
-  task: string;
-  cwd: string;
-  model?: string;
-  warnings: string[];
-  summary: LiveTaskSummary;
-  stderr: string;
-  status: TaskStatus;
-}): PersistedTaskSummary {
-  const failed = isTaskFailed({
-    status: instance.status,
-    lifecycle: instance.summary.lifecycle,
-    stopReason: instance.summary.stopReason,
-    errorMessage: instance.summary.errorMessage,
-  });
+function failedToolResult(text: string, taskCount: number) {
   return {
-    agent: instance.agent,
-    source: instance.summary.source,
-    task: instance.task,
-    cwd: instance.cwd,
-    model: instance.summary.model || instance.model,
-    warnings: [...instance.warnings],
-    lifecycle: instance.summary.lifecycle,
-    stopReason: instance.summary.stopReason,
-    errorMessage: instance.summary.errorMessage,
-    stderrPreview: instance.stderr ? instance.stderr.slice(0, 500) : undefined,
-    toolCalls: [...instance.summary.toolCalls],
-    finalOutput: instance.summary.latestOutput,
-    usage: { ...instance.summary.usage },
-    failed,
+    content: [{ type: "text" as const, text }],
+    details: {
+      mode: "tasks",
+      taskCount,
+      summaries: [],
+      overallFailed: true,
+    } as PersistedSubagentToolDetails,
   };
 }
 
-function makeErrorSummary(_id: string, task: TaskItem, error: string): PersistedTaskSummary {
+/** Snapshot of the given tasks as a partial (live) tool result. */
+function liveToolUpdate(tracker: SubagentTracker, taskIds: string[]) {
+  const instances = taskIds.map((id) => tracker.get(id)).filter((i) => i !== undefined);
+  const doneCount = instances.filter(
+    (i) => i.status === "completed" || i.status === "error" || i.status === "aborted",
+  ).length;
+  const runningCount = instances.filter((i) => i.status === "running").length;
+  const liveSummaries: LiveTaskSummary[] = instances.map((i) => ({ ...i.summary }));
   return {
-    agent: task.agent,
-    source: "builtin",
-    task: task.task,
-    cwd: "",
-    warnings: [],
-    lifecycle: "failed",
-    errorMessage: error,
-    toolCalls: [],
-    finalOutput: "",
-    usage: emptyUsage(),
-    failed: true,
+    content: [
+      { type: "text" as const, text: `Tasks: ${doneCount}/${taskIds.length} done, ${runningCount} running...` },
+    ],
+    details: {
+      mode: "tasks",
+      live: true,
+      taskCount: taskIds.length,
+      summaries: liveSummaries,
+    } as LiveSubagentToolDetails,
   };
 }
 
-function makeErrorSummaryFromInstance(
-  instance: { agent: string; source: string; task: string; cwd: string; warnings: string[]; summary: LiveTaskSummary },
-  error: string,
-): PersistedTaskSummary {
+/** Final tool result for a set of terminal task summaries. */
+function buildToolResult(results: PersistedTaskSummary[], toolCallId: string, sessionFile: string | undefined) {
+  const successCount = results.filter((r) => !isTaskFailed(r)).length;
+
+  // Single-task: lean output
+  if (results.length === 1) {
+    const r = results[0];
+    const isFailed = successCount === 0;
+    let outputText = r.finalOutput || "";
+    // Surface the failure reason for the parent agent
+    if (isFailed && r.errorMessage) {
+      outputText = outputText ? `${outputText}\n\nError: ${r.errorMessage}` : `Error: ${r.errorMessage}`;
+      if (r.stderrPreview) {
+        outputText += `\nstderr: ${r.stderrPreview}`;
+      }
+    }
+    if (!outputText) outputText = "(no output)";
+    return {
+      content: [{ type: "text" as const, text: outputText }],
+      details: {
+        mode: "tasks",
+        taskCount: 1,
+        summaries: results,
+        overallFailed: isFailed,
+      } as PersistedSubagentToolDetails,
+    };
+  }
+
+  // Keep the large-text recovery pointer beside the preview, while preserving
+  // complete output strings in details for session-log extraction.
+  return buildMultiTaskToolResult(results, { toolCallId, sessionFile });
+}
+
+/**
+ * Model resolution adapter over the parent's available models, built from
+ * documented public APIs. Resolves only against currently available models.
+ */
+function createModelRegistry(
+  availableModels: ReadonlyArray<{ provider: string; id: string }>,
+  parentModel: { provider?: string; id?: string } | undefined,
+): ModelRegistry {
   return {
-    agent: instance.agent,
-    source: instance.summary.source,
-    task: instance.task,
-    cwd: instance.cwd,
-    warnings: [...instance.warnings],
-    lifecycle: "failed",
-    errorMessage: error,
-    toolCalls: [...instance.summary.toolCalls],
-    finalOutput: instance.summary.latestOutput || "",
-    usage: { ...instance.summary.usage },
-    failed: true,
+    resolve(modelStr: string) {
+      if (modelStr.includes("/")) {
+        const [provider, ...rest] = modelStr.split("/");
+        const id = rest.join("/");
+        // Try exact provider/id match first
+        const found = availableModels.find((m) => m.provider === provider && m.id === id);
+        if (found) return { provider: found.provider, id: found.id };
+
+        // Fallback: the specified provider (e.g. "openai", "anthropic") may not exist
+        // as an actual provider if the user has a proxy provider (e.g. "github-copilot")
+        // that serves those models. Try matching by model id alone.
+        const byId = availableModels.filter((m) => m.id === id);
+        if (byId.length === 1) {
+          return { provider: byId[0].provider, id: byId[0].id };
+        }
+        return undefined;
+      }
+
+      // For bare model ids, prefer the parent provider when it offers that model.
+      const parentProvider = parentModel?.provider;
+      if (parentProvider) {
+        const providerMatch = availableModels.find((m) => m.provider === parentProvider && m.id === modelStr);
+        if (providerMatch) {
+          return { provider: providerMatch.provider, id: providerMatch.id };
+        }
+      }
+
+      // Otherwise require a unique available bare-id match across providers.
+      const matches = availableModels.filter((m) => m.id === modelStr);
+      if (matches.length === 1) {
+        return { provider: matches[0].provider, id: matches[0].id };
+      }
+      return undefined;
+    },
+    getParentModel() {
+      if (parentModel?.provider && parentModel?.id) {
+        return { provider: parentModel.provider, id: parentModel.id };
+      }
+      return undefined;
+    },
   };
 }
