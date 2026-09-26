@@ -474,13 +474,33 @@ export class ExtensionUIDialogPresenter implements ChildUIDialogPresenter {
     this.now = options.now || Date.now;
   }
 
+  /**
+   * The ctx is captured when a task starts, but a task can outlive the tool
+   * call that started it. Pi resolves `ctx.hasUI` / `ctx.ui` lazily from the
+   * extension runner, so the ctx stays valid for the whole session. After a
+   * session replacement or reload, Pi invalidates the runner and these getters
+   * THROW instead of returning false.
+   *
+   * Normally we never get here with a stale ctx: Pi awaits `session_shutdown`
+   * before it invalidates, and our handler closes the broker, which rejects all
+   * later requests. This guard is the second line of defence: a stale ctx must
+   * give a clean cancel (the child gets an answer), not a rejected promise.
+   */
+  private parentUIAvailable(): boolean {
+    try {
+      return !!this.ctx?.hasUI && typeof this.ctx?.ui?.custom === "function";
+    } catch {
+      return false;
+    }
+  }
+
   async present(
     item: QueuedChildUIRequest,
     signal: AbortSignal,
     queueDepth: number,
   ): Promise<ChildUIDialogDecision> {
     if (signal.aborted) return { kind: "cancelled", reason: "aborted" };
-    if (!this.ctx?.hasUI || typeof this.ctx?.ui?.custom !== "function") {
+    if (!this.parentUIAvailable()) {
       this.diagnostic("Parent UI is unavailable; child extension dialog was cancelled");
       return { kind: "cancelled", reason: "parent UI unavailable" };
     }

@@ -46,6 +46,25 @@ describe("child extension UI presenter", () => {
     expect(getSafeInitialSelectIndex(["first", "second"])).toBe(0);
   });
 
+  it("cancels cleanly when the captured parent ctx has gone stale", async () => {
+    // Pi's ctx getters throw after session replacement/reload. A task that
+    // outlived its tool call must get a cancel, not a rejected promise.
+    const staleCtx = {
+      get hasUI(): boolean {
+        throw new Error("This extension ctx is stale");
+      },
+    };
+    const diagnostics: string[] = [];
+    const presenter = new ExtensionUIDialogPresenter(staleCtx, { onDiagnostic: (m) => { diagnostics.push(m); } });
+    const decision = await presenter.present(
+      item({ type: "extension_ui_request", id: "c", method: "confirm", title: "title" }),
+      new AbortController().signal,
+      0,
+    );
+    expect(decision).toEqual({ kind: "cancelled", reason: "parent UI unavailable" });
+    expect(diagnostics.length).toBe(1);
+  });
+
   it("maps Enter to the exact selected value and Escape to cancellation", () => {
     const decisions: unknown[] = [];
     const component = new ChildUIDialogComponent(
