@@ -211,7 +211,9 @@ export default function (pi: ExtensionAPI) {
   // Mark final tool results as real tool failures when execute recorded an overall failure.
   // Pi runtime only treats thrown errors or tool_result patches as actual isError results.
   pi.on("tool_result", async (event) => {
-    if (event.toolName !== "subagent") return;
+    // subagent_wait returns the same results as a blocking call, so it gets
+    // the same rule: an error only when every returned task failed.
+    if (event.toolName !== "subagent" && event.toolName !== "subagent_wait") return;
     const details = event.details as PersistedSubagentToolDetails | undefined;
     if (!details?.overallFailed) return;
     return { isError: true };
