@@ -15,14 +15,17 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { discoverAgents, findAgent, formatAgentList } from "./agents.js";
 import { renderCall, renderResult } from "./render.js";
+import { Container, Text } from "@earendil-works/pi-tui";
 import { type ModelRegistry, buildToolResolutionOptions } from "./resolver.js";
 import { buildMultiTaskToolResult } from "./multi-task-result.js";
+import { BackgroundDeliveries, type BackgroundResult } from "./background-deliveries.js";
+import { currentNestingDepth } from "./runner.js";
 import { createBackend } from "./backends.js";
 import { ChildExtensionUIBroker } from "./extension-ui-broker.js";
 import { ExtensionUIDialogPresenter } from "./extension-ui-presenter.js";
 import { SubagentTaskManager } from "./task-manager.js";
 import { Throttle } from "./throttle.js";
-import { SubagentTracker, setInstanceStatus } from "./tracker.js";
+import { type RuntimeSubagentInstance, SubagentTracker, setInstanceStatus } from "./tracker.js";
 import {
   type LiveSubagentToolDetails,
   type LiveTaskSummary,
@@ -67,7 +70,59 @@ const SubagentParams = Type.Object({
     minItems: 1,
     maxItems: MAX_TOTAL_TASKS,
   }),
+  async: Type.Optional(
+    Type.Boolean({
+      description:
+        "Default false (blocking: the call waits and returns the results). true = start the tasks in the background and return their ids at once; the results arrive later as one message when all tasks of this call have finished. See the tool guidelines for when to use it.",
+    }),
+  ),
 });
+
+/** Task id list. Ids are "task-N", as returned by an async subagent call. */
+const taskIdsSchema = (description: string) => Type.Array(Type.String(), { description });
+
+const SubagentStatusParams = Type.Object({
+  ids: Type.Optional(taskIdsSchema("Task ids to report. Omit to report every task of this session.")),
+});
+
+/** Upper bound for subagent_wait, so one call can not block the parent for hours. */
+const MAX_WAIT_SECONDS = 1800;
+const DEFAULT_WAIT_SECONDS = 300;
+
+const SubagentWaitParams = Type.Object({
+  ids: Type.Optional(
+    taskIdsSchema("Task ids to wait for. Omit to wait for every background task whose result you have not received yet."),
+  ),
+  timeoutSeconds: Type.Optional(
+    Type.Number({
+      description: `Maximum time to wait. Default ${DEFAULT_WAIT_SECONDS}, maximum ${MAX_WAIT_SECONDS}. On timeout you get the finished results plus the status of the rest; the rest keep running.`,
+      minimum: 1,
+      maximum: MAX_WAIT_SECONDS,
+    }),
+  ),
+});
+
+const SubagentCancelParams = Type.Object({
+  ids: Type.Array(Type.String(), { description: 'Task ids to cancel (for example "task-3").', minItems: 1 }),
+});
+
+/** customType of the message that pushes background results to the parent. */
+export const BACKGROUND_RESULT_MESSAGE = "subagent-background-result";
+
+/**
+ * Async mode is offered only where a later push can reach an agent that will
+ * act on it:
+ * - Only the interactive TUI keeps the session alive after the turn. In print
+ *   / json mode the process exits when the prompt ends and kills the tasks;
+ *   in rpc mode (our own RPC children) the parent ends the child when its
+ *   turn ends.
+ * - Nested subagents (depth > 0) are ended by their parent when their turn
+ *   ends, so their background results would be lost the same way.
+ * Elsewhere an async request runs blocking and the result says so.
+ */
+function asyncAvailable(ctx: Pick<ExtensionContext, "mode">): boolean {
+  return ctx.mode === "tui" && currentNestingDepth() === 0;
+}
 
 // ─── Extension Entry ─────────────────────────────────────────────────────────
 
@@ -89,6 +144,8 @@ function getParentSessionPath(
 
 export default function (pi: ExtensionAPI) {
   const tracker = new SubagentTracker();
+  const deliveries = new BackgroundDeliveries();
+  let deliverySequence = 0;
   let tuiManager: SubagentTuiManager;
 
   const reportBrokerDiagnostic = (message: string, owner?: { instanceId: string }): void => {
@@ -164,6 +221,9 @@ export default function (pi: ExtensionAPI) {
 
   const disposeSessionRuntime = async () => {
     if (tuiManager.isActive) tuiManager.exit();
+    // Before resetSession: killing the tasks settles their results as
+    // aborted, and those must not be pushed (the pi object is stale by then).
+    deliveries.reset();
     await manager.resetSession();
   };
 
@@ -214,6 +274,51 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
+  // ─── Background results ──────────────────────────────────────────────────
+
+  /**
+   * Push the results of one async call to the parent. followUp: a busy
+   * parent gets it after its current turn (no interruption of its work); an
+   * idle parent starts a new turn with it (triggerTurn).
+   */
+  const pushBackgroundResults = (results: BackgroundResult[], sessionFile: string | undefined): void => {
+    const deliveryId = `delivery-${++deliverySequence}`;
+    const taskIds = results.map((r) => r.taskId);
+    const built = buildMultiTaskToolResult(results.map((r) => r.summary), {
+      toolCallId: deliveryId,
+      sessionFile,
+      deliveryId,
+      taskIds,
+    });
+    const text = `Background subagent results (${taskIds.join(", ")}):\n\n${built.content[0].text}`;
+    try {
+      const sent: unknown = pi.sendMessage(
+        {
+          customType: BACKGROUND_RESULT_MESSAGE,
+          content: text,
+          display: true,
+          details: { ...built.details, taskIds, deliveryId } satisfies PersistedSubagentToolDetails,
+        },
+        { triggerTurn: true, deliverAs: "followUp" },
+      );
+      // The declared type is void, but the runtime returns a promise; do not
+      // let a late rejection become an unhandled rejection.
+      if (sent instanceof Promise) sent.catch(() => {});
+    } catch {
+      // Stale pi (session replaced between settle and push). The generation
+      // guard in BackgroundDeliveries should prevent this; nothing to do.
+    }
+  };
+
+  if (typeof pi.registerMessageRenderer === "function") {
+    pi.registerMessageRenderer<PersistedSubagentToolDetails>(BACKGROUND_RESULT_MESSAGE, (message, options, theme) => {
+      const container = new Container();
+      container.addChild(new Text(theme.fg("toolTitle", theme.bold("subagent background results")), 0, 0));
+      container.addChild(renderResult({ content: message.content, details: message.details }, options, theme));
+      return container;
+    });
+  }
+
   // ─── Tool Registration ───────────────────────────────────────────────────
 
   pi.registerTool({
@@ -228,6 +333,9 @@ export default function (pi: ExtensionAPI) {
       `Do not use subagent for: simple answers, quick targeted edits, latency-sensitive one-step work, tasks needing frequent user back-and-forth, or parallel implementation editing the same files (serialize write-heavy work instead). Do not spawn a build agent just to rename one symbol in a known file; edit it directly.`,
       `Only set tasks[i].model when the user explicitly asks for a different model. If omitted, built-in agents use their configured default (or the bundled default), custom agents may use a model from their frontmatter, and the parent model is the final fallback.`,
       `Only set tasks[i].thinking when the user explicitly asks for a different thinking effort level. Values: "off", "minimal", "low", "medium", "high", "xhigh", "max". If omitted, built-in agents use their configured or bundled level; custom agents use the model's default.`,
+      `subagent is BLOCKING by default (async omitted or false): the call waits and returns the results. Keep this default unless there is a clear reason for background work.`,
+      `Set async: true only when (a) the user asks for background, parallel or async work, or (b) the user lists several pieces of work and some of them can run independently while you do the others yourself. Use discretion. When you are unsure whether the user wants work to continue in the background, ask the user before choosing async. Do not use async when your next step needs the results; use a blocking call instead.`,
+      `After an async call, continue with your other work. The results arrive automatically as one message when all tasks of that call have finished (a new turn starts if you are idle). Do not poll subagent_status in a loop. Use subagent_wait only when you have no other useful work left and need the results; use subagent_status to report progress; use subagent_cancel for tasks that are no longer needed. Async is available only in the interactive TUI at the top level; elsewhere the call runs blocking.`,
       `When using subagent, provide highly detailed task descriptions so the agent can work autonomously. Specify what to return. Example: { "tasks": [{ "agent": "explore", "task": "Research auth-related source files. Report paths and open questions. Do not edit files." }, { "agent": "explore", "task": "Research auth-related tests. Report coverage gaps. Do not edit files." }] }`,
     ],
     parameters: SubagentParams,
@@ -256,6 +364,10 @@ export default function (pi: ExtensionAPI) {
         return failedToolResult(unknownAgentErrors.join("\n\n"), tasks.length);
       }
 
+      const asyncRequested = params.async === true;
+      const runAsync = asyncRequested && asyncAvailable(ctx);
+      const sessionFile = getParentSessionPath(ctx, "getSessionFile");
+
       const availableModels = await ctx.modelRegistry.getAvailable();
       const taskIds = manager.start(tasks, {
         agents,
@@ -271,6 +383,28 @@ export default function (pi: ExtensionAPI) {
         parentSessionDir: getParentSessionPath(ctx, "getSessionDir"),
         uiContext: ctx,
       });
+
+      if (runAsync) {
+        // Tasks now belong to the session, not to this call: the tool
+        // signal is NOT connected to cancel (the call ends right away).
+        deliveries.track(taskIds, manager.wait(taskIds), (results) => pushBackgroundResults(results, sessionFile));
+        const listing = taskIds.map((id, index) => `${id} (${tasks[index].agent})`).join(", ");
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Started ${taskIds.length} subagent task(s) in the background: ${listing}.\n` +
+              `The results will arrive as one message when all of them have finished. Continue with other work. ` +
+              `Use subagent_status, subagent_wait or subagent_cancel with these ids if needed.`,
+          }],
+          details: {
+            mode: "tasks",
+            taskCount: taskIds.length,
+            summaries: [],
+            taskIds,
+            background: true,
+          } as PersistedSubagentToolDetails,
+        };
+      }
 
       // Live tool row: show this call's tasks, throttled like the inspector.
       // The row is hidden behind the inspector overlay, so skip it while the
@@ -301,7 +435,14 @@ export default function (pi: ExtensionAPI) {
         rowRefresh.flush();
       }
 
-      return buildToolResult(results, toolCallId, getParentSessionPath(ctx, "getSessionFile"));
+      const result = buildToolResult(results, toolCallId, sessionFile);
+      if (asyncRequested) {
+        // The model asked for async; tell it why it got results instead.
+        result.content[0].text =
+          "Note: async is not available in this mode (only the interactive TUI at the top level), so the tasks ran blocking.\n\n" +
+          result.content[0].text;
+      }
+      return result;
     },
 
     renderCall(args, theme, _context) {
@@ -312,6 +453,145 @@ export default function (pi: ExtensionAPI) {
       return renderResult(result, options, theme);
     },
   });
+
+  // ─── Monitoring tools for async calls ────────────────────────────────────
+
+  /** Split ids into known tasks of this session and unknown ones. */
+  const partitionIds = (ids: string[]) => ({
+    known: ids.filter((id) => manager.has(id)),
+    unknown: ids.filter((id) => !manager.has(id)),
+  });
+
+  const unknownIdsNote = (unknown: string[]) =>
+    unknown.length > 0
+      ? `\nUnknown task ids (never started, or from a previous session): ${unknown.join(", ")}`
+      : "";
+
+  pi.registerTool({
+    name: "subagent_status",
+    label: "Subagent status",
+    description:
+      "Report the status of subagent tasks of this session (queued, running, completed, error, aborted), without waiting and without their output.",
+    promptSnippet: "Check the progress of background subagent tasks",
+    parameters: SubagentStatusParams,
+    async execute(_toolCallId, params) {
+      const ids = params.ids ?? [...tracker.instances.keys()];
+      const { known, unknown } = partitionIds(ids);
+      const lines = known
+        .map((id) => tracker.get(id))
+        .filter((instance) => instance !== undefined)
+        .map((instance) => formatStatusLine(instance, deliveries));
+      const text = (lines.length > 0 ? lines.join("\n") : "No subagent tasks in this session.") + unknownIdsNote(unknown);
+      return { content: [{ type: "text" as const, text }], details: undefined };
+    },
+  });
+
+  pi.registerTool({
+    name: "subagent_wait",
+    label: "Subagent wait",
+    description:
+      "Wait until background subagent tasks finish and return their results. Returns early on timeout with the finished results plus the status of the others, which keep running. Aborting this call stops the wait only, not the tasks.",
+    promptSnippet: "Wait for background subagent results when no other work is left",
+    parameters: SubagentWaitParams,
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+      const ids = params.ids ?? deliveries.undeliveredIds();
+      const { known, unknown } = partitionIds(ids);
+      if (known.length === 0) {
+        const text = (ids.length === 0 ? "No background subagent results are pending." : "No known task ids to wait for.") +
+          unknownIdsNote(unknown);
+        return { content: [{ type: "text" as const, text }], details: undefined };
+      }
+
+      // Collect results as they settle, then stop at the first of: all
+      // settled, timeout, or abort of this tool call.
+      const finished = new Map<string, PersistedTaskSummary>();
+      const allSettled = Promise.all(
+        known.map((id) => manager.wait([id]).then(([summary]) => void finished.set(id, summary))),
+      );
+      const timeoutSeconds = Math.min(params.timeoutSeconds ?? DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let onAbort: (() => void) | undefined;
+      const stop = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeoutSeconds * 1000);
+        onAbort = () => resolve();
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) resolve();
+      });
+      try {
+        await Promise.race([allSettled, stop]);
+      } finally {
+        clearTimeout(timer);
+        if (onAbort) signal?.removeEventListener("abort", onAbort);
+      }
+
+      // Snapshot now: a task that settles after this point is left for the
+      // push (or a later wait), never reported twice.
+      const doneIds = known.filter((id) => finished.has(id));
+      const pendingIds = known.filter((id) => !finished.has(id));
+      deliveries.markDelivered(doneIds);
+
+      const parts: string[] = [];
+      let details: PersistedSubagentToolDetails | undefined;
+      if (doneIds.length > 0) {
+        const built = buildMultiTaskToolResult(doneIds.map((id) => finished.get(id)!), {
+          toolCallId,
+          sessionFile: getParentSessionPath(ctx, "getSessionFile"),
+          taskIds: doneIds,
+        });
+        details = { ...built.details, taskIds: doneIds };
+        parts.push(built.content[0].text);
+      }
+      if (pendingIds.length > 0) {
+        const reason = signal?.aborted ? "Wait aborted" : `Timed out after ${timeoutSeconds}s`;
+        const lines = pendingIds
+          .map((id) => tracker.get(id))
+          .filter((instance) => instance !== undefined)
+          .map((instance) => formatStatusLine(instance, deliveries));
+        parts.push(`${reason}; still running (not cancelled):\n${lines.join("\n")}`);
+      }
+      const text = parts.join("\n\n---\n\n") + unknownIdsNote(unknown);
+      return { content: [{ type: "text" as const, text }], details };
+    },
+    renderResult(result, options, theme, _context) {
+      return renderResult(result, options, theme);
+    },
+  });
+
+  pi.registerTool({
+    name: "subagent_cancel",
+    label: "Subagent cancel",
+    description:
+      "Cancel queued or running subagent tasks. Their (aborted) results are reported the usual way: in the pushed message of their async call, or by subagent_wait.",
+    promptSnippet: "Cancel background subagent tasks that are no longer needed",
+    parameters: SubagentCancelParams,
+    async execute(_toolCallId, params) {
+      const { known, unknown } = partitionIds(params.ids);
+      const active = known.filter((id) => {
+        const status = tracker.get(id)?.status;
+        return status === "queued" || status === "running";
+      });
+      manager.cancel(active);
+      const alreadyDone = known.filter((id) => !active.includes(id));
+      const lines: string[] = [];
+      if (active.length > 0) lines.push(`Cancel requested: ${active.join(", ")}`);
+      if (alreadyDone.length > 0) lines.push(`Already finished (nothing to cancel): ${alreadyDone.join(", ")}`);
+      const text = (lines.length > 0 ? lines.join("\n") : "Nothing to cancel.") + unknownIdsNote(unknown);
+      return { content: [{ type: "text" as const, text }], details: undefined };
+    },
+  });
+}
+
+/** One line per task for status reports: id, agent, state, activity, task preview. */
+function formatStatusLine(instance: RuntimeSubagentInstance, deliveries: BackgroundDeliveries): string {
+  const parts = [`${instance.id} [${instance.agent}] ${instance.status}`];
+  const toolCalls = instance.summary.toolCalls.length;
+  if (toolCalls > 0) parts.push(`${toolCalls} tool call(s)`);
+  if (instance.pendingUIRequestCount > 0) parts.push("waiting for a user dialog");
+  if (deliveries.isBackground(instance.id)) {
+    parts.push(deliveries.undeliveredIds().includes(instance.id) ? "result not delivered yet" : "result delivered");
+  }
+  const preview = instance.task.length > 60 ? `${instance.task.slice(0, 60)}...` : instance.task;
+  return `${parts.join(" · ")} — "${preview}"`;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

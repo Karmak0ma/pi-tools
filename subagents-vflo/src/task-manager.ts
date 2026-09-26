@@ -148,6 +148,11 @@ export class SubagentTaskManager {
     return ids;
   }
 
+  /** Whether the id names a task of the current session. */
+  has(id: string): boolean {
+    return this.records.has(id);
+  }
+
   /**
    * Terminal summaries for the given ids, in the same order. Never rejects
    * for a task failure: failures are summaries with `failed: true`.

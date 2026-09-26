@@ -173,7 +173,9 @@ export function renderCall(args: any, theme: any): any {
 
 export function renderResult(result: any, options: { expanded: boolean }, theme: any): any {
   const details = result.details as (LiveSubagentToolDetails | PersistedSubagentToolDetails) | undefined;
-  if (!details || details.taskCount === 0) {
+  // An async call's immediate result has no summaries yet (only "started"),
+  // so it renders as plain text like an empty result.
+  if (!details || details.taskCount === 0 || ("background" in details && details.background)) {
     const text = result.content?.[0];
     return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
   }

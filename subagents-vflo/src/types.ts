@@ -242,6 +242,12 @@ export interface PersistedSubagentToolDetails {
   taskCount: number;
   summaries: PersistedTaskSummary[];
   overallFailed?: boolean;
+  /** Task ids in the same order as summaries (async calls, wait/push results). */
+  taskIds?: string[];
+  /** Set on a pushed background result; locates its custom_message entry in the session log. */
+  deliveryId?: string;
+  /** Set on an async call's immediate result: tasks were started, not finished. */
+  background?: true;
 }
 
 // ─── Resolution Types ────────────────────────────────────────────────────────

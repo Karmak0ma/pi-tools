@@ -6,9 +6,23 @@ import { isTaskFailed, type PersistedSubagentToolDetails, type PersistedTaskSumm
  */
 export const MULTI_TASK_OUTPUT_LIMIT = 12_000;
 
+/**
+ * Where the full output of a result can be found again in the session log.
+ * A normal call stores it in its tool result; a background call's push is a
+ * custom message, found by the deliveryId stored in its details.
+ */
+export interface MultiTaskResultOptions {
+  toolCallId: string;
+  sessionFile?: string;
+  /** Set for a pushed background result (custom_message entry). */
+  deliveryId?: string;
+  /** Task ids, same order as results. Shown so the parent can match results to ids it got from an async call. */
+  taskIds?: string[];
+}
+
 export function buildMultiTaskToolResult(
   results: PersistedTaskSummary[],
-  options: { toolCallId: string; sessionFile?: string },
+  options: MultiTaskResultOptions,
 ): {
   content: [{ type: "text"; text: string }];
   details: PersistedSubagentToolDetails;
@@ -16,7 +30,8 @@ export function buildMultiTaskToolResult(
   const successCount = results.filter((result) => !isTaskFailed(result)).length;
   const taskSections = results.map((result, taskIndex) => {
     const status = isTaskFailed(result) ? "failed" : "completed";
-    const parts: string[] = [`[${result.agent}] ${status}`];
+    const label = options.taskIds?.[taskIndex] ? `${options.taskIds[taskIndex]} · ${result.agent}` : result.agent;
+    const parts: string[] = [`[${label}] ${status}`];
     if (result.errorMessage) parts.push(`Error: ${result.errorMessage}`);
     if (result.finalOutput) {
       parts.push(formatFinalOutputPreview(result.finalOutput, taskIndex, options));
@@ -44,7 +59,7 @@ export function buildMultiTaskToolResult(
 function formatFinalOutputPreview(
   finalOutput: string,
   taskIndex: number,
-  options: { toolCallId: string; sessionFile?: string },
+  options: MultiTaskResultOptions,
 ): string {
   if (finalOutput.length <= MULTI_TASK_OUTPUT_LIMIT) return finalOutput;
 
@@ -56,9 +71,13 @@ function formatFinalOutputPreview(
     previewEnd--;
   }
 
-  const pointer = options.sessionFile
-    ? `Full output is saved in this session's tool-result details. Run:\n${sessionLogCommand(options.sessionFile, options.toolCallId, taskIndex)}`
-    : `No persistent session file path is available. If this session has a JSONL log, find toolCallId ${options.toolCallId} and read message.details.summaries[${taskIndex}].finalOutput.`;
+  const pointer = options.deliveryId
+    ? options.sessionFile
+      ? `Full output is saved in this session's message details. Run:\n${deliveryLogCommand(options.sessionFile, options.deliveryId, taskIndex)}`
+      : `No persistent session file path is available. If this session has a JSONL log, find the custom_message whose details.deliveryId is ${options.deliveryId} and read details.summaries[${taskIndex}].finalOutput.`
+    : options.sessionFile
+      ? `Full output is saved in this session's tool-result details. Run:\n${sessionLogCommand(options.sessionFile, options.toolCallId, taskIndex)}`
+      : `No persistent session file path is available. If this session has a JSONL log, find toolCallId ${options.toolCallId} and read message.details.summaries[${taskIndex}].finalOutput.`;
 
   return `${finalOutput.slice(0, previewEnd)}\n\n[Output truncated at ${MULTI_TASK_OUTPUT_LIMIT} characters. ${pointer}]`;
 }
@@ -66,6 +85,11 @@ function formatFinalOutputPreview(
 function sessionLogCommand(sessionFile: string, toolCallId: string, taskIndex: number): string {
   const filter = `select(.type=="message" and .message.role=="toolResult" and .message.toolCallId==$id) | .message.details.summaries[${taskIndex}].finalOutput`;
   return `jq -r --arg id ${shellQuote(toolCallId)} '${filter}' ${shellQuote(sessionFile)}`;
+}
+
+function deliveryLogCommand(sessionFile: string, deliveryId: string, taskIndex: number): string {
+  const filter = `select(.type=="custom_message" and .details.deliveryId==$id) | .details.summaries[${taskIndex}].finalOutput`;
+  return `jq -r --arg id ${shellQuote(deliveryId)} '${filter}' ${shellQuote(sessionFile)}`;
 }
 
 function shellQuote(value: string): string {

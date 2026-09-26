@@ -58,6 +58,20 @@ describe("multi-task subagent result formatting", () => {
     );
   });
 
+  it("points a pushed background result at its custom_message entry and labels task ids", () => {
+    const result = buildMultiTaskToolResult([task("long", "y".repeat(MULTI_TASK_OUTPUT_LIMIT + 1))], {
+      toolCallId: "delivery-7",
+      deliveryId: "delivery-7",
+      taskIds: ["task-4"],
+      sessionFile: "/sessions/current.jsonl",
+    });
+
+    expect(result.content[0].text).toContain("[task-4 · long] completed");
+    expect(result.content[0].text).toContain(
+      `jq -r --arg id 'delivery-7' 'select(.type=="custom_message" and .details.deliveryId==$id) | .details.summaries[0].finalOutput' '/sessions/current.jsonl'`,
+    );
+  });
+
   it("quotes session paths and passes unusual tool-call IDs as jq data", () => {
     const result = buildMultiTaskToolResult([task("long", "z".repeat(MULTI_TASK_OUTPUT_LIMIT + 1))], {
       toolCallId: "toolu|123",
