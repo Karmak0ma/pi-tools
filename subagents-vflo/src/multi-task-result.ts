@@ -28,11 +28,17 @@ export function buildMultiTaskToolResult(
   details: PersistedSubagentToolDetails;
 } {
   const successCount = results.filter((result) => !isTaskFailed(result)).length;
+  const abortedCount = results.filter((result) => result.cancelledByParent).length;
+  const failedCount = results.filter((result) => isTaskFailed(result) && !result.cancelledByParent).length;
   const taskSections = results.map((result, taskIndex) => {
-    const status = isTaskFailed(result) ? "failed" : "completed";
+    const status = result.cancelledByParent ? "aborted" : isTaskFailed(result) ? "failed" : "completed";
     const label = options.taskIds?.[taskIndex] ? `${options.taskIds[taskIndex]} · ${result.agent}` : result.agent;
     const parts: string[] = [`[${label}] ${status}`];
-    if (result.errorMessage) parts.push(`Error: ${result.errorMessage}`);
+    if (result.cancelledByParent) {
+      parts.push("Cancelled by the parent");
+    } else if (result.errorMessage) {
+      parts.push(`Error: ${result.errorMessage}`);
+    }
     if (result.finalOutput) {
       parts.push(formatFinalOutputPreview(result.finalOutput, taskIndex, options));
     } else if (!result.errorMessage) {
@@ -42,16 +48,53 @@ export function buildMultiTaskToolResult(
     return parts.join("\n\n");
   });
 
+  const counts = [`${successCount}/${results.length} succeeded`];
+  if (abortedCount > 0) counts.push(`${abortedCount} aborted`);
+  if (failedCount > 0) counts.push(`${failedCount} failed`);
+
   return {
     content: [{
       type: "text",
-      text: `Tasks: ${successCount}/${results.length} succeeded\n\n${taskSections.join("\n\n---\n\n")}`,
+      text: `Tasks: ${counts.join(", ")}\n\n${taskSections.join("\n\n---\n\n")}`,
     }],
     details: {
       mode: "tasks",
       taskCount: results.length,
       summaries: results,
       overallFailed: successCount === 0,
+    },
+  };
+}
+
+/** Keep single-task output compact while preserving why cancellation differs from failure. */
+export function buildSingleTaskToolResult(
+  result: PersistedTaskSummary,
+  isFailed: boolean,
+): {
+  content: [{ type: "text"; text: string }];
+  details: PersistedSubagentToolDetails;
+} {
+  let outputText = result.finalOutput || "";
+  if (result.cancelledByParent) {
+    // Cancellation is still unsuccessful for aggregate accounting, but
+    // calling it an error would mislead the parent about why work stopped.
+    const cancellation = `[${result.agent}] aborted\n\nCancelled by the parent`;
+    outputText = outputText ? `${cancellation}\n\n${outputText}` : cancellation;
+  } else if (isFailed && result.errorMessage) {
+    // Surface the failure reason for the parent agent.
+    outputText = outputText
+      ? `${outputText}\n\nError: ${result.errorMessage}`
+      : `Error: ${result.errorMessage}`;
+    if (result.stderrPreview) outputText += `\nstderr: ${result.stderrPreview}`;
+  }
+  if (!outputText) outputText = "(no output)";
+  return {
+    content: [{ type: "text", text: outputText }],
+    details: {
+      mode: "tasks",
+      taskCount: 1,
+      summaries: [result],
+      overallFailed: isFailed,
     },
   };
 }

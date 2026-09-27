@@ -27,6 +27,7 @@ import type { AgentConfig } from "./types.js";
 import { findAgent, formatAgentList } from "./agents.js";
 import type { SubagentBackend } from "./backends.js";
 import type { ChildExtensionUIBroker, ChildUIDialogPresenter, ChildUIRequestOwner } from "./extension-ui-broker.js";
+import type { ChildRunResult } from "./runner.js";
 import {
   type ModelRegistry,
   type ToolResolutionOptions,
@@ -226,10 +227,7 @@ export class SubagentTaskManager {
     // A task cancelled while queued leaves the queue at once (acquire returns
     // false) so its status changes now, not when some slot frees up later.
     const acquired = await this.slots.acquire(signal);
-    if (!acquired) {
-      this.transition(instance, "aborted", { lifecycle: "closed", errorMessage: "Aborted before start" });
-      return makeErrorSummaryFromInstance(instance, "Aborted before start");
-    }
+    if (!acquired) return this.makeCancelledSummary(instance);
     try {
       return await this.runTaskInSlot(instance, task, index, context, broker, signal);
     } finally {
@@ -248,10 +246,7 @@ export class SubagentTaskManager {
     const id = instance.id;
 
     // Cancelled in the same tick the slot was granted.
-    if (signal.aborted) {
-      this.transition(instance, "aborted", { lifecycle: "closed", errorMessage: "Aborted before start" });
-      return makeErrorSummaryFromInstance(instance, "Aborted before start");
-    }
+    if (signal.aborted) return this.makeCancelledSummary(instance);
 
     const agent = findAgent(context.agents, task.agent);
     if (!agent) {
@@ -355,34 +350,77 @@ export class SubagentTaskManager {
 
       const childResult = await handle.result;
       releaseChildRuntime(broker, instance);
-
-      instance.summary.usage = childResult.usage;
-      instance.summary.latestOutput = childResult.finalOutput;
-      instance.summary.toolCalls = childResult.toolCalls;
-      instance.summary.lifecycle = childResult.lifecycle;
-      instance.summary.stopReason = childResult.stopReason;
-      instance.summary.errorMessage = childResult.errorMessage;
-      instance.summary.model = childResult.model || instance.model;
-
-      // Lifecycle is the logical task contract. A raw process exit code is
-      // not enough: the child may close noisily after a valid final stop,
-      // while a closed task may have exit code zero.
-      const isError = childResult.lifecycle !== "completed" || isTaskFailed(childResult);
-      if (isError) {
-        this.transition(instance, childResult.stopReason === "aborted" ? "aborted" : "error", {
-          lifecycle: childResult.lifecycle,
-        });
-      } else {
-        this.transition(instance, "completed", { lifecycle: "completed" });
-      }
-      return makePersistedSummary(instance);
+      return this.makeChildResultSummary(instance, childResult, signal);
     } catch (err: any) {
       // A failed spawn or a backend error. Release anything the child may
       // have registered so no dialog stays queued for a dead task.
       releaseChildRuntime(broker, instance);
-      this.transition(instance, "error", { lifecycle: "failed", errorMessage: err?.message || "Unknown error" });
-      return makeErrorSummaryFromInstance(instance, err?.message || "Unknown error");
+      return this.makeBackendErrorSummary(instance, signal, err);
     }
+  }
+
+  /** Classify one terminal backend result using the parent-owned abort signal. */
+  private makeChildResultSummary(
+    instance: RuntimeSubagentInstance,
+    childResult: ChildRunResult,
+    signal: AbortSignal,
+  ): PersistedTaskSummary {
+    instance.summary.usage = childResult.usage;
+    instance.summary.latestOutput = childResult.finalOutput;
+    instance.summary.toolCalls = childResult.toolCalls;
+    instance.summary.model = childResult.model || instance.model;
+
+    // The manager's signal records who initiated cancellation. Child-level
+    // stopReason "aborted" also means a user interrupted a turn, so it must
+    // not be used alone to label the whole task as parent-cancelled.
+    if (signal.aborted && childResult.lifecycle !== "completed") {
+      return this.makeCancelledSummary(instance);
+    }
+
+    instance.summary.lifecycle = childResult.lifecycle;
+    instance.summary.stopReason = childResult.stopReason;
+    instance.summary.errorMessage = childResult.errorMessage;
+
+    // Lifecycle is the logical task contract. A raw process exit code is
+    // not enough: the child may close noisily after a valid final stop,
+    // while a closed task may have exit code zero.
+    const isError = childResult.lifecycle !== "completed" || isTaskFailed(childResult);
+    if (isError) {
+      this.transition(instance, childResult.stopReason === "aborted" ? "aborted" : "error", {
+        lifecycle: childResult.lifecycle,
+      });
+    } else {
+      this.transition(instance, "completed", { lifecycle: "completed" });
+    }
+    return makePersistedSummary(instance);
+  }
+
+  /** Keep a backend failure distinct from cancellation unless our signal says otherwise. */
+  private makeBackendErrorSummary(
+    instance: RuntimeSubagentInstance,
+    signal: AbortSignal,
+    error: any,
+  ): PersistedTaskSummary {
+    if (signal.aborted) return this.makeCancelledSummary(instance);
+    const errorMessage = error?.message || "Unknown error";
+    this.transition(instance, "error", { lifecycle: "failed", errorMessage });
+    return makeErrorSummaryFromInstance(instance, errorMessage);
+  }
+
+  /**
+   * Record the manager-owned abort as provenance for parent-facing results.
+   * Lifecycle "closed" and stopReason "aborted" alone also cover child-side
+   * interruptions and pane death, which must remain failures.
+   */
+  private makeCancelledSummary(instance: RuntimeSubagentInstance): PersistedTaskSummary {
+    this.transition(instance, "aborted", {
+      lifecycle: "closed",
+      stopReason: "aborted",
+      errorMessage: "Cancelled by the parent",
+    });
+    // Keep failed:true from the existing terminal-failure accounting; this
+    // marker changes only how the result explains the task to the parent.
+    return { ...makePersistedSummary(instance), cancelledByParent: true };
   }
 }
 

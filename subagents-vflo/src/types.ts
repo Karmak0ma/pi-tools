@@ -227,6 +227,11 @@ export interface PersistedTaskSummary {
   finalOutput: string;
   usage: TaskUsage;
   failed?: boolean;
+  /**
+   * True only when the parent aborted this task. A closed child or an
+   * assistant turn with stopReason "aborted" is not enough to prove that.
+   */
+  cancelledByParent?: boolean;
 }
 
 export interface LiveSubagentToolDetails {

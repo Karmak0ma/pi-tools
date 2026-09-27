@@ -103,8 +103,19 @@ describe("SubagentTaskManager", () => {
     const [runningResult, queuedResult] = await manager.wait([running, queued]);
 
     expect(children.map((c) => c.spec.taskText)).toEqual(["a"]);
-    expect(runningResult).toMatchObject({ failed: true, lifecycle: "closed" });
-    expect(queuedResult).toMatchObject({ failed: true, errorMessage: "Aborted before start" });
+    expect(runningResult).toMatchObject({
+      failed: true,
+      lifecycle: "closed",
+      stopReason: "aborted",
+      errorMessage: "Cancelled by the parent",
+      cancelledByParent: true,
+    });
+    expect(queuedResult).toMatchObject({
+      failed: true,
+      lifecycle: "closed",
+      errorMessage: "Cancelled by the parent",
+      cancelledByParent: true,
+    });
   });
 
   it("keeps running after the starter stops listening and notifies every observer", async () => {

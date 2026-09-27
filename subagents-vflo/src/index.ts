@@ -17,7 +17,7 @@ import { discoverAgents, findAgent, formatAgentList } from "./agents.js";
 import { renderCall, renderResult } from "./render.js";
 import { Container, Text } from "@earendil-works/pi-tui";
 import { type ModelRegistry, buildToolResolutionOptions } from "./resolver.js";
-import { buildMultiTaskToolResult } from "./multi-task-result.js";
+import { buildMultiTaskToolResult, buildSingleTaskToolResult } from "./multi-task-result.js";
 import { BackgroundDeliveries, type BackgroundResult } from "./background-deliveries.js";
 import { currentNestingDepth } from "./runner.js";
 import { createBackend } from "./backends.js";
@@ -199,8 +199,10 @@ export default function (pi: ExtensionAPI) {
   // result arrives. The backend result later overwrites these fields.
   tuiManager = new SubagentTuiManager(tracker, (instance) => {
     if (instance.status !== "running") return;
-    manager.broker.cancelOwner(instance.id, "abort");
-    instance.control?.abort();
+    // Through the manager, not control.abort() directly: the manager's
+    // signal is what marks the result "cancelled by the parent" instead of
+    // "failed". manager.cancel also cancels the child's pending dialogs.
+    manager.cancel([instance.id]);
     setInstanceStatus(instance, "aborted", { lifecycle: "closed", isPartial: false });
     tuiManager.requestRender();
   });
@@ -643,28 +645,7 @@ function buildToolResult(results: PersistedTaskSummary[], toolCallId: string, se
   const successCount = results.filter((r) => !isTaskFailed(r)).length;
 
   // Single-task: lean output
-  if (results.length === 1) {
-    const r = results[0];
-    const isFailed = successCount === 0;
-    let outputText = r.finalOutput || "";
-    // Surface the failure reason for the parent agent
-    if (isFailed && r.errorMessage) {
-      outputText = outputText ? `${outputText}\n\nError: ${r.errorMessage}` : `Error: ${r.errorMessage}`;
-      if (r.stderrPreview) {
-        outputText += `\nstderr: ${r.stderrPreview}`;
-      }
-    }
-    if (!outputText) outputText = "(no output)";
-    return {
-      content: [{ type: "text" as const, text: outputText }],
-      details: {
-        mode: "tasks",
-        taskCount: 1,
-        summaries: results,
-        overallFailed: isFailed,
-      } as PersistedSubagentToolDetails,
-    };
-  }
+  if (results.length === 1) return buildSingleTaskToolResult(results[0], successCount === 0);
 
   // Keep the large-text recovery pointer beside the preview, while preserving
   // complete output strings in details for session-log extraction.

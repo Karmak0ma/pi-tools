@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { emptyUsage, type PersistedTaskSummary } from "./types.js";
-import { buildMultiTaskToolResult, MULTI_TASK_OUTPUT_LIMIT } from "./multi-task-result.js";
+import {
+  buildMultiTaskToolResult,
+  buildSingleTaskToolResult,
+  MULTI_TASK_OUTPUT_LIMIT,
+} from "./multi-task-result.js";
 
 function task(agent: string, finalOutput: string): PersistedTaskSummary {
   return {
@@ -80,6 +84,41 @@ describe("multi-task subagent result formatting", () => {
 
     expect(result.content[0].text).toContain("--arg id 'toolu|123'");
     expect(result.content[0].text).toContain("'/sessions/user'\\''s session.jsonl'");
+  });
+
+  it("labels parent cancellation as aborted and keeps real failures failed", () => {
+    const cancelled: PersistedTaskSummary = {
+      ...task("cancelled", ""),
+      lifecycle: "closed",
+      stopReason: "aborted",
+      errorMessage: "Cancelled by the parent",
+      failed: true,
+      cancelledByParent: true,
+    };
+    const failed: PersistedTaskSummary = {
+      ...task("crashed", ""),
+      lifecycle: "failed",
+      errorMessage: "Subagent process exited",
+      failed: true,
+    };
+    const result = buildMultiTaskToolResult(
+      [task("explore", "done"), cancelled, failed],
+      { toolCallId: "toolu-statuses" },
+    );
+    const text = result.content[0].text;
+
+    expect(text).toContain("Tasks: 1/3 succeeded, 1 aborted, 1 failed");
+    expect(text).toContain("[cancelled] aborted\n\nCancelled by the parent");
+    expect(text).not.toContain("Error: Cancelled by the parent");
+    expect(text).toContain("[crashed] failed\n\nError: Subagent process exited");
+
+    const cancelledOnly = buildMultiTaskToolResult([cancelled], { toolCallId: "toolu-cancelled" });
+    expect(cancelledOnly.details.overallFailed).toBe(true);
+
+    const single = buildSingleTaskToolResult(cancelled, true);
+    expect(single.content[0].text).toContain("[cancelled] aborted\n\nCancelled by the parent");
+    expect(single.content[0].text).not.toContain("Error: Cancelled by the parent");
+    expect(single.details.overallFailed).toBe(true);
   });
 
   it("keeps complete output in persisted details for completed and failed tasks", () => {
