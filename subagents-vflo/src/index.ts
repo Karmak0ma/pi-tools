@@ -110,14 +110,21 @@ const SubagentCancelParams = Type.Object({
 export const BACKGROUND_RESULT_MESSAGE = "subagent-background-result";
 
 /**
- * Async mode is offered only where a later push can reach an agent that will
- * act on it:
- * - Only the interactive TUI keeps the session alive after the turn. In print
- *   / json mode the process exits when the prompt ends and kills the tasks;
- *   in rpc mode (our own RPC children) the parent ends the child when its
- *   turn ends.
- * - Nested subagents (depth > 0) are ended by their parent when their turn
- *   ends, so their background results would be lost the same way.
+ * Async mode is offered only where a later push can reach an agent whose
+ * answer somebody still reads:
+ * - Mode: only the interactive TUI keeps the session alive after the turn.
+ *   In print / json mode the process exits when the prompt ends and kills
+ *   the background tasks.
+ * - Depth: a nested subagent (depth > 0) has a parent that takes the child's
+ *   FIRST normal turn end as the task result (both backends do this). With
+ *   async, that first turn ends with "started in the background", so the
+ *   parent records that as the answer. The real results arrive later and
+ *   are lost: the RPC runner has already shut the child down, and on Herdr
+ *   the pane is still open but the parent no longer watches it.
+ *   The mode check alone does not catch this: Herdr children run as
+ *   interactive pi, so their mode is "tui".
+ * At the top level (depth 0) nobody collects the turn as a result; the user
+ * does, and the push starts a new turn they see.
  * Elsewhere an async request runs blocking and the result says so.
  */
 function asyncAvailable(ctx: Pick<ExtensionContext, "mode">): boolean {
