@@ -1,0 +1,16 @@
+{
+  "name": "monokai-vflo",
+  "version": "1.0.0",
+  "description": "Monokai theme and assistant message layout reconstructed from Victor's screenshots.",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "files": ["index.js", "themes", "README.md", "windows-terminal-monokai.json"],
+  "pi": {
+    "extensions": ["./index.js"],
+    "themes": ["./themes/monokai-vflo.json"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
