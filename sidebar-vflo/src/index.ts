@@ -6,8 +6,9 @@ import { adapterForProvider, readSharedProviderEntry } from "pi-usage-vflo/src/i
 import { matchesKey, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 import { closeOverlayCustomUi } from "./overlay-close.js";
 import { loadDiff } from "./diff.js";
+import { createDiffRefreshController } from "./diff-refresh.js";
 import { limitsFromEntry } from "./limits.js";
-import { renderSidebar, type SidebarTheme } from "./render.js";
+import { renderSidebar, sidebarHeightForTerminal, type SidebarTheme } from "./render.js";
 import {
 	applySubagentDetails,
 	finishSubagents,
@@ -20,6 +21,7 @@ import {
 import { createSplitPaneController, type SplitPaneController } from "./split-pane.js";
 import { applyTodoSnapshot, todoDisplayFromBranch, visibleTodos, type TodoDisplayState } from "./todo-display.js";
 import { prioritizeInputListener } from "./input-priority.js";
+import { cancelTimer } from "./timers.js";
 import { isUnmodifiedPrimaryPress, parseSgrMouseEvent } from "./mouse.js";
 import {
 	DEFAULT_CONFIG,
@@ -56,11 +58,8 @@ interface Runtime {
 	subscriptionPollTimer?: NodeJS.Timeout;
 	// Latest git diff summary; undefined hides the Diff panel (see types.ts).
 	diff: DiffSummary | undefined;
-	// Set while a git refresh runs. A refresh requested meanwhile only sets
-	// `diffRefreshQueued`, so at most one git process runs at a time and the
-	// last request is never lost (it runs once the current one ends).
-	diffRefreshRunning: boolean;
-	diffRefreshQueued: boolean;
+	// Owns the five-minute timer and the idle-triggered refresh exception.
+	diffRefresh: ReturnType<typeof createDiffRefreshController>;
 	overlayGeneration: number;
 	overlayStarting: boolean;
 	tui?: TUI;
@@ -121,31 +120,10 @@ function snapshot(runtime: Runtime): SidebarSnapshot {
 	};
 }
 
-// Tools that can change files on disk. Only these trigger a git refresh after
-// they end, to avoid starting git after every read/grep/todo call.
-const FILE_CHANGING_TOOLS = new Set(["edit", "write", "bash"]);
-
-// Re-reads the git diff for the Diff panel. Skipped when nobody can see the
-// panel; setSidebarVisible() and the settings menu call this again when the
-// panel becomes visible, so the data is fresh when it appears.
-function refreshDiff(runtime: Runtime): void {
-	if (!runtime.sidebarVisible || !panelEnabled(runtime.config, "diff")) return;
-	if (runtime.diffRefreshRunning) {
-		runtime.diffRefreshQueued = true;
-		return;
-	}
-	runtime.diffRefreshRunning = true;
-	runtime.diffRefreshQueued = false;
-	void loadDiff((command, args, options) => runtime.pi.exec(command, args, options), runtime.ctx.cwd)
-		.then((diff) => {
-			if (runtime.disposed) return;
-			runtime.diff = diff;
-			requestRender(runtime);
-		})
-		.finally(() => {
-			runtime.diffRefreshRunning = false;
-			if (runtime.diffRefreshQueued && !runtime.disposed) refreshDiff(runtime);
-		});
+// The Diff controller runs only while its panel can be seen. Visibility and
+// settings changes activate it without bypassing its five-minute cooldown.
+function syncDiffRefresh(runtime: Runtime): void {
+	runtime.diffRefresh.setActive(runtime.sidebarVisible && panelEnabled(runtime.config, "diff"));
 }
 
 // Reads the limits state for the current model from pi-usage-vflo's published
@@ -173,8 +151,7 @@ async function refreshSubscription(runtime: Runtime): Promise<boolean> {
 }
 
 function clearSubscriptionPoll(runtime: Runtime): void {
-	if (runtime.subscriptionPollTimer === undefined) return;
-	clearTimeout(runtime.subscriptionPollTimer);
+	cancelTimer(runtime.subscriptionPollTimer);
 	runtime.subscriptionPollTimer = undefined;
 }
 
@@ -215,7 +192,7 @@ function suppressTodoWidget(runtime: Runtime): void {
 // on, but panel visibility for the other panels is just a config toggle.
 function togglePanel(runtime: Runtime, panel: SidebarPanelId): void {
 	runtime.config.panels[panel] = !runtime.config.panels[panel];
-	if (panel === "diff") refreshDiff(runtime);
+	if (panel === "diff") syncDiffRefresh(runtime);
 }
 
 async function openSettings(runtime: Runtime): Promise<void> {
@@ -279,6 +256,7 @@ async function openSettings(runtime: Runtime): Promise<void> {
 function setSidebarVisible(runtime: Runtime, visible: boolean): void {
 	runtime.sidebarVisible = visible;
 	runtime.config.showSidebarOnStartup = visible;
+	syncDiffRefresh(runtime);
 	if (visible) {
 		if (runtime.split) runtime.split.show();
 		else startOverlay(runtime);
@@ -286,8 +264,6 @@ function setSidebarVisible(runtime: Runtime, visible: boolean): void {
 		suppressTodoWidget(runtime);
 		// No point polling for subscription data nobody can see.
 		scheduleSubscriptionPoll(runtime);
-		// The diff is not refreshed while hidden, so it may be stale.
-		refreshDiff(runtime);
 	} else {
 		closeOverlay(runtime);
 		clearSubscriptionPoll(runtime);
@@ -336,7 +312,7 @@ function startOverlay(runtime: Runtime): void {
 						if (runtime.terminalInputListener) {
 							runtime.inputPriorityReady = prioritizeInputListener(tui, runtime.terminalInputListener);
 						}
-						const rows = tui.terminal.rows;
+						const rows = sidebarHeightForTerminal(tui.terminal.rows);
 						const state = snapshot(runtime);
 						// The snapshot is a small plain-data object, so serialising it is far
 						// cheaper than rendering, and it compares by value: no missed update
@@ -446,6 +422,7 @@ function handleTerminalInput(runtime: Runtime, data: string): { consume?: boolea
 
 function disposeRuntime(runtime: Runtime): void {
 	runtime.disposed = true;
+	runtime.diffRefresh.dispose();
 	clearSubscriptionPoll(runtime);
 	runtime.unsubscribeTerminalInput?.();
 	runtime.unsubscribeTerminalInput = undefined;
@@ -481,8 +458,12 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 			subagentBatches: new Map(),
 			limits: { buckets: [] },
 			diff: undefined,
-			diffRefreshRunning: false,
-			diffRefreshQueued: false,
+			diffRefresh: createDiffRefreshController(async () => {
+				const diff = await loadDiff((command, args, options) => runtime.pi.exec(command, args, options), runtime.ctx.cwd);
+				if (runtime.disposed) return;
+				runtime.diff = diff;
+				requestRender(runtime);
+			}),
 			overlayGeneration: 0,
 			overlayStarting: false,
 			expanded: { todos: false, diff: false },
@@ -491,7 +472,7 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 		};
 		current = runtime;
 		startOverlay(runtime);
-		refreshDiff(runtime);
+		syncDiffRefresh(runtime);
 		void refreshSubscription(runtime).then(() => scheduleSubscriptionPoll(runtime));
 		if (runtime.sidebarVisible) {
 			suppressTodoWidget(runtime);
@@ -594,7 +575,6 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 		const runtime = runtimeFor(current, ctx);
 		if (!runtime) return;
 		if (event.toolName === "todo") suppressTodoWidget(runtime);
-		if (FILE_CHANGING_TOOLS.has(event.toolName)) refreshDiff(runtime);
 		requestRender(runtime);
 	});
 	pi.on("tool_result", (event, ctx) => {
@@ -626,9 +606,9 @@ export default function sidebarVflo(pi: ExtensionAPI): void {
 	pi.on("agent_settled", (_event, ctx) => {
 		const runtime = runtimeFor(current, ctx);
 		if (!runtime) return;
-		// Catches changes no single tool event explains (for example a
-		// subagent or another extension writing files during the run).
-		refreshDiff(runtime);
+		// Capture file changes from this run, including writes by subagents or
+		// other extensions, without running git after every individual tool.
+		runtime.diffRefresh.agentSettled();
 		requestRender(runtime);
 	});
 	pi.on("model_select", (_event, ctx) => {

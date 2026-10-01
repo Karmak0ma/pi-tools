@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { renderSidebar } from "../src/render.js";
+import { renderSidebar, sidebarHeightForTerminal } from "../src/render.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
 const theme = {
@@ -11,6 +11,11 @@ const theme = {
 const monokaiTheme = { ...theme, preset: "monokai" as const };
 
 describe("Sidebar VFLO renderer", () => {
+	it("reserves the normal prompt and footer rows at the bottom", () => {
+		expect(sidebarHeightForTerminal(40)).toBe(35);
+		expect(sidebarHeightForTerminal(5)).toBe(0);
+	});
+
 	it("renders a subscription limit bar when available", () => {
 		const { lines } = renderSidebar(
 			{
@@ -251,6 +256,122 @@ describe("Sidebar VFLO renderer", () => {
 		const hidden = renderSidebar({ ...snapshot, diff: undefined }, DEFAULT_CONFIG, theme, 44, 80);
 		expect(hidden.lines.some((line) => line.includes("DIFF"))).toBe(false);
 		expect(hidden.panelRanges.diff).toBeUndefined();
+	});
+
+	it("keeps Diff visible when expanding would exceed the available height", () => {
+		const snapshot = {
+			model: { provider: "provider", id: "model", name: "Model" },
+			thinkingLevel: "medium",
+			context: undefined,
+			limits: { buckets: [] },
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			todos: [],
+			subagents: [],
+			diff: {
+				files: Array.from({ length: 8 }, (_, index) => ({
+					path: `src/file-${index + 1}.ts`,
+					added: index,
+					removed: 0,
+					untracked: false,
+				})),
+			},
+		};
+		const height = 35;
+		const collapsed = renderSidebar(snapshot, DEFAULT_CONFIG, theme, 44, height);
+		expect(collapsed.panelRanges.diff).toBeDefined();
+
+		const expanded = renderSidebar(snapshot, DEFAULT_CONFIG, theme, 44, height, { diff: true });
+		const range = expanded.panelRanges.diff;
+		expect(range).toBeDefined();
+		const [start, end] = range ?? [0, 0];
+		const diffLines = expanded.lines.slice(start, end);
+		expect(end).toBeLessThanOrEqual(height);
+		expect(diffLines[0]).toContain("DIFF");
+		expect(diffLines.at(-2)).toContain("╰");
+	});
+
+	it("keeps an expanded Diff inside the available height with a complete panel border", () => {
+		const files = Array.from({ length: 30 }, (_, index) => ({
+			path: `src/file-${index + 1}.ts`,
+			added: index,
+			removed: 0,
+			untracked: false,
+		}));
+		const snapshot = {
+			model: { provider: "provider", id: "model", name: "Model" },
+			thinkingLevel: "medium",
+			context: undefined,
+			limits: { buckets: [] },
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			todos: [],
+			subagents: [],
+			diff: { files },
+		};
+		const height = 24;
+		const { lines, panelRanges } = renderSidebar(snapshot, DEFAULT_CONFIG, theme, 44, height, { diff: true });
+		const range = panelRanges.diff;
+
+		expect(range).toBeDefined();
+		const [start, end] = range ?? [0, 0];
+		const diffLines = lines.slice(start, end);
+		expect(end).toBeLessThanOrEqual(height);
+		expect(diffLines[0]).toContain("DIFF");
+		expect(diffLines.some((line) => line.includes("screen limit"))).toBe(true);
+		expect(diffLines.at(-2)).toContain("╰");
+	});
+
+	it("keeps the Diff border intact with 0–3 body rows available", () => {
+		const snapshot = {
+			model: { provider: "provider", id: "model", name: "Model" },
+			thinkingLevel: "medium",
+			context: undefined,
+			limits: { buckets: [] },
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			todos: [],
+			subagents: [],
+			diff: {
+				files: Array.from({ length: 5 }, (_, index) => ({
+					path: `src/file-${index + 1}.ts`,
+					added: index,
+					removed: 0,
+					untracked: false,
+				})),
+			},
+		};
+		const config = {
+			...DEFAULT_CONFIG,
+			panels: {
+				...DEFAULT_CONFIG.panels,
+				model: false,
+				context: false,
+				limits: false,
+				usage: false,
+				todos: false,
+				subagents: false,
+			},
+		};
+		const budgets = [
+			{ bodyRows: 0, firstFileVisible: false },
+			{ bodyRows: 1, firstFileVisible: false },
+			{ bodyRows: 2, firstFileVisible: false, hiddenFiles: 5 },
+			{ bodyRows: 3, firstFileVisible: true, hiddenFiles: 4 },
+		];
+
+		for (const { bodyRows, firstFileVisible, hiddenFiles } of budgets) {
+			const height = bodyRows + 3;
+			const { lines, panelRanges } = renderSidebar(snapshot, config, theme, 44, height, { diff: true });
+			const range = panelRanges.diff;
+			expect(range).toBeDefined();
+			const [start, end] = range ?? [0, 0];
+			const diffLines = lines.slice(start, end);
+			expect(end).toBe(height);
+			expect(diffLines[0]).toContain("DIFF");
+			expect(diffLines.at(-2)).toContain("╰");
+			expect(diffLines.some((line) => line.includes("file-1.ts"))).toBe(firstFileVisible);
+			if (hiddenFiles !== undefined) {
+				expect(diffLines.some((line) => line.includes(`${hiddenFiles} more (screen limit)`))).toBe(true);
+			}
+		}
 	});
 
 	it("colors diff additions green and removals red, and keeps counts visible for long paths", () => {

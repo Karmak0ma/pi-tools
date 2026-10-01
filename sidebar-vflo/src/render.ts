@@ -218,6 +218,13 @@ function subagentRows(items: readonly SubagentItem[], theme: SidebarTheme, width
 // How many changed files the Diff panel lists while collapsed.
 const DIFF_COLLAPSED_FILES = 5;
 
+// Pi's default one-line editor uses 3 rows and its default footer uses 2.
+// The extension TUI API does not expose the live dock height, so this keeps
+// the sidebar above the normal prompt without relying on Pi's private layout.
+export function sidebarHeightForTerminal(terminalRows: number): number {
+	return Math.max(0, Math.trunc(terminalRows) - 5);
+}
+
 // Shortens a path from the START ("…/src/render.ts"), because the end of a
 // path (the file name) is the part the user needs to recognise the file.
 function fitPathStart(path: string, width: number): string {
@@ -239,9 +246,20 @@ function lineCounts(theme: SidebarTheme, added: number, removed: number): string
 	return `${paint(theme, "success", `+${added}`)} ${paint(theme, "error", `-${removed}`)}`;
 }
 
+function capDiffRows(rows: string[], totalFiles: number, maxRows: number, theme: SidebarTheme): string[] {
+	if (maxRows <= 0) return [];
+	if (rows.length <= maxRows) return rows;
+	if (maxRows === 1) return rows.slice(0, 1);
+	const visibleFiles = Math.max(0, maxRows - 2);
+	return [
+		...rows.slice(0, visibleFiles + 1),
+		paint(theme, "dim", `… ${totalFiles - visibleFiles} more (screen limit)`),
+	];
+}
+
 // Summary line (`3 files  +120 -45`) plus one row per changed file. Collapsed
-// to DIFF_COLLAPSED_FILES rows; a click on the panel shows all files. As for
-// Todos, renderSidebar()'s final height cut still protects a short terminal.
+// to DIFF_COLLAPSED_FILES rows; a click on the panel shows all files. The
+// height fitter caps expanded rows after it knows how much space remains.
 function diffRows(diff: DiffSummary, theme: SidebarTheme, width: number, expanded: boolean): string[] {
 	const { files } = diff;
 	if (files.length === 0) return [paint(theme, "dim", "No changes")];
@@ -284,6 +302,61 @@ interface PanelDefinition {
 	required: boolean;
 }
 
+function fitPanelsToHeight({
+	definitions,
+	safeHeight,
+	contentWidth,
+	panelContentWidth,
+	theme,
+	diff,
+	expandedDiff,
+}: {
+	definitions: PanelDefinition[];
+	safeHeight: number;
+	contentWidth: number;
+	panelContentWidth: number;
+	theme: SidebarTheme;
+	diff: DiffSummary | undefined;
+	expandedDiff: boolean;
+}): { selected: PanelDefinition[]; panelLines: (item: PanelDefinition) => string[] } {
+	const selected = [...definitions];
+	// Panel output is stable during this call. Cache it because fitting may
+	// inspect the same panel more than once before the final frame is composed.
+	const renderedPanels = new Map<PanelDefinition, string[]>();
+	const panelLines = (item: PanelDefinition): string[] => {
+		let lines = renderedPanels.get(item);
+		if (!lines) {
+			lines = panel(item.title, item.rows, contentWidth, theme);
+			renderedPanels.set(item, lines);
+		}
+		return lines;
+	};
+	const renderedLength = (items: readonly PanelDefinition[]) => items.reduce((total, item) => total + panelLines(item).length, 0);
+	while (renderedLength(selected) > safeHeight) {
+		const index = [...selected].reverse().findIndex((item) => !item.required);
+		if (index < 0) break;
+		selected.splice(selected.length - 1 - index, 1);
+	}
+	if (expandedDiff && diff) {
+		const diffPanel = selected.find((item) => item.id === "diff");
+		if (diffPanel) {
+			const diffIndex = selected.indexOf(diffPanel);
+			const heightBeforeDiff = renderedLength(selected.slice(0, diffIndex));
+			// panel() adds a title, a bottom border, and a spacer even with no body rows.
+			const panelChromeRows = panel(diffPanel.title, [], contentWidth, theme).length;
+			const availableRows = safeHeight - heightBeforeDiff - panelChromeRows;
+			if (availableRows < 0) {
+				selected.splice(diffIndex, 1);
+			} else {
+				const rows = diffRows(diff, theme, panelContentWidth, true);
+				diffPanel.rows = capDiffRows(rows, diff.files.length, availableRows, theme);
+				renderedPanels.delete(diffPanel);
+			}
+		}
+	}
+	return { selected, panelLines };
+}
+
 export interface RenderedSidebar {
 	lines: string[];
 	// [startLine, endLine) within `lines`, 0-based, for each clickable panel
@@ -317,33 +390,29 @@ export function renderSidebar(
 		{ id: "usage" as const, title: "Session usage", rows: usageRows(snapshot, theme, panelContentWidth), required: false },
 		{ id: "todos" as const, title: "Todos", rows: todoRows(snapshot.todos, theme, panelContentWidth, expanded.todos === true), required: false },
 		{ id: "subagents" as const, title: "Subagents", rows: subagentRows(snapshot.subagents, theme, panelContentWidth), required: false },
-		// Last in the list, so it is the first panel dropped on a short terminal.
+		// Last in the list, so it is the first panel dropped on a short terminal
+		// while collapsed. Expansion protects it from omission; lower-priority
+		// panels give up space first, then the file rows are capped to fit.
 		// Hidden (not "No changes") when the folder is not a git repository.
 		...(snapshot.diff
-			? [{ id: "diff" as const, title: "Diff", rows: diffRows(snapshot.diff, theme, panelContentWidth, expanded.diff === true), required: false }]
+			? [{
+					id: "diff" as const,
+					title: "Diff",
+					rows: diffRows(snapshot.diff, theme, panelContentWidth, expanded.diff === true),
+					required: expanded.diff === true,
+				}]
 			: []),
 	].filter((definition) => config.panels[definition.id]);
 
-	let selected = [...definitions];
-	// panel() output depends only on (title, rows, contentWidth, theme), all of
-	// which are fixed for the duration of this call. The height-fitting loop used
-	// to re-render every panel on every iteration, and the final flatMap rendered
-	// them all again; memoising makes each panel render exactly once per frame.
-	const renderedPanels = new Map<PanelDefinition, string[]>();
-	const panelLines = (item: PanelDefinition): string[] => {
-		let lines = renderedPanels.get(item);
-		if (!lines) {
-			lines = panel(item.title, item.rows, contentWidth, theme);
-			renderedPanels.set(item, lines);
-		}
-		return lines;
-	};
-	const renderedLength = (items: readonly PanelDefinition[]) => items.reduce((total, item) => total + panelLines(item).length, 0);
-	while (renderedLength(selected) > safeHeight) {
-		const index = [...selected].reverse().findIndex((item) => !item.required);
-		if (index < 0) break;
-		selected.splice(selected.length - 1 - index, 1);
-	}
+	const { selected, panelLines } = fitPanelsToHeight({
+		definitions,
+		safeHeight,
+		contentWidth,
+		panelContentWidth,
+		theme,
+		diff: snapshot.diff,
+		expandedDiff: expanded.diff === true,
+	});
 	const panelRanges: RenderedSidebar["panelRanges"] = {};
 	let cursor = 0;
 	const lines = selected.flatMap((item) => {
