@@ -1,0 +1,14 @@
+{
+  "showSidebarOnStartup": true,
+  "colorPreset": "monokai",
+  "width": 44,
+  "panels": {
+    "model": true,
+    "activity": true,
+    "context": true,
+    "limits": true,
+    "usage": true,
+    "todos": true,
+    "subagents": true
+  }
+}
