@@ -185,6 +185,44 @@ lifecycle and final-output classification. Backend selection lives in
 `src/herdr.ts`; the two implementations share one contract in
 `src/backends.ts`.
 
+### Renaming the agent in the focused Herdr pane
+
+`herdr-plugin/` is a small **Herdr plugin** (not loaded by Pi). It adds one
+action, `vflo.subagents.rename-current-agent`, that renames the agent in the
+Herdr pane that has focus. It works for any agent Herdr recognizes, not only
+subagents spawned by this extension.
+
+Register it once, then bind a key in `~/.config/herdr/config.toml`:
+
+```bash
+herdr plugin link /path/to/subagents-vflo/herdr-plugin
+```
+
+```toml
+[[keys.command]]
+key = "prefix+shift+a"          # free in Herdr's defaults; change as you like
+type = "plugin_action"
+command = "vflo.subagents.rename-current-agent"
+description = "rename agent"
+```
+
+Reload with `herdr server reload-config` (or `prefix+shift+r`). You can also
+run it without a key: `herdr plugin action invoke vflo.subagents.rename-current-agent`.
+
+Behavior:
+
+- The action reads `focused_pane_id` from Herdr's action context and checks it
+  with `herdr agent get`. A pane without an agent shows the Herdr notification
+  "No agent in focused pane" and nothing else happens.
+- Otherwise a small popup opens, prefilled with the current name. **Enter**
+  confirms, **Esc** (or Ctrl+C) cancels, Ctrl+U clears the line.
+- Confirming runs `herdr agent rename <pane-id> <name>`. Herdr validates the
+  name (`[a-z][a-z0-9_-]{0,31}`, unique among live agents); an error stays in
+  the popup so you can fix it. **Empty input clears the name**
+  (`herdr agent rename <pane-id> --clear`), which is Herdr's own "no name" state.
+- The name lives only in Herdr. Any view that shows Herdr agent names (the
+  sidebar, pane borders, other plugins) updates through Herdr's normal state.
+
 ## Built-in Agents
 
 ### `explore`

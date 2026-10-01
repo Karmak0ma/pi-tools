@@ -1,0 +1,46 @@
+# Herdr plugin that ships next to the subagents Pi extension.
+#
+# Why a Herdr plugin and not Pi extension code: the Pi extension only runs
+# inside ONE Pi pane, so it cannot see which Herdr pane the user has focused,
+# and it cannot own a Herdr keybinding. Herdr plugin actions can do both:
+# Herdr runs the action with the focused pane in HERDR_PLUGIN_CONTEXT_JSON,
+# and `[[keys.command]] type = "plugin_action"` binds it to a key.
+#
+# This plugin is deliberately independent of every other plugin (including
+# Herdr Radar). It only calls Herdr's own CLI, so anything that renders agent
+# names from Herdr state picks up the new name through Herdr's normal state.
+#
+# It is NOT loaded by Pi. Register it once with:
+#   herdr plugin link /path/to/subagents-vflo/herdr-plugin
+
+id = "vflo.subagents"
+name = "Subagents (vflo)"
+version = "0.1.0"
+# 0.9.0 is the version this was verified against: popup placement for plugin
+# panes, `agent rename --clear`, and `focused_pane_id` in the action context.
+min_herdr_version = "0.9.0"
+description = "Rename the Herdr agent in the focused pane from a small popup."
+# The popup reads raw keys from a POSIX TTY. Windows was never tested, so it
+# is not declared rather than declared and broken.
+platforms = ["linux", "macos"]
+
+# Step 1 of 2. Bound to a key by the user. It runs without a terminal, checks
+# that the focused pane holds an agent, and then asks Herdr to open the popup.
+# It cannot prompt by itself because action commands get no TTY.
+[[actions]]
+id = "rename-current-agent"
+title = "Rename agent in focused pane"
+description = "Open a small popup to rename the Herdr agent in the focused pane. Empty input clears the name."
+command = ["node", "rename-agent.mjs", "--action"]
+
+# Step 2 of 2. The input UI. Popup placement keeps the tiled layout unchanged
+# and gives the process every key, including Escape. The size is the outer
+# size (border included) and is the smallest that fits the title, the input
+# line, the hint, and one error line without wrapping.
+[[panes]]
+id = "rename-agent"
+title = "Rename agent"
+placement = "popup"
+width = 60
+height = 9
+command = ["node", "rename-agent.mjs", "--popup"]
