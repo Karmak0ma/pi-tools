@@ -48,6 +48,14 @@ export interface AgentConfig {
   name: string;
   description: string;
   tools?: string[];
+  /**
+   * Extension tools the agent uses when the parent session has them, and
+   * silently goes without otherwise. Set only by the built-in agents (not
+   * parseable from frontmatter): `codemode` and `compress` depend on parent
+   * setup (defaultTools, pi-dcp loaded), and a missing optional tool must not
+   * stop explore/build from starting. Declared `tools:` stay strict.
+   */
+  optionalTools?: string[];
   model?: string;
   thinking?: ThinkingLevel;
   systemPrompt: string;

@@ -318,6 +318,9 @@ export interface ChildExtensionResolution {
  */
 let cachedResolution: ChildExtensionResolution | null = null;
 
+/** Matches a pi built-in extension source such as `builtin:codemode`. */
+const BUILTIN_EXTENSION_PATTERN = /^builtin:[a-z0-9._-]+$/i;
+
 export function resolveChildExtensions(): ChildExtensionResolution {
   if (cachedResolution) return cachedResolution;
 
@@ -334,6 +337,15 @@ export function resolveChildExtensions(): ChildExtensionResolution {
 
   for (const entry of config.packages) {
     const source = typeof entry === "string" ? entry : entry.source;
+
+    // pi's own built-in extensions (`builtin:codemode`, `builtin:mcp`, ...)
+    // have no package directory. The child spawn uses --no-extensions, which
+    // turns them off too, and pi accepts `-e builtin:<name>` to load one
+    // again. Pass the entry through verbatim; pi reports an unknown name.
+    if (BUILTIN_EXTENSION_PATTERN.test(source)) {
+      result.paths.push(source);
+      continue;
+    }
 
     // Resolve to filesystem
     const packageDir = resolvePackageDir(source);

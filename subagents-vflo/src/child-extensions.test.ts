@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   getConfiguredAgentSettings,
   resolveExtensionEntryPoints,
+  resetChildExtensionCache,
+  resolveChildExtensions,
   resolvePackageDir,
   warnOnUnresolvedChildExtensions,
 } from "./child-extensions.js";
@@ -182,5 +184,28 @@ describe("resolvePackageDir npm: resolution under the real module system", () =>
     expect(dir).toBe(
       path.join(os.homedir(), ".pi", "agent", "npm", "node_modules", "@henryqw/pi-herdr-rename"),
     );
+  });
+});
+
+describe("resolveChildExtensions builtin entries", () => {
+  // `--no-extensions` also turns off pi's built-in extensions, so a
+  // `builtin:<name>` entry must reach the child as `-e builtin:<name>`
+  // instead of being dropped as an unresolvable package path.
+  it("passes builtin:<name> through verbatim", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-home-"));
+    fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, ".pi", "agent", "subagents-vflo_settings.json"),
+      JSON.stringify({ packages: ["builtin:codemode"] }),
+    );
+    vi.stubEnv("HOME", home);
+    resetChildExtensionCache();
+    try {
+      expect(resolveChildExtensions()).toEqual({ paths: ["builtin:codemode"], unresolved: [] });
+    } finally {
+      vi.unstubAllEnvs();
+      resetChildExtensionCache();
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });

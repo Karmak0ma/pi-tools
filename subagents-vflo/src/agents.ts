@@ -24,11 +24,25 @@ import {
 
 // ─── Built-in Fallback Agents ────────────────────────────────────────────────
 
+/**
+ * Extension tools the built-in agents take from the parent when available.
+ * - codemode: lets the child batch tool calls in one script and filter large
+ *   output before it reaches the model. Needs `builtin:codemode` in the
+ *   settings `packages`, because the child spawn uses --no-extensions, which
+ *   also turns off pi's built-in extensions.
+ * - compress: pi-dcp context compression, so long child runs can shed
+ *   closed work.
+ * Neither tool grants explore new power: codemode scripts can only call tools
+ * the child already has, and compress only rewrites the child's own context.
+ */
+const BUILTIN_OPTIONAL_TOOLS = ["codemode", "compress"];
+
 const BUILTIN_AGENTS: Array<AgentConfig & { name: BuiltinAgentName }> = [
   {
     name: "explore",
     description: "Fast read-only codebase reconnaissance",
     tools: ["read", "grep", "find", "ls", "bash"],
+    optionalTools: [...BUILTIN_OPTIONAL_TOOLS],
     model: "openai-codex/gpt-5.6-luna",
     thinking: "medium",
     systemPrompt: `You are an exploration agent. Your job is to quickly scan and understand codebases.
@@ -46,6 +60,7 @@ Rules:
     name: "build",
     description: "General-purpose agent with coding capabilities",
     tools: [...DEFAULT_BUILD_TOOLS],
+    optionalTools: [...BUILTIN_OPTIONAL_TOOLS],
     model: "openai-codex/gpt-5.6-luna",
     thinking: "xhigh",
     systemPrompt: `You are a build agent. Your job is to implement code changes.

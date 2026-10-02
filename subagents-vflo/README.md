@@ -75,6 +75,8 @@ Built-in tools a child may declare:
 
 Extension tools (including `subagent` itself, for recursive dispatch) are usable when the providing package is listed in `subagents-vflo_settings.json` **and** the agent declares the tool in `tools:`. For example, an orchestrator agent declares `tools: read, bash, edit, write, subagent` and the settings file lists this extension — the child then gets a working `subagent` tool.
 
+pi's own built-in extensions (such as `codemode`) are turned off by `--no-extensions` too. List them in `packages` as `builtin:<name>` (for example `"builtin:codemode"`); the child then gets `-e builtin:<name>`.
+
 Two failure modes are distinguished at spawn time:
 
 - Declaring a tool that is neither a built-in nor active in the parent session is a hard error; the child is not spawned.
@@ -228,12 +230,17 @@ Behavior:
 ### `explore`
 Fast read-only codebase reconnaissance. Its bundled model is `openai-codex/gpt-5.6-luna`; its bundled thinking level is `medium`.
 
-**Tools:** `read`, `bash`, `find`, `ls`, `grep`
+**Tools:** `read`, `bash`, `find`, `ls`, `grep`, plus optional `codemode` and `compress`
 
 ### `build`
 General-purpose agent with full coding capabilities. Its bundled model is `openai-codex/gpt-5.6-luna`; its bundled thinking level is `xhigh`.
 
-**Tools:** `read`, `bash`, `edit`, `write`
+**Tools:** `read`, `bash`, `edit`, `write`, plus optional `codemode` and `compress`
+
+Optional tools are added only when they are active in the parent session; a
+missing one is dropped silently instead of stopping the spawn. The child
+also needs the providing extension: `builtin:codemode` for `codemode` and the
+pi-dcp package for `compress`, both listed in `packages`.
 
 You can override the built-in agents' models and thinking levels in
 `~/.pi/agent/subagents-vflo_settings.json`:

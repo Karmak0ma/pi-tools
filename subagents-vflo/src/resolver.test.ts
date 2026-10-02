@@ -125,6 +125,36 @@ describe("resolveTools declared tools", () => {
   });
 });
 
+describe("resolveTools optional tools", () => {
+  // Built-in explore/build list codemode and compress as optional. The parent
+  // may lack either (codemode is off unless defaultTools enables it), and that
+  // must not stop the built-in agents from starting.
+  it("adds optional tools the parent has and silently drops the rest", () => {
+    const agent = makeAgent({ tools: ["read", "bash"], optionalTools: ["codemode", "compress"] });
+
+    const result = resolveTools(agent, ["read", "bash", "compress"]);
+
+    expect(result.error).toBeUndefined();
+    expect(result.tools).toEqual(["read", "bash", "compress"]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("warns when an added optional tool has no backing extension in the child", () => {
+    // codemode reports its source as "builtin:codemode"; without that entry
+    // in the settings packages the child has no codemode tool.
+    const agent = makeAgent({ tools: ["read"], optionalTools: ["codemode"] });
+    const options: ToolResolutionOptions = {
+      extensionToolSources: new Map([["codemode", "builtin:codemode"]]),
+      childExtensionPaths: [],
+    };
+
+    expect(resolveTools(agent, ["read", "codemode"], options).warnings).toHaveLength(1);
+    expect(
+      resolveTools(agent, ["read", "codemode"], { ...options, childExtensionPaths: ["builtin:codemode"] }),
+    ).toEqual({ tools: ["read", "codemode"], warnings: [] });
+  });
+});
+
 describe("resolveTools inherited tools", () => {
   it("inherits only built-in tools from the parent, never extension tools", () => {
     // Inheritance stays least-privilege: agents that declare no tools must

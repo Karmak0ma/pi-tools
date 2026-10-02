@@ -117,6 +117,9 @@ export interface ToolResolutionOptions {
  *   extension is not loaded into the child only warns: the child still starts,
  *   but the model cannot call a tool that does not exist there.
  *
+ * Optional tools (`agent.optionalTools`, built-in agents only) are appended
+ * when the parent has them active and dropped silently when it does not. They go through the same child-backing check as declared tools.
+ *
  * When the agent declares no tools, only built-in tools are inherited from the
  * parent. Extension tools stay off unless an agent explicitly declares them,
  * so default and specialist agents keep least-privilege toolsets and their
@@ -144,9 +147,19 @@ export function resolveTools(
       };
     }
 
-    warnOnUnbackedExtensionTools(agent.tools, options, warnings);
+    // Optional tools are soft: a parent without codemode (not in its
+    // defaultTools) or without pi-dcp must still be able to run explore and
+    // build. Passing a name the parent lacks would hard-fail the check above.
+    // Drop missing optional tools silently: a parent without codemode is a
+    // normal setup, and a warning on every spawn would only be noise.
+    const optional = (agent.optionalTools ?? []).filter(
+      (tool) => !agent.tools!.includes(tool) && parentActiveToolNames.includes(tool),
+    );
+    const tools = [...agent.tools, ...optional];
 
-    return { tools: [...agent.tools], warnings };
+    warnOnUnbackedExtensionTools(tools, options, warnings);
+
+    return { tools, warnings };
   }
 
   // Inherit only built-in tools from the parent
