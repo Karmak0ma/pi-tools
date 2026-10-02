@@ -20,42 +20,47 @@ describe("getConfiguredAgentSettings", () => {
     dir = undefined;
   });
 
-  it("reads model and thinking defaults for both built-in agents", () => {
+  it("reads model, thinking and tools defaults for both built-in agents", () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-models-"));
     const configPath = path.join(dir, "settings.json");
     fs.writeFileSync(
       configPath,
       JSON.stringify({
         packages: ["npm:provider-extension"],
-        models: { explore: " provider/explore ", build: "provider/build", reviewer: "provider/ignored" },
-        thinking: { explore: "medium", build: "max", reviewer: "high" },
+        default_agents: {
+          explore: { model: " provider/explore ", thinking: "medium" },
+          build: { model: "provider/build", thinking: "max", tools: ["read", " ask_advisor ", "read"] },
+          reviewer: { model: "provider/ignored" },
+        },
       }),
     );
 
     expect(getConfiguredAgentSettings(configPath)).toEqual({
-      models: { explore: "provider/explore", build: "provider/build" },
-      thinking: { explore: "medium", build: "max" },
+      explore: { model: "provider/explore", thinking: "medium" },
+      build: { model: "provider/build", thinking: "max", tools: ["read", "ask_advisor"] },
     });
   });
 
-  it("ignores missing, malformed, and invalid settings", () => {
+  it("ignores missing, malformed, and invalid settings field by field", () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-models-"));
     const configPath = path.join(dir, "settings.json");
 
-    const emptySettings = { models: {}, thinking: {} };
-    expect(getConfiguredAgentSettings(configPath)).toEqual(emptySettings);
+    expect(getConfiguredAgentSettings(configPath)).toEqual({});
     fs.writeFileSync(configPath, "not json");
-    expect(getConfiguredAgentSettings(configPath)).toEqual(emptySettings);
+    expect(getConfiguredAgentSettings(configPath)).toEqual({});
+    fs.writeFileSync(configPath, JSON.stringify({ default_agents: [] }));
+    expect(getConfiguredAgentSettings(configPath)).toEqual({});
     fs.writeFileSync(
       configPath,
-      JSON.stringify({ models: { explore: "  ", build: 42 }, thinking: { explore: " ", build: 42 } }),
+      JSON.stringify({
+        default_agents: {
+          explore: { model: "  ", thinking: "invalid", tools: [] },
+          build: { model: 42, thinking: "high", tools: "read" },
+        },
+      }),
     );
-    expect(getConfiguredAgentSettings(configPath)).toEqual(emptySettings);
-    fs.writeFileSync(
-      configPath,
-      JSON.stringify({ models: { explore: "  ", build: 42 }, thinking: { explore: "invalid", build: 42 } }),
-    );
-    expect(getConfiguredAgentSettings(configPath)).toEqual(emptySettings);
+    // The valid build thinking level survives its invalid neighbours.
+    expect(getConfiguredAgentSettings(configPath)).toEqual({ build: { thinking: "high" } });
   });
 });
 

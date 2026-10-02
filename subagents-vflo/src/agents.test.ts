@@ -5,8 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mockSettings = vi.hoisted(() => ({
   agentRoot: "",
-  models: {} as Record<string, string>,
-  thinking: {} as Record<string, string>,
+  defaults: {} as Record<string, { model?: string; thinking?: string; tools?: string[] }>,
 }));
 
 // Keep these tests focused on discovery precedence. The fake parser supplies
@@ -30,10 +29,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
   },
 }));
 vi.mock("./child-extensions.js", () => ({
-  getConfiguredAgentSettings: () => ({
-    models: mockSettings.models,
-    thinking: mockSettings.thinking,
-  }),
+  getConfiguredAgentSettings: () => mockSettings.defaults,
 }));
 
 import { discoverAgents, findAgent } from "./agents.js";
@@ -45,18 +41,16 @@ describe("discoverAgents built-in settings", () => {
     if (cwd) fs.rmSync(cwd, { recursive: true, force: true });
     cwd = undefined;
     mockSettings.agentRoot = "";
-    mockSettings.models = {};
-    mockSettings.thinking = {};
+    mockSettings.defaults = {};
   });
 
   it("applies configured model and thinking defaults to Explore and Build", () => {
     cwd = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-agent-settings-"));
     mockSettings.agentRoot = path.join(cwd, "user-agent-home");
-    mockSettings.models = {
-      explore: "openai-codex/gpt-6-luna",
-      build: "openai-codex/gpt-6-luna",
+    mockSettings.defaults = {
+      explore: { model: "openai-codex/gpt-6-luna", thinking: "medium" },
+      build: { model: "openai-codex/gpt-6-luna", thinking: "max" },
     };
-    mockSettings.thinking = { explore: "medium", build: "max" };
 
     const { agents } = discoverAgents(cwd);
 
@@ -69,6 +63,24 @@ describe("discoverAgents built-in settings", () => {
       model: "openai-codex/gpt-6-luna",
       thinking: "max",
       source: "builtin",
+    });
+  });
+
+  it("replaces the bundled tools and optional tools with configured tools", () => {
+    // Settings tools are the user's explicit choice, so they also drop the
+    // soft optional list; resolveTools() then checks them strictly.
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-agent-settings-"));
+    mockSettings.agentRoot = path.join(cwd, "user-agent-home");
+    mockSettings.defaults = { build: { tools: ["read", "ask_advisor"] } };
+
+    const { agents } = discoverAgents(cwd);
+
+    const build = findAgent(agents, "build");
+    expect(build?.tools).toEqual(["read", "ask_advisor"]);
+    expect(build?.optionalTools).toBeUndefined();
+    expect(findAgent(agents, "explore")).toMatchObject({
+      tools: ["read", "grep", "find", "ls", "bash"],
+      optionalTools: ["compress"],
     });
   });
 
@@ -93,11 +105,10 @@ describe("discoverAgents built-in settings", () => {
   it("lets user and project agent files override configured built-in defaults", () => {
     cwd = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-agent-settings-"));
     mockSettings.agentRoot = path.join(cwd, "user-agent-home");
-    mockSettings.models = {
-      explore: "openai-codex/gpt-6-luna",
-      build: "openai-codex/gpt-6-luna",
+    mockSettings.defaults = {
+      explore: { model: "openai-codex/gpt-6-luna", thinking: "medium" },
+      build: { model: "openai-codex/gpt-6-luna", thinking: "max" },
     };
-    mockSettings.thinking = { explore: "medium", build: "max" };
 
     const userAgentsDir = path.join(mockSettings.agentRoot, "agents");
     fs.mkdirSync(userAgentsDir, { recursive: true });

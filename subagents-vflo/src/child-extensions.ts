@@ -5,7 +5,7 @@
  *
  * Strategy: read a user-provided config file (subagents-vflo_settings.json) that
  * explicitly lists the extensions the user wants subagents to have access to
- * and optional model/thinking defaults for built-in agents. The packages format
+ * and optional model/thinking/tools defaults for built-in agents. The packages format
  * matches ~/.pi/agent/settings.json (packages array).
  *
  * This gives users full control over what runs in subagent child processes
@@ -17,8 +17,8 @@ import * as path from "node:path";
 import * as os from "node:os";
 import {
   THINKING_LEVELS,
-  type BuiltinAgentModelSettings,
-  type BuiltinAgentThinkingSettings,
+  type BuiltinAgentDefaults,
+  type BuiltinAgentSettings,
   type ThinkingLevel,
 } from "./types.js";
 
@@ -33,10 +33,11 @@ const CONFIG_FILENAME = "subagents-vflo_settings.json";
 interface SubagentSettings {
   /** Extensions to load in child subagent processes (same format as pi settings.packages) */
   packages?: Array<string | { source: string; extensions?: string[] }>;
-  /** Default models for the built-in agents. */
-  models?: Record<string, unknown>;
-  /** Default thinking levels for the built-in agents. */
-  thinking?: Record<string, unknown>;
+  /**
+   * Per built-in agent overrides: `{ build: { model, thinking, tools } }`.
+   * One block per agent keeps everything about an agent in one place.
+   */
+  default_agents?: Record<string, unknown>;
 }
 
 function getConfigPath(): string {
@@ -52,38 +53,46 @@ function readConfig(configPath = getConfigPath()): SubagentSettings | null {
   }
 }
 
+/** True for a plain JSON object (not null, not an array). */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /**
- * Read model and thinking defaults for built-in agents from the shared settings.
+ * Read the `default_agents` overrides for the built-in agents.
  *
- * Keep these separate from child extension resolution: models and thinking
- * levels are applied per delegated task, while extension package paths are
- * cached for the parent session. Ignore malformed values so a bad setting does
- * not break dispatch.
+ * Keep these separate from child extension resolution: agent defaults are
+ * applied per delegated task, while extension package paths are cached for
+ * the parent session. Ignore malformed values field by field, so one bad
+ * setting does not break dispatch or drop the other, valid fields.
  */
-export function getConfiguredAgentSettings(configPath = getConfigPath()): {
-  models: BuiltinAgentModelSettings;
-  thinking: BuiltinAgentThinkingSettings;
-} {
-  const settings = readConfig(configPath);
-  const models = settings?.models;
-  const thinking = settings?.thinking;
-  const configured: {
-    models: BuiltinAgentModelSettings;
-    thinking: BuiltinAgentThinkingSettings;
-  } = { models: {}, thinking: {} };
+export function getConfiguredAgentSettings(configPath = getConfigPath()): BuiltinAgentSettings {
+  const agents = readConfig(configPath)?.default_agents;
+  const configured: BuiltinAgentSettings = {};
+  if (!isRecord(agents)) return configured;
 
   for (const name of ["explore", "build"] as const) {
-    const model = models && typeof models === "object" && !Array.isArray(models)
-      ? models[name]
-      : undefined;
-    if (typeof model === "string" && model.trim()) configured.models[name] = model.trim();
+    const entry = agents[name];
+    if (!isRecord(entry)) continue;
+    const defaults: BuiltinAgentDefaults = {};
 
-    const level = thinking && typeof thinking === "object" && !Array.isArray(thinking)
-      ? thinking[name]
-      : undefined;
-    if (typeof level === "string" && THINKING_LEVELS.includes(level as ThinkingLevel)) {
-      configured.thinking[name] = level as ThinkingLevel;
+    if (typeof entry.model === "string" && entry.model.trim()) defaults.model = entry.model.trim();
+
+    if (typeof entry.thinking === "string" && THINKING_LEVELS.includes(entry.thinking as ThinkingLevel)) {
+      defaults.thinking = entry.thinking as ThinkingLevel;
     }
+
+    // An empty or malformed list keeps the bundled tools. An empty list would
+    // otherwise give a child with no tools at all, which is never useful.
+    if (Array.isArray(entry.tools)) {
+      const tools = entry.tools
+        .filter((tool): tool is string => typeof tool === "string")
+        .map((tool) => tool.trim())
+        .filter(Boolean);
+      if (tools.length > 0) defaults.tools = [...new Set(tools)];
+    }
+
+    if (Object.keys(defaults).length > 0) configured[name] = defaults;
   }
 
   return configured;

@@ -175,11 +175,19 @@ export interface AgentDiscoveryResult {
  */
 export function discoverAgents(cwd: string): AgentDiscoveryResult {
   const configured = getConfiguredAgentSettings();
-  const builtInAgents = BUILTIN_AGENTS.map((agent) => ({
-    ...agent,
-    model: configured.models[agent.name] ?? agent.model,
-    thinking: configured.thinking[agent.name] ?? agent.thinking,
-  }));
+  const builtInAgents = BUILTIN_AGENTS.map((agent) => {
+    const defaults = configured[agent.name] ?? {};
+    return {
+      ...agent,
+      model: defaults.model ?? agent.model,
+      thinking: defaults.thinking ?? agent.thinking,
+      // A settings tool list replaces the bundled list and its soft optional
+      // tools. The user chose those tools on purpose, so they are checked
+      // strictly like an agent file's tools: a typo or a missing extension
+      // fails the spawn instead of silently giving the child fewer tools.
+      ...(defaults.tools ? { tools: defaults.tools, optionalTools: undefined } : {}),
+    };
+  });
   const userDir = path.join(getAgentDir(), "agents");
   const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 
@@ -189,8 +197,8 @@ export function discoverAgents(cwd: string): AgentDiscoveryResult {
   // Build agent map with precedence: project > user > builtin
   const agentMap = new Map<string, AgentConfig>();
 
-  // Start with builtins (lowest priority). Settings can change their model
-  // and thinking level without replacing their tools or prompts.
+  // Start with builtins (lowest priority). Settings can change their model,
+  // thinking level and tools without replacing their prompts.
   for (const agent of builtInAgents) {
     agentMap.set(agent.name, agent);
   }

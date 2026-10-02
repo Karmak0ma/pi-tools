@@ -42,7 +42,22 @@ export const DEFAULT_BUILD_TOOLS: AllowedChildBuiltin[] = ["read", "bash", "edit
 export type AgentSource = "builtin" | "user" | "project";
 
 export type BuiltinAgentName = "explore" | "build";
-export type BuiltinAgentModelSettings = Partial<Record<BuiltinAgentName, string>>;
+
+/**
+ * Settings-file overrides for one built-in agent (`default_agents.<name>`).
+ * Each field is optional; an omitted field keeps the bundled value.
+ */
+export interface BuiltinAgentDefaults {
+  model?: string;
+  thinking?: ThinkingLevel;
+  /**
+   * Replaces the bundled tool list, including the soft optional tools. Checked
+   * like an agent file's `tools:` list, so a tool the parent does not have
+   * stops the spawn with a clear error instead of being dropped.
+   */
+  tools?: string[];
+}
+export type BuiltinAgentSettings = Partial<Record<BuiltinAgentName, BuiltinAgentDefaults>>;
 
 export interface AgentConfig {
   name: string;
@@ -51,9 +66,9 @@ export interface AgentConfig {
   /**
    * Extension tools the agent uses when the parent session has them, and
    * silently goes without otherwise. Set only by the built-in agents (not
-   * parseable from frontmatter): `codemode` and `compress` depend on parent
-   * setup (defaultTools, pi-dcp loaded), and a missing optional tool must not
-   * stop explore/build from starting. Declared `tools:` stay strict.
+   * parseable from frontmatter): `compress` depends on pi-dcp being loaded,
+   * and a missing optional tool must not stop explore/build from starting.
+   * Declared `tools:` stay strict.
    */
   optionalTools?: string[];
   model?: string;
@@ -72,7 +87,6 @@ export interface AgentConfig {
  */
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
-export type BuiltinAgentThinkingSettings = Partial<Record<BuiltinAgentName, ThinkingLevel>>;
 
 // ─── Task Types ──────────────────────────────────────────────────────────────
 

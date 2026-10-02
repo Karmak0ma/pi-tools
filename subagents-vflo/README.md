@@ -244,29 +244,38 @@ missing one is dropped silently instead of stopping the spawn. The child
 also needs the providing extension: the pi-dcp package for `compress`, listed
 in `packages`.
 
-You can override the built-in agents' models and thinking levels in
-`~/.pi/agent/subagents-vflo_settings.json`:
+You can override the built-in agents' model, thinking level and tools in
+`~/.pi/agent/subagents-vflo_settings.json`, one block per agent under
+`default_agents`:
 
 ```json
 {
-  "models": {
-    "explore": "openai-codex/gpt-5.6-luna",
-    "build": "openai-codex/gpt-5.6-luna"
-  },
-  "thinking": {
-    "explore": "medium",
-    "build": "max"
+  "default_agents": {
+    "explore": { "model": "openai-codex/gpt-5.6-luna", "thinking": "medium" },
+    "build": {
+      "model": "openai-codex/gpt-5.6-luna",
+      "thinking": "max",
+      "tools": ["read", "bash", "edit", "write", "compress", "ask_advisor"]
+    }
   }
 }
 ```
 
-Use an exact model ID available in the parent pi session. Omit a model key to
-keep that agent's bundled model. Valid thinking levels are `off`, `minimal`,
-`low`, `medium`, `high`, `xhigh`, and `max`. `max` is model-specific; Pi clamps
-an unsupported level to one the selected model supports. Omit a thinking key to
-keep that agent's bundled thinking level. Invalid or blank values are ignored.
-These settings change only built-in defaults; a user or project agent named
-`explore` or `build` still overrides the matching built-in agent.
+Every field is optional; an omitted field keeps the bundled value.
+
+- `model`: an exact model ID available in the parent pi session.
+- `thinking`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
+  `max` is model-specific; Pi clamps an unsupported level to one the selected
+  model supports.
+- `tools`: replaces the bundled tool list **and** its optional tools. It is
+  checked like an agent file's `tools:` list: each tool must be a built-in
+  tool or active in the parent session, or the spawn fails with an error. An
+  extension tool also needs its extension in `packages`. `codemode` is still
+  added when the parent has it.
+
+Invalid or blank values are ignored one field at a time. These settings change
+only built-in defaults; a user or project agent named `explore` or `build`
+still overrides the matching built-in agent.
 
 ## Custom Agents
 
@@ -351,7 +360,7 @@ The inspector shows:
 
 ## Model Resolution
 
-Models are resolved against the models that are actually available in the current pi session. Set built-in Explore and Build defaults with the `models` object in `~/.pi/agent/subagents-vflo_settings.json`; this can be in the same file as `packages`, which lists provider or tool extensions loaded by child processes. For example, add `npm:opencode-pi` to `packages` when using the `opencode-cli` models. The `packages` list also decides which extension tools children can use — see [Allowed Tools](#allowed-tools).
+Models are resolved against the models that are actually available in the current pi session. Set built-in Explore and Build defaults with the `default_agents` object in `~/.pi/agent/subagents-vflo_settings.json`; this can be in the same file as `packages`, which lists provider or tool extensions loaded by child processes. For example, add `npm:opencode-pi` to `packages` when using the `opencode-cli` models. The `packages` list also decides which extension tools children can use — see [Allowed Tools](#allowed-tools).
 
 Resolution order is:
 
