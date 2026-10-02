@@ -126,32 +126,41 @@ describe("resolveTools declared tools", () => {
 });
 
 describe("resolveTools optional tools", () => {
-  // Built-in explore/build list codemode and compress as optional. The parent
-  // may lack either (codemode is off unless defaultTools enables it), and that
+  // Built-in explore/build list compress as optional. A parent without pi-dcp
   // must not stop the built-in agents from starting.
   it("adds optional tools the parent has and silently drops the rest", () => {
-    const agent = makeAgent({ tools: ["read", "bash"], optionalTools: ["codemode", "compress"] });
+    const agent = makeAgent({ tools: ["read", "bash"], optionalTools: ["compress", "todo"] });
 
     const result = resolveTools(agent, ["read", "bash", "compress"]);
 
-    expect(result.error).toBeUndefined();
-    expect(result.tools).toEqual(["read", "bash", "compress"]);
-    expect(result.warnings).toEqual([]);
+    expect(result).toEqual({ tools: ["read", "bash", "compress"], warnings: [] });
+  });
+});
+
+describe("resolveTools codemode follows the parent", () => {
+  // Codemode is given to every agent whose parent has it, so agent files do
+  // not opt in one by one. Its source is "builtin:codemode", which the spawn
+  // loads itself, so no unbacked-tool warning even with an empty child list.
+  const options: ToolResolutionOptions = {
+    extensionToolSources: new Map([["codemode", "builtin:codemode"]]),
+    childExtensionPaths: [],
+  };
+
+  it("adds codemode to a restricted agent and keeps the rest of its allowlist", () => {
+    const agent = makeAgent({ tools: ["read"] });
+
+    expect(resolveTools(agent, ["read", "bash", "todo", "codemode"], options)).toEqual({
+      tools: ["read", "codemode"],
+      warnings: [],
+    });
   });
 
-  it("warns when an added optional tool has no backing extension in the child", () => {
-    // codemode reports its source as "builtin:codemode"; without that entry
-    // in the settings packages the child has no codemode tool.
-    const agent = makeAgent({ tools: ["read"], optionalTools: ["codemode"] });
-    const options: ToolResolutionOptions = {
-      extensionToolSources: new Map([["codemode", "builtin:codemode"]]),
-      childExtensionPaths: [],
-    };
+  it("adds codemode to agents that inherit built-ins", () => {
+    expect(resolveTools(makeAgent(), ["read", "todo", "codemode"]).tools).toEqual(["read", "codemode"]);
+  });
 
-    expect(resolveTools(agent, ["read", "codemode"], options).warnings).toHaveLength(1);
-    expect(
-      resolveTools(agent, ["read", "codemode"], { ...options, childExtensionPaths: ["builtin:codemode"] }),
-    ).toEqual({ tools: ["read", "codemode"], warnings: [] });
+  it("leaves codemode out when the parent does not have it", () => {
+    expect(resolveTools(makeAgent({ tools: ["read"] }), ["read"]).tools).toEqual(["read"]);
   });
 });
 

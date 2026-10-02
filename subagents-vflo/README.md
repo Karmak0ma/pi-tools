@@ -75,7 +75,9 @@ Built-in tools a child may declare:
 
 Extension tools (including `subagent` itself, for recursive dispatch) are usable when the providing package is listed in `subagents-vflo_settings.json` **and** the agent declares the tool in `tools:`. For example, an orchestrator agent declares `tools: read, bash, edit, write, subagent` and the settings file lists this extension — the child then gets a working `subagent` tool.
 
-pi's own built-in extensions (such as `codemode`) are turned off by `--no-extensions` too. List them in `packages` as `builtin:<name>` (for example `"builtin:codemode"`); the child then gets `-e builtin:<name>`.
+pi's own built-in extensions are turned off by `--no-extensions` too. List them in `packages` as `builtin:<name>`; the child then gets `-e builtin:<name>`.
+
+**Codemode follows the parent.** When the parent session has `codemode` active, every child gets it, whatever its `tools:` list says, and the extension loads `builtin:codemode` into the child itself. Codemode scripts can only call tools that are already active in the child, so the per-agent allowlist still limits what the child can do. Because the child then has codemode active, its own subagents get it the same way.
 
 Two failure modes are distinguished at spawn time:
 
@@ -230,17 +232,17 @@ Behavior:
 ### `explore`
 Fast read-only codebase reconnaissance. Its bundled model is `openai-codex/gpt-5.6-luna`; its bundled thinking level is `medium`.
 
-**Tools:** `read`, `bash`, `find`, `ls`, `grep`, plus optional `codemode` and `compress`
+**Tools:** `read`, `bash`, `find`, `ls`, `grep`, plus optional `compress` (and `codemode` when the parent has it)
 
 ### `build`
 General-purpose agent with full coding capabilities. Its bundled model is `openai-codex/gpt-5.6-luna`; its bundled thinking level is `xhigh`.
 
-**Tools:** `read`, `bash`, `edit`, `write`, plus optional `codemode` and `compress`
+**Tools:** `read`, `bash`, `edit`, `write`, plus optional `compress` (and `codemode` when the parent has it)
 
 Optional tools are added only when they are active in the parent session; a
 missing one is dropped silently instead of stopping the spawn. The child
-also needs the providing extension: `builtin:codemode` for `codemode` and the
-pi-dcp package for `compress`, both listed in `packages`.
+also needs the providing extension: the pi-dcp package for `compress`, listed
+in `packages`.
 
 You can override the built-in agents' models and thinking levels in
 `~/.pi/agent/subagents-vflo_settings.json`:

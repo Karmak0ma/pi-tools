@@ -6,6 +6,7 @@ import {
   getConfiguredAgentSettings,
   resolveExtensionEntryPoints,
   resetChildExtensionCache,
+  withRequiredChildExtensions,
   resolveChildExtensions,
   resolvePackageDir,
   warnOnUnresolvedChildExtensions,
@@ -207,5 +208,18 @@ describe("resolveChildExtensions builtin entries", () => {
       resetChildExtensionCache();
       fs.rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe("withRequiredChildExtensions", () => {
+  // --no-extensions turns off builtin:codemode, so a child given the codemode
+  // tool must also get the extension, exactly once.
+  it("loads builtin:codemode only when the child has the codemode tool", () => {
+    expect(withRequiredChildExtensions(["/ext/a.ts"], ["read", "codemode"])).toEqual([
+      "/ext/a.ts",
+      "builtin:codemode",
+    ]);
+    expect(withRequiredChildExtensions(["builtin:codemode"], ["codemode"])).toEqual(["builtin:codemode"]);
+    expect(withRequiredChildExtensions(undefined, ["read"])).toEqual([]);
   });
 });

@@ -25,6 +25,7 @@
 
 import type { AgentConfig } from "./types.js";
 import { findAgent, formatAgentList } from "./agents.js";
+import { withRequiredChildExtensions } from "./child-extensions.js";
 import type { SubagentBackend } from "./backends.js";
 import type { ChildExtensionUIBroker, ChildUIDialogPresenter, ChildUIRequestOwner } from "./extension-ui-broker.js";
 import type { ChildRunResult } from "./runner.js";
@@ -313,7 +314,12 @@ export class SubagentTaskManager {
         agentPrompt: agent.systemPrompt,
         taskText: task.task,
         thinking: instance.thinking,
-        childExtensionPaths: context.toolResolutionOptions.childExtensionPaths,
+        // Both backends (RPC and Herdr) receive the same list, so the
+        // auto-loaded builtin:codemode is added once, here.
+        childExtensionPaths: withRequiredChildExtensions(
+          context.toolResolutionOptions.childExtensionPaths,
+          toolResult.tools,
+        ),
         parentSessionDir: context.parentSessionDir,
         // The task's own lifetime signal (see cancel()), not a tool call's.
         signal,

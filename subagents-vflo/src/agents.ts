@@ -26,16 +26,12 @@ import {
 
 /**
  * Extension tools the built-in agents take from the parent when available.
- * - codemode: lets the child batch tool calls in one script and filter large
- *   output before it reaches the model. Needs `builtin:codemode` in the
- *   settings `packages`, because the child spawn uses --no-extensions, which
- *   also turns off pi's built-in extensions.
  * - compress: pi-dcp context compression, so long child runs can shed
- *   closed work.
- * Neither tool grants explore new power: codemode scripts can only call tools
- * the child already has, and compress only rewrites the child's own context.
+ *   closed work. It only rewrites the child's own context.
+ * codemode is not listed: resolveTools() gives it to every agent whose parent
+ * has it active.
  */
-const BUILTIN_OPTIONAL_TOOLS = ["codemode", "compress"];
+const BUILTIN_OPTIONAL_TOOLS = ["compress"];
 
 const BUILTIN_AGENTS: Array<AgentConfig & { name: BuiltinAgentName }> = [
   {

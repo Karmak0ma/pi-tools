@@ -7,7 +7,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getChildExtensionConfigPath, resolveChildExtensions } from "./child-extensions.js";
+import { CODEMODE_TOOL, getChildExtensionConfigPath, resolveChildExtensions } from "./child-extensions.js";
 import {
   ALLOWED_CHILD_BUILTINS,
   type AgentConfig,
@@ -130,6 +130,28 @@ export function resolveTools(
   parentActiveToolNames: string[],
   options: ToolResolutionOptions = {},
 ): ToolResolutionResult {
+  const result = resolveAgentTools(agent, parentActiveToolNames, options);
+  if (result.error) return result;
+
+  // Codemode follows the parent, for every agent and whatever its tools:
+  // list says. It grants no new power (a script can only call tools already
+  // active in the child), so the per-agent allowlist still decides what the
+  // child can do. Agent files do not have to opt in one by one. The child then
+  // has codemode active too, so its own subagents (grandchildren) inherit it
+  // through this same rule. The spawn loads `builtin:codemode` to back it; see
+  // withRequiredChildExtensions().
+  if (parentActiveToolNames.includes(CODEMODE_TOOL) && !result.tools.includes(CODEMODE_TOOL)) {
+    return { ...result, tools: [...result.tools, CODEMODE_TOOL] };
+  }
+  return result;
+}
+
+/** Per-agent tool resolution, before the parent-inherited codemode rule. */
+function resolveAgentTools(
+  agent: AgentConfig,
+  parentActiveToolNames: string[],
+  options: ToolResolutionOptions,
+): ToolResolutionResult {
   const warnings: string[] = [];
 
   // If agent declares tools explicitly, validate them
@@ -147,11 +169,10 @@ export function resolveTools(
       };
     }
 
-    // Optional tools are soft: a parent without codemode (not in its
-    // defaultTools) or without pi-dcp must still be able to run explore and
-    // build. Passing a name the parent lacks would hard-fail the check above.
-    // Drop missing optional tools silently: a parent without codemode is a
-    // normal setup, and a warning on every spawn would only be noise.
+    // Optional tools are soft: a parent without pi-dcp must still be able to
+    // run explore and build. Passing a name the parent lacks would hard-fail
+    // the check above. Drop missing optional tools silently: that is a normal
+    // setup, and a warning on every spawn would only be noise.
     const optional = (agent.optionalTools ?? []).filter(
       (tool) => !agent.tools!.includes(tool) && parentActiveToolNames.includes(tool),
     );
@@ -206,6 +227,8 @@ function warnOnUnbackedExtensionTools(
 
   for (const tool of declaredTools) {
     if (ALLOWED_CHILD_BUILTINS.includes(tool as AllowedChildBuiltin)) continue;
+    // The spawn always loads builtin:codemode when codemode is in --tools.
+    if (tool === CODEMODE_TOOL) continue;
     const sourcePath = options.extensionToolSources.get(tool);
     if (sourcePath && !childPaths.includes(canonicalEntryPath(sourcePath))) {
       warnings.push(

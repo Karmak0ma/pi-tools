@@ -321,6 +321,31 @@ let cachedResolution: ChildExtensionResolution | null = null;
 /** Matches a pi built-in extension source such as `builtin:codemode`. */
 const BUILTIN_EXTENSION_PATTERN = /^builtin:[a-z0-9._-]+$/i;
 
+/** pi's codemode tool and the built-in extension that registers it. */
+export const CODEMODE_TOOL = "codemode";
+const CODEMODE_EXTENSION = "builtin:codemode";
+
+/**
+ * Add the extensions a child needs for its resolved tools, on top of the
+ * configured ones.
+ *
+ * resolveTools() gives codemode to every child whose parent has it. The child
+ * spawn uses --no-extensions, which also turns off pi's built-in extensions,
+ * so `builtin:codemode` must be loaded explicitly. Doing it here, from the
+ * tool list, means the user never has to list it in the settings file and a
+ * child can never get the tool name without the extension behind it.
+ */
+export function withRequiredChildExtensions(
+  configuredPaths: string[] | undefined,
+  resolvedTools: string[],
+): string[] {
+  const paths = [...(configuredPaths ?? [])];
+  if (resolvedTools.includes(CODEMODE_TOOL) && !paths.includes(CODEMODE_EXTENSION)) {
+    paths.push(CODEMODE_EXTENSION);
+  }
+  return paths;
+}
+
 export function resolveChildExtensions(): ChildExtensionResolution {
   if (cachedResolution) return cachedResolution;
 
