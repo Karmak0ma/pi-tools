@@ -392,3 +392,93 @@ test("handler: PI_CLAUDE_TOOL_CALL_REPAIR_DISABLE=1 forces a no-op even on an ot
 		delete process.env.PI_CLAUDE_TOOL_CALL_REPAIR_DISABLE;
 	}
 });
+
+// ============================================================================
+// Runaway guard: stop sequence + automatic retry.
+// Uses its own fake that captures EVERY handler by event name, because the
+// guard spans before_provider_request, turn_end, and message_end.
+// ============================================================================
+
+function createGuardPi() {
+	const handlers = new Map<string, Function>();
+	const notifications: string[] = [];
+	const pi = {
+		on(name: string, fn: Function) {
+			handlers.set(name, fn);
+		},
+		getAllTools: () => [],
+	} as unknown as ExtensionAPI;
+	claudeToolRepair(pi);
+	const ctx = {
+		model: { api: "anthropic-messages" },
+		ui: { notify: (text: string) => notifications.push(text) },
+	};
+	const call = (name: string, event: unknown, context: unknown = ctx) => {
+		const fn = handlers.get(name);
+		assert.ok(fn, `${name} handler was never registered`);
+		return fn(event, context);
+	};
+	return { call, notifications };
+}
+
+const stoppedMessage = (content: unknown[] = []) =>
+	assistantMessage({ stopReason: "stop", rawStopReason: "stop_sequence", model: "claude-sonnet-5-5", content });
+
+test("guard: adds the stop sequence to Claude anthropic-messages payloads and keeps existing ones", async () => {
+	const { call } = createGuardPi();
+	const out = await call("before_provider_request", {
+		payload: { model: "claude-sonnet-5-5", messages: [], stop_sequences: ["X"] },
+	});
+	assert.deepEqual(out.stop_sequences, ["X", _test.LEAK_STOP_SEQUENCE]);
+	// Idempotent: a payload that already has it is left unchanged.
+	assert.equal(await call("before_provider_request", { payload: out }), undefined);
+});
+
+test("guard: never touches non-anthropic-messages APIs or non-Claude models", async () => {
+	const { call } = createGuardPi();
+	const claude = { payload: { model: "claude-opus-5-5", messages: [] } };
+	assert.equal(await call("before_provider_request", claude, { model: { api: "openai-completions" } }), undefined);
+	assert.equal(await call("before_provider_request", { payload: { model: "gpt-5", messages: [] } }), undefined);
+});
+
+test("guard: a stop-sequence turn continues with a nudge, capped at MAX_CONSECUTIVE_RETRIES in a row", async () => {
+	const { call, notifications } = createGuardPi();
+	for (let i = 0; i < _test.MAX_CONSECUTIVE_RETRIES; i++) {
+		const result = await call("turn_end", { message: stoppedMessage() });
+		assert.equal(result.continue, true);
+		assert.equal(result.entries[0].type, "custom_message");
+		// The nudge must not contain the stop sequence, or the model may copy it.
+		assert.ok(!result.entries[0].content.includes(_test.LEAK_STOP_SEQUENCE));
+	}
+	// Cap reached: no continuation, user is told.
+	assert.equal(await call("turn_end", { message: stoppedMessage() }), undefined);
+	assert.equal(notifications.length, 1);
+	// Budget is fresh again afterwards.
+	assert.equal((await call("turn_end", { message: stoppedMessage() })).continue, true);
+});
+
+test("guard: a normal turn resets the retry budget and never continues", async () => {
+	const { call } = createGuardPi();
+	for (let i = 0; i < _test.MAX_CONSECUTIVE_RETRIES; i++) await call("turn_end", { message: stoppedMessage() });
+	assert.equal(await call("turn_end", { message: assistantMessage({ rawStopReason: "end_turn" }) }), undefined);
+	assert.equal((await call("turn_end", { message: stoppedMessage() })).continue, true);
+});
+
+test("guard: message_end drops a thinking-only stopped message but keeps one with visible text", async () => {
+	const { call } = createGuardPi();
+	const thinkingOnly = await call("message_end", { message: stoppedMessage([{ type: "thinking", thinking: "x" }]) });
+	assert.deepEqual(thinkingOnly.message.content, []);
+	const withText = stoppedMessage([{ type: "thinking", thinking: "x" }, { type: "text", text: "Let me check:" }]);
+	assert.equal(await call("message_end", { message: withText }), undefined);
+});
+
+test("guard: PI_CLAUDE_TOOL_CALL_REPAIR_STOP_DISABLE=1 turns off only the guard", async () => {
+	const { call } = createGuardPi();
+	process.env.PI_CLAUDE_TOOL_CALL_REPAIR_STOP_DISABLE = "1";
+	try {
+		assert.equal(await call("before_provider_request", { payload: { model: "claude-x", messages: [] } }), undefined);
+		assert.equal(await call("turn_end", { message: stoppedMessage() }), undefined);
+	} finally {
+		delete process.env.PI_CLAUDE_TOOL_CALL_REPAIR_STOP_DISABLE;
+	}
+});

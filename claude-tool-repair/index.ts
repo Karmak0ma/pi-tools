@@ -116,6 +116,41 @@
 // Disable entirely with PI_CLAUDE_TOOL_CALL_REPAIR_DISABLE=1 (e.g. while
 // investigating whether this extension itself is implicated in an issue).
 //
+// ----------------------------------------------------------------------------
+// SECOND FAILURE SHAPE: the runaway (claude-*-5-5 models, 2026)
+// ----------------------------------------------------------------------------
+// Newer Claude models leak the same pseudo-XML but do NOT stop afterwards.
+// The model never receives a tool result, so it keeps writing more fake
+// invokes, degenerates into a repeating `cd ...; true` loop, and only ends
+// at the output-token limit (stopReason "length", 128000 tokens, ~220k
+// characters). Session logs showed 13 such turns in 12 days, 9-15 minutes and
+// $1.3-2.6 each, all in subagent sessions. The repair path above never sees
+// these (it requires stopReason "toolUse"), and repairing them would be wrong
+// anyway: after the first call, every later "call" is model-invented.
+//
+// FIX: a provider stop sequence plus an automatic retry.
+//   1. `before_provider_request` adds the stop sequence `<invoke name="` to
+//      every Claude request on the `anthropic-messages` API. Anthropic stops
+//      generation the moment the leak starts. VERIFIED LIVE (sonnet-5-5,
+//      OAuth): real structured tool calls are unaffected (they use a
+//      different internal format), and tool ARGUMENTS containing the string
+//      (e.g. writing a file that contains it) are also unaffected. Only
+//      plain reply text containing the string stops.
+//   2. `turn_end` sees `rawStopReason === "stop_sequence"` (pi-ai never sends
+//      stop sequences of its own -- see its mapStopReason comment -- so this
+//      reason means OUR sequence fired), appends a visible nudge message, and
+//      returns `continue: true`. That is the "tool call failed, continue" the
+//      user used to type by hand. At most MAX_CONSECUTIVE_RETRIES in a row, so
+//      a model that keeps doing it cannot loop forever.
+// Why not `ctx.abort()` from `message_update`? Verified in agent-session.js:
+// it sets `_agentRunAbortRequested`, which ends the whole run and blocks every
+// continuation path, so an automatic retry would be impossible.
+//
+// KNOWN COST: a reply that QUOTES the syntax in prose (for example while
+// working on this extension) is also cut. The nudge tells the model to quote
+// it without the leading "<", and the retry cap bounds the damage. Disable
+// only this part with PI_CLAUDE_TOOL_CALL_REPAIR_STOP_DISABLE=1.
+//
 // VERSION PINNING NOTE: the ordering claim above was verified by reading the
 // compiled JS of `@earendil-works/pi-coding-agent@0.85.1` and its bundled
 // `@earendil-works/pi-agent-core@0.85.1` (specifically `agent-loop.js`,
@@ -449,15 +484,110 @@ function isClaudeMessage(message: { provider?: string; model?: string }): boolea
 
 const LOG_PREFIX = "[claude-tool-repair]";
 
+// ----------------------------------------------------------------------------
+// Runaway guard: stop sequence + automatic retry (see header, "SECOND
+// FAILURE SHAPE").
+// ----------------------------------------------------------------------------
+
+// The exact prefix every observed leak starts with (checked against all leaks
+// in ~/.pi/agent/sessions). The trailing quote keeps prose such as "the
+// invoke name" from matching.
+const LEAK_STOP_SEQUENCE = '<invoke name="';
+
+// Two retries make a repeat very unlikely (worst observed leak rate is ~13%
+// per turn), while a model that is stuck still gives control back quickly.
+const MAX_CONSECUTIVE_RETRIES = 2;
+
+const RETRY_CUSTOM_TYPE = "claude-tool-repair";
+
+// Shown to the model (and to the user, display: true) after a stop. It must
+// not itself contain LEAK_STOP_SEQUENCE, so the model has nothing to copy.
+const RETRY_NUDGE =
+	"[claude-tool-repair] Your previous reply was stopped because it started writing a tool call as plain text " +
+	"(XML 'invoke name=' markup in the reply). Plain-text tool calls are never executed, so no tool ran. " +
+	"Continue the task. To call a tool, use the structured tool-use interface, not XML in your reply text. " +
+	"If you only meant to quote that markup, write it without the leading '<' character.";
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Returns a new payload with the stop sequence added, or undefined to leave
+// the payload unchanged. The caller must already have checked that the
+// request goes to the `anthropic-messages` API: `stop_sequences` is an
+// Anthropic field, and other APIs (OpenAI-compatible proxies that also serve
+// Claude) could reject the unknown key.
+function addLeakStopSequence(payload: unknown): Record<string, unknown> | undefined {
+	if (!isPlainObject(payload)) return undefined;
+	if (typeof payload.model !== "string" || !/claude/i.test(payload.model)) return undefined;
+	// Keep any stop sequences another extension added; never replace them.
+	const existing = Array.isArray(payload.stop_sequences) ? payload.stop_sequences : [];
+	if (existing.includes(LEAK_STOP_SEQUENCE)) return undefined;
+	return { ...payload, stop_sequences: [...existing, LEAK_STOP_SEQUENCE] };
+}
+
+// True when a finalized Claude assistant message ended because our stop
+// sequence fired. pi-ai maps Anthropic's "stop_sequence" to stopReason "stop"
+// but keeps the original in `rawStopReason`.
+function stoppedByLeakGuard(message: { role?: string; provider?: string; model?: string; rawStopReason?: string }): boolean {
+	return message.role === "assistant" && isClaudeMessage(message) && message.rawStopReason === "stop_sequence";
+}
+
+function isRepairDisabled(): boolean {
+	return process.env.PI_CLAUDE_TOOL_CALL_REPAIR_DISABLE === "1";
+}
+
+function isStopGuardDisabled(): boolean {
+	return isRepairDisabled() || process.env.PI_CLAUDE_TOOL_CALL_REPAIR_STOP_DISABLE === "1";
+}
+
 export default function claudeToolRepair(pi: ExtensionAPI): void {
+	// Counts guard-triggered retries in a row. Reset by any turn that ends for
+	// another reason, and when the cap is reached (so the next user prompt
+	// starts with a fresh budget).
+	let consecutiveRetries = 0;
+
+	pi.on("before_provider_request", (event, ctx) => {
+		if (isStopGuardDisabled()) return undefined;
+		if (ctx.model?.api !== "anthropic-messages") return undefined;
+		return addLeakStopSequence(event.payload);
+	});
+
+	pi.on("turn_end", (event, ctx) => {
+		if (isStopGuardDisabled()) return undefined;
+		if (!stoppedByLeakGuard(event.message as { role?: string })) {
+			consecutiveRetries = 0;
+			return undefined;
+		}
+		if (consecutiveRetries >= MAX_CONSECUTIVE_RETRIES) {
+			consecutiveRetries = 0;
+			writeForensicLog(`RETRY CAP reached (${MAX_CONSECUTIVE_RETRIES}); returning control to the user.`);
+			ctx.ui.notify(
+				`${LOG_PREFIX} Claude wrote tool calls as text ${MAX_CONSECUTIVE_RETRIES + 1} times in a row. ` +
+					"Stopped retrying; tell it to continue or switch model.",
+				"warning",
+			);
+			return undefined;
+		}
+		consecutiveRetries += 1;
+		writeForensicLog(`STOP-SEQUENCE retry ${consecutiveRetries}/${MAX_CONSECUTIVE_RETRIES}.`);
+		return {
+			// custom_message entries reach the model as a user-role message, so the
+			// context no longer ends with the assistant and pi can continue.
+			entries: [{ type: "custom_message", customType: RETRY_CUSTOM_TYPE, content: RETRY_NUDGE, display: true }],
+			continue: true,
+		};
+	});
+
 	pi.on("message_end", async (event, _ctx) => {
-		if (process.env.PI_CLAUDE_TOOL_CALL_REPAIR_DISABLE === "1") return undefined;
+		if (isRepairDisabled()) return undefined;
 
 		const message = event.message as {
 			role: string;
 			provider?: string;
 			model?: string;
 			stopReason?: string;
+			rawStopReason?: string;
 			content?: ContentBlock[];
 		};
 
@@ -465,6 +595,19 @@ export default function claudeToolRepair(pi: ExtensionAPI): void {
 		if (!isClaudeMessage(message)) return undefined;
 
 		const content = Array.isArray(message.content) ? message.content : [];
+
+		// Our stop sequence cut the leak off before it began, so there is nothing
+		// to repair. If no visible text came before the cut, drop what is left
+		// (normally one thinking block): an assistant message with only thinking
+		// is an unusual shape to replay to Anthropic, while an empty message is
+		// skipped by pi-ai's converter (`if (blocks.length === 0) continue`).
+		if (stoppedByLeakGuard(message)) {
+			const hasVisibleText = content.some(
+				(block) => block.type === "text" && (block as TextBlock).text.trim().length > 0,
+			);
+			if (hasVisibleText || content.length === 0) return undefined;
+			return { message: { ...event.message, content: [] } as typeof event.message };
+		}
 		const hasRealToolCall = content.some((block) => block.type === "toolCall");
 
 		// A genuine toolCall is already present, so pi will not hard-fail this
@@ -627,6 +770,10 @@ export const _test = {
 	coerceParamValue,
 	maskFencedCode,
 	parseInvokeBlocks,
+	addLeakStopSequence,
+	stoppedByLeakGuard,
+	LEAK_STOP_SEQUENCE,
+	MAX_CONSECUTIVE_RETRIES,
 	resolveToolName,
 	isClaudeMessage,
 	hasStructuralResidue,
