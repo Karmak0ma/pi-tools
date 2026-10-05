@@ -25,6 +25,25 @@ export interface SessionWatcherOptions {
   sessionDir: string;
   /** Called for every assistant message entry observed since the last poll. */
   onAssistantMessage: (message: any) => void;
+  /**
+   * Called for entries that feed a NEW model request in the same child run:
+   * a `custom_message` entry (an extension injected a message, for example
+   * claude-tool-repair's retry nudge after a `turn_end` continuation) or a
+   * user message, or a `context_edit` entry (pi writes one when it starts
+   * an automatic retry after a provider error, to hide the failed attempt
+   * from the model). The Herdr backend uses this to know that a turn which
+   * ended with stopReason "stop" or "error" was not the final turn.
+   *
+   * A false positive is cheap: the backend only cancels its fallback timer,
+   * and Herdr's idle/done status still settles the task. That is why
+   * `context_edit` is reported even though an extension could also write
+   * one without starting a new request.
+   *
+   * Bookkeeping entries (`custom`, model/thinking changes, labels) are NOT
+   * reported: extensions such as pi-dcp append them after a real final stop,
+   * so they say nothing about whether the run continues.
+   */
+  onContinuationEntry?: (entry: any) => void;
 }
 
 interface TrackedFile {
@@ -73,12 +92,14 @@ async function discoverSessionFiles(sessionDir: string): Promise<string[]> {
 export class SessionWatcher {
   private readonly offsets = new Map<string, TrackedFile>();
   private readonly onAssistantMessage: (message: any) => void;
+  private readonly onContinuationEntry: ((entry: any) => void) | undefined;
   private readonly sessionDir: string;
   private polling = false;
 
   constructor(options: SessionWatcherOptions) {
     this.sessionDir = options.sessionDir;
     this.onAssistantMessage = options.onAssistantMessage;
+    this.onContinuationEntry = options.onContinuationEntry;
   }
 
   /**
@@ -164,6 +185,14 @@ export class SessionWatcher {
     // Session JSONL entries wrap the message payload; tolerate an unwrapped
     // assistant entry defensively in case the entry shape evolves.
     const message = entry?.type === "message" ? entry.message : entry;
-    if (message?.role === "assistant") this.onAssistantMessage(message);
+    if (message?.role === "assistant") {
+      this.onAssistantMessage(message);
+    } else if (
+      entry?.type === "custom_message"
+      || entry?.type === "context_edit"
+      || message?.role === "user"
+    ) {
+      this.onContinuationEntry?.(entry);
+    }
   }
 }

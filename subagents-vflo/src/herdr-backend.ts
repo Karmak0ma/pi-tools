@@ -7,10 +7,19 @@
  * child, and the JSONL is the parent's source of truth.
  *
  * Lifecycle semantics (the contract shared with the default backend):
- * - The task completes only when an assistant turn settles normally
- *   (stopReason "stop" in the session JSONL). Herdr's own idle/done pane
- *   status is never treated as completion — it is a UI-seen state, not task
- *   semantics.
+ * - The task completes only after an assistant turn ends normally
+ *   (stopReason "stop" in the session JSONL) AND the child run has really
+ *   settled. A "stop" entry alone is NOT enough: an extension can return
+ *   `continue: true` from `turn_end` and start another model request in the
+ *   same run (claude-tool-repair does this when Claude writes a tool call as
+ *   text). Completing on the first "stop" made the parent take an
+ *   unfinished answer while the child kept working. So a "stop" entry only
+ *   makes completion PENDING; the task completes when Herdr reports the
+ *   child idle/done (the lifecycle hook reports idle only on Pi's
+ *   `agent_settled`). If that status never arrives (hook missing or its
+ *   socket report lost) and no continuation entry follows the stop, a
+ *   fallback timer completes the task anyway. Herdr status alone, without a
+ *   pending "stop", is still never treated as completion.
  * - An interrupted turn (stopReason "aborted", e.g. the user pressed Escape
  *   inside the pane) does NOT complete the task. The pane and session stay
  *   alive so the user can give the subagent corrective input directly; a
@@ -20,9 +29,23 @@
  *   errored task becomes `failed`, and an otherwise active task becomes
  *   `closed`. A dead pane is never a successful completion.
  * - Parent abort (control.abort) closes the pane and resolves as `closed`.
- * - An errored turn (stopReason "error") that sits idle for a grace period
- *   fails the task, mirroring the RPC runner, while still tolerating pi's
- *   automatic in-turn retries (each new session message resets the grace).
+ * - An errored turn (stopReason "error") works like "stop": it only makes
+ *   FAILURE pending. Pi retries transient provider errors inside the same
+ *   run (it writes a `context_edit` entry, waits with backoff, then asks the
+ *   model again), so the error entry is not the end of the run. Failing on
+ *   a short timer here once failed a task while the child's retry was still
+ *   running: the parent started a second child and both edited the same
+ *   files. So the task fails when Herdr reports the child idle/done (all
+ *   retries are spent), and any later assistant message cancels the
+ *   pending failure. This mirrors the RPC runner, which waits for
+ *   `agent_settled`.
+ * - Both pending states have a fallback timer for a lost idle/done status.
+ *   A continuation entry (custom_message, user, context_edit) cancels the
+ *   timer. When the timer settles the task, the child's state is unknown,
+ *   so the backend also CLOSES the pane: a child that is in fact still
+ *   running must not keep working after the parent stopped watching it.
+ *   Closing the pane sends SIGHUP; pi then stops its retries and the bash
+ *   processes it tracks, and exits. The session JSONL stays on disk.
  */
 
 import * as fs from "node:fs";
@@ -63,12 +86,20 @@ export interface HerdrBackendOptions {
   cli: HerdrClient;
   /** Pane/session polling cadence. */
   pollIntervalMs?: number;
-  /** Idle time after an errored child turn before the task fails. */
+  /**
+   * Time after an errored turn with no continuation entry before the task
+   * fails even though Herdr never reported idle/done. Safety net only.
+   */
   errorSettleGraceMs?: number;
   /** Combined budget for agent start and the following readiness gate (see startHerdrAgent). */
   agentStartTimeoutMs?: number;
   /** Maximum time after the initial prompt to observe working or blocked state. */
   startupActivityTimeoutMs?: number;
+  /**
+   * Time after a "stop" turn with no continuation entry before the task
+   * completes even though Herdr never reported idle/done. Safety net only.
+   */
+  completionFallbackMs?: number;
 }
 
 interface ResolvedTimings {
@@ -76,10 +107,27 @@ interface ResolvedTimings {
   errorSettleGraceMs: number;
   agentStartTimeoutMs: number;
   startupActivityTimeoutMs: number;
+  completionFallbackMs: number;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
-const DEFAULT_ERROR_SETTLE_GRACE_MS = 30_000;
+/**
+ * Long on purpose. The normal completion path is the idle/done status, which
+ * arrives within one poll interval of the child settling. This timer only
+ * matters when that status is lost, so it trades a late result for never
+ * completing on a turn that the child is about to continue. 120s is far
+ * longer than the gap between a "stop" entry and the continuation entry an
+ * extension writes in the same `turn_end` (milliseconds in practice).
+ */
+const DEFAULT_COMPLETION_FALLBACK_MS = 120_000;
+/** Herdr statuses that mean the child pi is not running a turn. */
+const SETTLED_AGENT_STATUSES = new Set(["idle", "done"]);
+/**
+ * Same reasoning as DEFAULT_COMPLETION_FALLBACK_MS. The old 30s value was
+ * shorter than one pi retry cycle (backoff up to 60s plus model thinking
+ * time), so it failed tasks whose retry later succeeded.
+ */
+const DEFAULT_ERROR_SETTLE_GRACE_MS = 120_000;
 const DEFAULT_AGENT_START_TIMEOUT_MS = 60_000;
 
 /**
@@ -278,7 +326,15 @@ class HerdrChildMonitor {
   private abortedByParent = false;
   private resolveResult!: (value: ChildRunResult) => void;
   private pollTimer: ReturnType<typeof setInterval> | undefined;
-  private errorGraceTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * Set by a "stop" turn ("completed") or an "error" turn ("failed") until
+   * a later assistant message or a new parent prompt proves the run
+   * continued. While set, an idle/done status settles the task with this
+   * outcome. See the header comment for why the entry alone does not.
+   */
+  private pendingOutcome: "completed" | "failed" | undefined = undefined;
+  /** Armed with pendingOutcome; cancelled by any continuation evidence. */
+  private settleFallbackTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly startupActivityDeadline: StartupActivityDeadline;
   private lastAgentStatus: string | undefined = undefined;
   private tickInFlight = false;
@@ -292,7 +348,11 @@ class HerdrChildMonitor {
     this.paneId = child.paneId;
     this.agentName = child.agentName;
     this.promptFilePath = child.promptFilePath;
-    this.watcher = new SessionWatcher({ sessionDir: child.sessionDir, onAssistantMessage: (m) => this.observeAssistantMessage(m) });
+    this.watcher = new SessionWatcher({
+      sessionDir: child.sessionDir,
+      onAssistantMessage: (m) => this.observeAssistantMessage(m),
+      onContinuationEntry: () => this.observeContinuationEntry(),
+    });
     this.startupActivityDeadline = new StartupActivityDeadline(
       this.timings.startupActivityTimeoutMs,
       () => {
@@ -321,7 +381,7 @@ class HerdrChildMonitor {
             this.lastStopReason = "error";
             this.lastError = error instanceof Error ? error.message : String(error);
             this.transitionLifecycle("waiting");
-            this.startErrorGrace();
+            this.markPending("failed");
           }
           throw error;
         }
@@ -366,7 +426,7 @@ class HerdrChildMonitor {
     this.transitionLifecycle(value.lifecycle);
     this.settled = true;
     this.stopPolling();
-    this.cancelErrorGrace();
+    this.cancelSettleFallback();
     this.startupActivityDeadline.cancel();
     try {
       this.spec.signal?.removeEventListener("abort", this.onAbort);
@@ -383,22 +443,83 @@ class HerdrChildMonitor {
     this.pollTimer = clearPendingTimer(this.pollTimer);
   }
 
-  private startErrorGrace(): void {
-    this.cancelErrorGrace();
-    this.errorGraceTimer = this.startOneShotTimer(this.timings.errorSettleGraceMs, () => {
-      this.errorGraceTimer = undefined;
-      this.settle(this.buildErrorGraceResult());
-    });
-  }
-
   private startOneShotTimer(delayMs: number, callback: () => void): ReturnType<typeof setTimeout> {
     const timer = setTimeout(callback, delayMs);
     timer.unref?.();
     return timer;
   }
 
-  private cancelErrorGrace(): void {
-    this.errorGraceTimer = clearPendingTimer(this.errorGraceTimer);
+  private cancelSettleFallback(): void {
+    this.settleFallbackTimer = clearPendingTimer(this.settleFallbackTimer);
+  }
+
+  /**
+   * A "stop" or "error" turn ended: wait for proof that the run settled.
+   * The fallback is long (see the DEFAULT_* constants) because it only
+   * matters when the idle/done status is lost.
+   */
+  private markPending(outcome: "completed" | "failed"): void {
+    this.pendingOutcome = outcome;
+    this.cancelSettleFallback();
+    const delayMs = outcome === "completed"
+      ? this.timings.completionFallbackMs
+      : this.timings.errorSettleGraceMs;
+    this.settleFallbackTimer = this.startOneShotTimer(delayMs, () => {
+      this.settleFallbackTimer = undefined;
+      if (this.pendingOutcome) this.settleByFallback();
+    });
+  }
+
+  /** The run continued after the turn end; the next stop/error re-arms. */
+  private clearPending(): void {
+    this.pendingOutcome = undefined;
+    this.cancelSettleFallback();
+  }
+
+  /**
+   * A custom_message, user, or context_edit entry was written: the child is
+   * about to make another model request (an extension continuation, a typed
+   * prompt, or pi's automatic retry after a provider error). Only the
+   * fallback timer is cancelled here, because the model may now think (or pi
+   * may wait out a retry backoff) for minutes before the next assistant
+   * entry appears. `pendingOutcome` stays set on purpose: if the entry did
+   * NOT start a new request (an extension can add a display-only message),
+   * the idle/done status still settles the task. If it did start one, Herdr
+   * reports working until the run settles, and the next assistant message
+   * clears the pending state.
+   */
+  private observeContinuationEntry(): void {
+    if (this.settled) return;
+    this.cancelSettleFallback();
+  }
+
+  /** Settle with the pending outcome. The child is known to be idle or gone. */
+  private settlePending(): void {
+    if (this.settled || !this.pendingOutcome) return;
+    if (this.pendingOutcome === "failed") {
+      this.settle(this.buildErrorGraceResult());
+      return;
+    }
+    this.spec.onEvent?.({ type: "agent_end" });
+    this.settle(this.buildSuccessResult());
+  }
+
+  /**
+   * The fallback timer ran out: settle with the pending outcome, then close
+   * the pane. The child's state is unknown here (its idle/done status never
+   * arrived), so it may still be running. An unwatched child that keeps
+   * editing files while the parent moves on (and maybe starts a replacement
+   * child) is far worse than losing the pane view. Settle first so the
+   * parent gets the real outcome, not the death result the poll loop would
+   * build after the pane disappears.
+   */
+  private settleByFallback(): void {
+    if (this.settled) return;
+    this.settlePending();
+    void this.cli.paneClose(this.paneId).catch((error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.spec.onStderr?.(`Herdr fallback pane cleanup failed: ${detail}\n`);
+    });
   }
 
   /**
@@ -508,7 +629,9 @@ class HerdrChildMonitor {
       this.turnGeneration++;
       this.lastStopReason = undefined;
       this.lastError = undefined;
-      this.cancelErrorGrace();
+      // New input from the parent (or a resumed turn) means the earlier
+      // "stop" or "error" was not the end of the task.
+      this.clearPending();
     }
     if (!changed && !newTurn) return;
     this.lifecycle = next;
@@ -529,6 +652,10 @@ class HerdrChildMonitor {
     } else if (!message.stopReason) {
       this.transitionLifecycle("running");
     }
+    // Any assistant message after a "stop" or "error" turn proves the run
+    // continued (a turn_end continuation or pi's automatic retry). If this
+    // message itself ends the turn, observeTurnEnd re-arms the pending state.
+    this.clearPending();
     this.accumulateMessage(message);
     // Synthetic event shaped like the RPC stream so index.ts's live summary
     // handling needs zero special cases for Herdr children.
@@ -581,9 +708,11 @@ class HerdrChildMonitor {
   }
 
   /**
-   * Classify a turn boundary. A normal settle completes the task (the pane
-   * stays alive as a user-owned session); an interruption keeps watching; an
-   * error turn arms the idle grace; anything else means the turn continues.
+   * Classify a turn boundary. A normal stop makes completion pending and an
+   * error makes failure pending (the poll loop settles either once the child
+   * is idle; the pane stays alive as a user-owned session); an interruption
+   * keeps watching; anything else means the turn continues. Any earlier
+   * pending state was already cleared by observeAssistantMessage.
    */
   private observeTurnEnd(message: any): void {
     this.lastStopReason = message.stopReason;
@@ -597,8 +726,11 @@ class HerdrChildMonitor {
 
     switch (message.stopReason) {
       case "stop":
-        this.spec.onEvent?.({ type: "agent_end" });
-        this.settle(this.buildSuccessResult());
+        // Not settled yet: an extension may continue this run from
+        // turn_end. finalOutput already holds this turn's text, so a later
+        // "stop" simply replaces it.
+        this.transitionLifecycle("waiting");
+        this.markPending("completed");
         break;
       case "aborted":
         // Interrupted turn: NOT completion. The user can type into the pane
@@ -606,20 +738,16 @@ class HerdrChildMonitor {
         this.transitionLifecycle("interrupted");
         this.spec.onEvent?.({ type: "subagent_turn_aborted" });
         this.spec.onEvent?.({ type: "agent_end" });
-        this.cancelErrorGrace();
         break;
       case "error":
+        // Not settled yet: pi may retry this error inside the same run.
         this.transitionLifecycle("waiting");
         this.spec.onEvent?.({ type: "agent_end" });
-        this.startErrorGrace();
-        break;
-      case "toolUse":
-        this.transitionLifecycle("waiting");
-        this.cancelErrorGrace();
+        this.markPending("failed");
         break;
       default:
+        // toolUse and unknown reasons: the turn continues.
         this.transitionLifecycle("waiting");
-        this.cancelErrorGrace();
     }
   }
 
@@ -645,7 +773,11 @@ class HerdrChildMonitor {
         // An unreachable server must not wedge the watcher forever: after
         // repeated failures treat the child as unmonitorable and settle.
         this.pollFailures++;
-        if (this.pollFailures >= MAX_PANE_POLL_FAILURES) this.settle(this.buildDeathResult());
+        // A seen "stop" still wins over death, as for a gone pane below.
+        if (this.pollFailures >= MAX_PANE_POLL_FAILURES) {
+          if (this.pendingOutcome === "completed") this.settlePending();
+          else this.settle(this.buildDeathResult());
+        }
         return;
       }
       if (paneResult.agentStatus !== undefined && paneResult.agentStatus !== this.lastAgentStatus) {
@@ -657,7 +789,22 @@ class HerdrChildMonitor {
       if (paneResult.agentStatus === "working" || paneResult.agentStatus === "blocked") {
         this.markStartupActivity();
       }
-      if (paneResult.state === "gone") this.settle(this.buildDeathResult());
+      if (paneResult.state === "gone") {
+        // The final "stop" was seen before the pane died (the session is
+        // polled first), so the answer exists: deliver it, not a death.
+        // A pending failure falls to buildDeathResult, which already
+        // reports the last error as a failure.
+        if (this.pendingOutcome === "completed") this.settlePending();
+        else this.settle(this.buildDeathResult());
+        return;
+      }
+      // Status was read AFTER the session poll that saw the stop/error
+      // entry, and the lifecycle hook reports idle only on agent_settled
+      // (never between a pi retry's error and its next attempt), so this
+      // cannot be the idle state from before the turn started.
+      if (this.pendingOutcome && SETTLED_AGENT_STATUSES.has(paneResult.agentStatus ?? "")) {
+        this.settlePending();
+      }
     } finally {
       this.tickInFlight = false;
     }
@@ -672,6 +819,7 @@ export function createHerdrBackend(options: HerdrBackendOptions): SubagentBacken
     errorSettleGraceMs: options.errorSettleGraceMs ?? DEFAULT_ERROR_SETTLE_GRACE_MS,
     agentStartTimeoutMs: options.agentStartTimeoutMs ?? DEFAULT_AGENT_START_TIMEOUT_MS,
     startupActivityTimeoutMs: options.startupActivityTimeoutMs ?? DEFAULT_STARTUP_ACTIVITY_TIMEOUT_MS,
+    completionFallbackMs: options.completionFallbackMs ?? DEFAULT_COMPLETION_FALLBACK_MS,
   };
   return {
     spawn: (spec) => spawnSubagentInHerdr(spec, options.cli, timings),

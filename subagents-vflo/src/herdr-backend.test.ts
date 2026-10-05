@@ -29,7 +29,7 @@ class FakeHerdr implements HerdrClient {
   paneGetCalls = 0;
   paneGetDelayMs = 0;
   paneGetResults: Array<{ state: "exists" | "gone"; agentStatus?: string }> = [];
-  defaultAgentStatus: "idle" | "working" | "blocked" = "working";
+  defaultAgentStatus: "idle" | "done" | "working" | "blocked" = "working";
   layoutForPane = "";
   layoutWidth = 216;
   agentStartError: Error | undefined;
@@ -145,14 +145,22 @@ function makeSpec(overrides: Partial<SubagentSpec> = {}): SubagentSpec {
   };
 }
 
-function makeBackend(fake: FakeHerdr) {
+function makeBackend(fake: FakeHerdr, completionFallbackMs = 30) {
+  // The fake pane reports "working" by default, so a "stop" turn completes
+  // through the completion fallback timer. A short default keeps tests that
+  // are not about completion timing fast; the completion tests pass their own.
   return createHerdrBackend({
     cli: fake,
     pollIntervalMs: 10,
     errorSettleGraceMs: 50,
     agentStartTimeoutMs: 500,
     startupActivityTimeoutMs: 500,
+    completionFallbackMs,
   });
+}
+
+function appendEntry(sessionDir: string, entry: Record<string, unknown>): void {
+  fs.appendFileSync(path.join(sessionDir, "session.jsonl"), JSON.stringify(entry) + "\n");
 }
 
 function sessionDirOf(fake: FakeHerdr): string {
@@ -398,6 +406,9 @@ describe("HerdrBackend happy path", () => {
 
   it("exposes control, keeps the pane alive after completion, and stops polling", async () => {
     const fake = new FakeHerdr();
+    // Complete through the normal idle path. The fallback path closes the
+    // pane on purpose and is covered in its own tests.
+    fake.defaultAgentStatus = "idle";
     const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
 
     expect(handle.control).toBeDefined();
@@ -566,6 +577,66 @@ describe("HerdrBackend interruption semantics", () => {
   });
 });
 
+// ─── Completion after a "stop" turn ─────────────────────────────────────────
+
+/**
+ * A "stop" entry is not the end of the child run when an extension continues
+ * it from turn_end (claude-tool-repair's retry after a leaked tool call). The
+ * parent must receive the answer from the turn that ends the run.
+ */
+describe("HerdrBackend completion after a stop turn", () => {
+  it("waits through a turn_end continuation and delivers the final answer", async () => {
+    const fake = new FakeHerdr();
+    // Short fallback: proves the continuation entry disarms it.
+    const handle = await makeBackend(fake, 60).spawn(makeSpec({ agentPrompt: "" }));
+    const sessionDir = sessionDirOf(fake);
+
+    // Guard stopped a leaked tool call and injected its nudge; pi continues.
+    appendAssistant(sessionDir, { content: [{ type: "text", text: "Let me check:" }], stopReason: "stop" });
+    appendEntry(sessionDir, { type: "custom_message", customType: "claude-tool-repair", content: "retry" });
+    await expect(settleRace(handle, 200)).resolves.toBe("pending");
+
+    appendAssistant(sessionDir, {
+      content: [{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "ls" } }],
+      stopReason: "toolUse",
+    });
+    appendAssistant(sessionDir, { content: [{ type: "text", text: "Real answer." }], stopReason: "stop" });
+    await expect(settleRace(handle, 50)).resolves.toBe("pending");
+
+    // The lifecycle hook reports idle only when the run settles.
+    fake.defaultAgentStatus = "idle";
+    const result = await handle.result;
+    expect(result.lifecycle).toBe("completed");
+    expect(result.finalOutput).toBe("Real answer.");
+  });
+
+  it("completes on Herdr's done status after a stop turn", async () => {
+    const fake = new FakeHerdr();
+    const handle = await makeBackend(fake, 10_000).spawn(makeSpec({ agentPrompt: "" }));
+    appendAssistant(sessionDirOf(fake), { content: [{ type: "text", text: "done" }], stopReason: "stop" });
+    await expect(settleRace(handle, 60)).resolves.toBe("pending");
+
+    fake.defaultAgentStatus = "done";
+    const result = await handle.result;
+    expect(result.lifecycle).toBe("completed");
+    expect(result.finalOutput).toBe("done");
+  });
+
+  it("completes through the fallback when no idle status and no continuation follow", async () => {
+    const fake = new FakeHerdr();
+    const handle = await makeBackend(fake, 60).spawn(makeSpec({ agentPrompt: "" }));
+    // pi-dcp-style bookkeeping after a real final stop must not block completion.
+    appendAssistant(sessionDirOf(fake), { content: [{ type: "text", text: "final" }], stopReason: "stop" });
+    appendEntry(sessionDirOf(fake), { type: "custom", customType: "pi-dcp.v2.operation", data: {} });
+
+    const result = await handle.result;
+    expect(result.lifecycle).toBe("completed");
+    expect(result.finalOutput).toBe("final");
+    // The child state is unknown on the fallback path, so its pane is closed.
+    await until(() => fake.closedPanes.length === 1);
+  });
+});
+
 // ─── Pane death / failure handling ──────────────────────────────────────────
 
 describe("HerdrBackend failure handling", () => {
@@ -609,15 +680,69 @@ describe("HerdrBackend failure handling", () => {
     expect(result.errorMessage).toContain("Provider exploded");
   });
 
-  it("fails a task whose errored turn sits idle past the grace period", async () => {
+  it("fails an errored task once the child is idle, and keeps the pane", async () => {
+    const fake = new FakeHerdr();
+    // Fallback far away: only the idle status can settle this task.
+    const handle = await createHerdrBackend({
+      cli: fake,
+      pollIntervalMs: 10,
+      errorSettleGraceMs: 10_000,
+      agentStartTimeoutMs: 500,
+      startupActivityTimeoutMs: 500,
+    }).spawn(makeSpec({ agentPrompt: "" }));
+    appendAssistant(sessionDirOf(fake), { content: [], stopReason: "error", errorMessage: "Provider failed" });
+    await expect(settleRace(handle, 80)).resolves.toBe("pending");
+
+    // Idle after an error means pi spent its retries.
+    fake.defaultAgentStatus = "idle";
+    const result = await handle.result;
+    expect(result.lifecycle).toBe("failed");
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("Provider failed");
+    expect(fake.closedPanes).toEqual([]);
+  });
+
+  it("fails an errored task on the fallback timer and closes the pane", async () => {
+    // No idle status ever arrives (the fake reports working): the child
+    // state is unknown, so the pane is closed to stop a possibly running child.
     const fake = new FakeHerdr();
     const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
     appendAssistant(sessionDirOf(fake), { content: [], stopReason: "error", errorMessage: "Provider failed" });
 
     const result = await handle.result;
     expect(result.lifecycle).toBe("failed");
-    expect(result.stopReason).toBe("error");
     expect(result.errorMessage).toContain("Provider failed");
+    await until(() => fake.closedPanes.length === 1);
+  });
+
+  it("does not fail while pi retries a provider error past the fallback time", async () => {
+    // Regression: a WebSocket error was followed by pi's automatic retry
+    // (context_edit, backoff, long thinking). The old 30s grace failed the
+    // task, the parent started a second child, and both edited the same files.
+    const fake = new FakeHerdr();
+    const handle = await createHerdrBackend({
+      cli: fake,
+      pollIntervalMs: 10,
+      errorSettleGraceMs: 60,
+      agentStartTimeoutMs: 500,
+      startupActivityTimeoutMs: 500,
+      completionFallbackMs: 10_000,
+    }).spawn(makeSpec({ agentPrompt: "" }));
+    const sessionDir = sessionDirOf(fake);
+
+    appendAssistant(sessionDir, { content: [], stopReason: "error", errorMessage: "WebSocket closed 1012" });
+    appendEntry(sessionDir, { type: "context_edit", targetId: "x", replacement: null });
+    // Far past the 60ms fallback: the context_edit cancelled it.
+    await expect(settleRace(handle, 200)).resolves.toBe("pending");
+
+    appendAssistant(sessionDir, { content: [{ type: "toolCall", name: "read", arguments: {} }], stopReason: "toolUse" });
+    appendAssistant(sessionDir, { content: [{ type: "text", text: "Recovered" }], stopReason: "stop" });
+    fake.defaultAgentStatus = "idle";
+
+    const result = await handle.result;
+    expect(result.lifecycle).toBe("completed");
+    expect(result.errorMessage).toBeUndefined();
+    expect(result.finalOutput).toBe("Recovered");
     expect(fake.closedPanes).toEqual([]);
   });
 

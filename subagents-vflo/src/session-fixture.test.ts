@@ -70,7 +70,15 @@ function sessionDirOf(fake: CountingFake): string {
 }
 
 function makeBackend(fake: HerdrClient) {
-  return createHerdrBackend({ cli: fake, pollIntervalMs: 10, errorSettleGraceMs: 50, agentStartTimeoutMs: 500 });
+  // The fake pane always reports "working", so a "stop" completes through the
+  // completion fallback timer. A short timer keeps these contract tests fast.
+  return createHerdrBackend({
+    cli: fake,
+    pollIntervalMs: 10,
+    errorSettleGraceMs: 50,
+    agentStartTimeoutMs: 500,
+    completionFallbackMs: 30,
+  });
 }
 
 describe("real session JSONL contract", () => {
@@ -98,8 +106,13 @@ describe("real session JSONL contract", () => {
       taskText: "task",
     });
 
-    // Replay the real fixture as the child's session, in real order.
-    fs.copyFileSync(fixtureUrl, path.join(sessionDirOf(fake), "session.jsonl"));
+    // Replay the real fixture as the child's session, in real order, up to
+    // and including the "stop" entry. The fixture is a catalogue of shapes,
+    // not one run: its later error/aborted entries would mean the run went
+    // on after the stop, and then the task correctly does not complete.
+    const lines = readFixtureLines();
+    const stopIndex = lines.findIndex((l) => JSON.parse(l).message?.stopReason === "stop");
+    fs.writeFileSync(path.join(sessionDirOf(fake), "session.jsonl"), lines.slice(0, stopIndex + 1).join("\n") + "\n");
 
     const result = await handle.result;
 
@@ -110,7 +123,7 @@ describe("real session JSONL contract", () => {
     expect(result.errorMessage).toBeUndefined();
     expect(typeof result.model).toBe("string");
     expect(result.model).toMatch(/claude-opus/);
-    expect(result.usage.turns).toBe(4);
+    expect(result.usage.turns).toBe(2);
     expect(result.usage.input).toBeGreaterThan(0);
     expect(result.usage.contextTokens).toBeGreaterThan(0);
     expect(result.toolCalls[0]?.name).toBe("bash");

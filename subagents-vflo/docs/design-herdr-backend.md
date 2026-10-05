@@ -41,8 +41,9 @@ runtime by `createBackend()` using `selectBackendKind()`.
 ## How the parent observes a Herdr child
 
 There is **no RPC channel** — the child is an interactive TUI in a pane. Herdr's
-own `idle`/`done` status is not authoritative for delegated-task completion (it
-is a UI-seen state, not task semantics). The Herdr agents view can still show
+own `idle`/`done` status alone is not authoritative for delegated-task
+completion (it is a UI-seen state, not task semantics); it is used only to
+confirm that a run which already wrote a `stop` turn has settled (see step 2). The Herdr agents view can still show
 accurate per-pane symbols when the managed lifecycle integration is loaded:
 
 - The child argv keeps `--no-extensions` so unrelated parent extensions do not
@@ -80,12 +81,31 @@ The authoritative observation surface for task completion remains the child's
    - `stopReason: "toolUse"` → turn continues (working)
    - `stopReason: "stop"` + non-empty text → **task completed** → result text =
      the text from this final normal stop message. Text from earlier turns is
-     not concatenated into the result.
+     not concatenated into the result. The completion is first only
+     *pending*: an extension may return `continue: true` from `turn_end`
+     (claude-tool-repair does this after it stops a leaked text tool call), so
+     the same run makes another model request after the `stop` entry.
+     Completing at once gave the parent an unfinished answer. The task
+     completes when a later pane poll sees Herdr `idle`/`done` (the lifecycle
+     hook reports idle only on Pi's `agent_settled`). A later assistant
+     message or parent prompt cancels the pending state; a later `stop`
+     arms it again with the new text. If no idle/done status ever arrives and
+     no `custom_message`/user/`context_edit` entry follows the `stop`, a
+     fallback timer (120s) completes the task, so a lost hook report cannot
+     hang the parent. Such an entry disarms only that timer, because the
+     model may think for minutes before its next entry. When the fallback
+     settles the task, the backend also closes the pane (see step 4).
    - `stopReason: "aborted"` → turn interrupted: the task enters the
      non-terminal `interrupted` lifecycle; pane/session/watchers stay alive for
      manual steering and the parent request remains pending.
-   - `stopReason: "error"` → child turn enters `waiting` while the error grace
-     period allows Pi to retry; an unrecovered error becomes `failed`.
+   - `stopReason: "error"` → child turn enters `waiting` and FAILURE becomes
+     pending, with the same rules as a pending completion. Pi retries
+     transient provider errors inside the same run: it writes a
+     `context_edit` entry (hiding the failed attempt from the model), waits
+     with backoff, and asks the model again, with no `agent_settled` in
+     between. So the task fails only on Herdr `idle`/`done` (retries spent);
+     a later assistant message cancels the pending failure. Fallback timer:
+     120s (`errorSettleGraceMs`).
 3. Pane death (via `herdr pane get` polling — JSON `pane_not_found` error) is
    a task-level terminal event, not another turn interruption:
    - last was `stop`/completed → completed (the session watcher wins the exit race)
@@ -93,9 +113,17 @@ The authoritative observation surface for task completion remains the child's
    - last was `error` → `failed`
    - nothing/mid-turn → `closed` ("pane closed before completing")
    - parent-requested close (`control.abort()`) → `closed`, never success
-4. An errored child turn (`stopReason: "error"`) that sits idle past a 30s
-   grace fails the task, mirroring the RPC runner; every new session message
-   resets the grace so pi's automatic in-turn retries are tolerated.
+4. Fallback settle closes the pane. When a fallback timer (step 2) settles
+   the task, Herdr never confirmed that the child is idle, so the child may
+   still be running. The backend settles with the pending outcome first,
+   then runs `herdr pane close` (best effort). Closing the pane sends SIGHUP;
+   pi then kills the bash processes it tracks, stops any retry, and exits.
+   Only processes that a command deliberately detached (`setsid`, `nohup`,
+   daemons) survive. The session JSONL stays on disk.
+   Why: an earlier 30s error grace failed a task while pi's retry was still
+   running. The parent started a replacement child, and the unwatched first
+   child kept editing the same files for hours. Losing the pane view is a
+   much smaller cost than two children changing the same work tree.
 5. Startup failures are caught synchronously: `pane split` / `agent start` /
    the readiness gate (see "Initial-prompt readiness") / initial
    `agent prompt` reject → spawn rejects → task error. A startup command failure may leave an empty pane → parent
@@ -251,7 +279,8 @@ The startup sequence in `src/herdr-backend.ts` is:
 The deadline is a notification/backstop, not a recovery attempt. It prevents
 a prompt that never starts from leaving the parent request pending forever,
 while keeping Herdr status separate from task completion: only a normal
-`stop` message in the session JSONL completes the delegated task.
+`stop` message in the session JSONL can complete the delegated task (Herdr
+status only confirms that the run settled after it).
 
 The backend deliberately does **not** use Herdr's confirmed
 `agent prompt --wait` mode. Herdr has a fixed 5-second observation window for
