@@ -88,8 +88,8 @@ export function resolveModel(
  *    the child at all.
  * 2. The agent's `tools:` frontmatter becomes the child's `--tools` argv.
  *    pi core treats that list as an allowlist for extension tools as well as
- *    built-ins, so an extension tool is active only when its name is passed
- *    through here.
+ *    built-ins. The per-agent MCP inheritance policy can add a filtered set
+ *    of parent-active MCP names to that allowlist.
  *
  * Both keys must match for an extension tool to be usable. The resolver can
  * only verify the second key plus that the tool exists in the parent; the
@@ -99,12 +99,17 @@ export function resolveModel(
 export interface ToolResolutionOptions {
   /**
    * Extension tool name → path of the extension entry point that registered
-   * it, from the parent's `pi.getAllTools()`. Synthetic sources
-   * (`<builtin:…>`, `<sdk:…>`) are excluded by the caller.
+   * it, from the parent's `pi.getAllTools()`. Real extension paths and the
+   * `builtin:mcp` identifier are included; other synthetic sources are omitted.
    */
   extensionToolSources?: Map<string, string>;
   /** Extension entry-point paths that will be loaded into the child process. */
   childExtensionPaths?: string[];
+  /**
+   * Metadata for tools registered by `builtin:mcp`. Parent-active names are
+   * checked separately, so registered but inactive tools are never inherited.
+   */
+  mcpTools?: Map<string, { annotations?: { readOnlyHint?: boolean }; exposure?: string }>;
 }
 
 /**
@@ -120,10 +125,11 @@ export interface ToolResolutionOptions {
  * Optional tools (`agent.optionalTools`, built-in agents only) are appended
  * when the parent has them active and dropped silently when it does not. They go through the same child-backing check as declared tools.
  *
- * When the agent declares no tools, only built-in tools are inherited from the
- * parent. Extension tools stay off unless an agent explicitly declares them,
- * so default and specialist agents keep least-privilege toolsets and their
- * prompts stay free of unrelated extension tool guidelines.
+ * MCP inheritance is a separate, per-agent policy. It only includes MCP tools
+ * that are active in the parent and backed by the built-in MCP extension.
+ * `read-only` also requires `readOnlyHint: true`; MCP annotations are supplied
+ * by the server author and are not a security boundary. Custom agents inherit
+ * no MCP tools unless they explicitly declare them in `tools:`.
  */
 export function resolveTools(
   agent: AgentConfig,
@@ -176,25 +182,47 @@ function resolveAgentTools(
     const optional = (agent.optionalTools ?? []).filter(
       (tool) => !agent.tools!.includes(tool) && parentActiveToolNames.includes(tool),
     );
-    const tools = [...agent.tools, ...optional];
+    const inheritedMcp = inheritMcpTools(agent, parentActiveToolNames, options);
+    const tools = [...new Set([...agent.tools, ...optional, ...inheritedMcp])];
 
     warnOnUnbackedExtensionTools(tools, options, warnings);
 
     return { tools, warnings };
   }
 
-  // Inherit only built-in tools from the parent
+  // Inherit built-in tools from the parent; MCP tools use the separate policy above.
   const inheritedBuiltins = parentActiveToolNames.filter((name) =>
     ALLOWED_CHILD_BUILTINS.includes(name as AllowedChildBuiltin),
   );
 
+  const inheritedMcp = inheritMcpTools(agent, parentActiveToolNames, options);
   if (inheritedBuiltins.length > 0) {
-    return { tools: inheritedBuiltins, warnings };
+    const tools = [...new Set([...inheritedBuiltins, ...inheritedMcp])];
+    warnOnUnbackedExtensionTools(tools, options, warnings);
+    return { tools, warnings };
   }
 
   // Fallback to DEFAULT_BUILD_TOOLS
   warnings.push("No built-in tools inherited from parent, using default build tools");
-  return { tools: [...DEFAULT_BUILD_TOOLS], warnings };
+  const tools = [...new Set([...DEFAULT_BUILD_TOOLS, ...inheritedMcp])];
+  warnOnUnbackedExtensionTools(tools, options, warnings);
+  return { tools, warnings };
+}
+
+/** Apply an agent's MCP policy to the parent's active MCP tool set. */
+function inheritMcpTools(
+  agent: AgentConfig,
+  parentActiveToolNames: string[],
+  options: ToolResolutionOptions,
+): string[] {
+  const mcpTools = options.mcpTools;
+  if (!agent.mcpToolInheritance || agent.mcpToolInheritance === "none" || !mcpTools) return [];
+
+  return parentActiveToolNames.filter((name) => {
+    const info = mcpTools.get(name);
+    if (!info || info.exposure === "hidden") return false;
+    return agent.mcpToolInheritance !== "read-only" || info.annotations?.readOnlyHint === true;
+  });
 }
 
 // ─── Cwd Resolution ──────────────────────────────────────────────────────────
@@ -249,12 +277,25 @@ function warnOnUnbackedExtensionTools(
  */
 export function buildToolResolutionOptions(pi: ExtensionAPI): ToolResolutionOptions {
   const extensionToolSources = new Map<string, string>();
+  const mcpTools = new Map<string, { annotations?: { readOnlyHint?: boolean }; exposure?: string }>();
   for (const tool of pi.getAllTools()) {
-    if (!tool.sourceInfo.path.startsWith("<")) {
+    if (tool.sourceInfo.path === "builtin:mcp") {
+      // ToolInfo in older Pi releases does not expose annotations or exposure.
+      // In that case Explore fails closed, while Build can still inherit the
+      // parent's active MCP tools by name.
+      const metadata = tool as typeof tool & {
+        annotations?: { readOnlyHint?: boolean };
+        exposure?: string;
+      };
+      // The MCP extension uses a synthetic source path, but the child still
+      // needs `builtin:mcp` in its configured package list to register names.
+      extensionToolSources.set(tool.name, "builtin:mcp");
+      mcpTools.set(tool.name, { annotations: metadata.annotations, exposure: metadata.exposure });
+    } else if (!tool.sourceInfo.path.startsWith("<")) {
       extensionToolSources.set(tool.name, tool.sourceInfo.path);
     }
   }
-  return { extensionToolSources, childExtensionPaths: resolveChildExtensions().paths };
+  return { extensionToolSources, childExtensionPaths: resolveChildExtensions().paths, mcpTools };
 }
 
 /**

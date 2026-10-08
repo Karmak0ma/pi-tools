@@ -58,11 +58,13 @@ describe("discoverAgents built-in settings", () => {
       model: "openai-codex/gpt-6-luna",
       thinking: "medium",
       source: "builtin",
+      mcpToolInheritance: "read-only",
     });
     expect(findAgent(agents, "build")).toMatchObject({
       model: "openai-codex/gpt-6-luna",
       thinking: "max",
       source: "builtin",
+      mcpToolInheritance: "active",
     });
   });
 

@@ -75,6 +75,14 @@ Built-in tools a child may declare:
 
 Extension tools (including `subagent` itself, for recursive dispatch) are usable when the providing package is listed in `subagents-vflo_settings.json` **and** the agent declares the tool in `tools:`. For example, an orchestrator agent declares `tools: read, bash, edit, write, subagent` and the settings file lists this extension — the child then gets a working `subagent` tool.
 
+**Build and Explore inherit MCP tools with different policies.** Built-in Build inherits MCP tools that
+are active in its parent. Built-in Explore inherits only active MCP tools whose server sets
+`readOnlyHint: true`. Both still need `builtin:mcp` in the child `packages` list, and the child's
+MCP configuration must register matching tool names. Other agents do not inherit MCP tools unless
+they declare them in `tools:`. MCP annotations come from server authors and
+are not verified, so the read-only policy is a useful filter, not a security boundary. Do not expose
+an untrusted MCP server to Explore if it must be unable to make changes.
+
 pi's own built-in extensions are turned off by `--no-extensions` too. List them in `packages` as `builtin:<name>`; the child then gets `-e builtin:<name>`.
 
 **Codemode follows the parent.** When the parent session has `codemode` active, every child gets it, whatever its `tools:` list says, and the extension loads `builtin:codemode` into the child itself. Codemode scripts can only call tools that are already active in the child, so the per-agent allowlist still limits what the child can do. Because the child then has codemode active, its own subagents get it the same way.
@@ -84,7 +92,7 @@ Two failure modes are distinguished at spawn time:
 - Declaring a tool that is neither a built-in nor active in the parent session is a hard error; the child is not spawned.
 - Declaring an extension tool whose providing package is missing from the settings file spawns the child **with a warning**: the tool is silently absent there, and calling it fails with an unknown-tool error.
 
-Agents that declare no `tools:` inherit built-in tools only. Extension tools stay off unless an agent explicitly declares them, so default and specialist agents keep least-privilege toolsets and their prompts stay free of unrelated extension tool guidelines.
+Custom agents that declare no `tools:` inherit built-in tools only and do not inherit MCP tools. Built-in Build and Explore are the exceptions: they inherit active MCP tools under the policies above. Other extension tools stay off unless an agent explicitly declares them.
 
 **Recursion is bounded.** An agent that declares `subagent` (like an orchestrator) can dispatch subagents of its own — including one named like itself, because every child discovers the same user/project agent files. runChild stamps each child with a generation counter (`PI_SUBAGENTS_VFLO_DEPTH` environment variable) and refuses to spawn at nesting level `MAX_NESTING_DEPTH` (2): one orchestrator layer with its specialists works, deeper self-dispatch chains return a child error instead of forking pi processes without bound.
 
@@ -267,11 +275,12 @@ Every field is optional; an omitted field keeps the bundled value.
 - `thinking`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
   `max` is model-specific; Pi clamps an unsupported level to one the selected
   model supports.
-- `tools`: replaces the bundled tool list **and** its optional tools. It is
-  checked like an agent file's `tools:` list: each tool must be a built-in
-  tool or active in the parent session, or the spawn fails with an error. An
-  extension tool also needs its extension in `packages`. `codemode` is still
-  added when the parent has it.
+- `tools`: replaces the bundled built-in tool list **and** its optional
+  tools. It is checked like an agent file's `tools:` list: each tool must be a
+  built-in tool or active in the parent session, or the spawn fails with an
+  error. An extension tool also needs its extension in `packages`. This does
+  not disable the built-in Build/Explore MCP inheritance policies described
+  above. `codemode` is still added when the parent has it.
 
 Invalid or blank values are ignored one field at a time. These settings change
 only built-in defaults; a user or project agent named `explore` or `build`

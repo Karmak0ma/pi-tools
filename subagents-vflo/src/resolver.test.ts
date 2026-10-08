@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { getChildExtensionConfigPath } from "./child-extensions.js";
-import { resolveTools, type ToolResolutionOptions } from "./resolver.js";
+import { buildToolResolutionOptions, resolveTools, type ToolResolutionOptions } from "./resolver.js";
 import { DEFAULT_BUILD_TOOLS, type AgentConfig } from "./types.js";
 
 function makeAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
@@ -165,7 +165,7 @@ describe("resolveTools codemode follows the parent", () => {
 });
 
 describe("resolveTools inherited tools", () => {
-  it("inherits only built-in tools from the parent, never extension tools", () => {
+  it("inherits only built-in tools from the parent for agents without an MCP policy", () => {
     // Inheritance stays least-privilege: agents that declare no tools must
     // not silently gain subagent/extension tools and their prompt guidelines.
     const agent = makeAgent();
@@ -184,5 +184,128 @@ describe("resolveTools inherited tools", () => {
 
     expect(result.tools).toEqual([...DEFAULT_BUILD_TOOLS]);
     expect(result.warnings.some((w) => w.includes("default build tools"))).toBe(true);
+  });
+
+  it("inherits active MCP tools for Build but not unrelated extension tools", () => {
+    const agent = makeAgent({
+      name: "build",
+      tools: ["read", "bash", "edit", "write"],
+      mcpToolInheritance: "active",
+    });
+    const mcpRead = "mcp__files__read_file";
+    const mcpWrite = "mcp__files__write_file";
+    const options: ToolResolutionOptions = {
+      mcpTools: new Map([
+        [mcpRead, { annotations: { readOnlyHint: true }, exposure: "direct" }],
+        [mcpWrite, { annotations: { readOnlyHint: false }, exposure: "direct" }],
+      ]),
+      extensionToolSources: new Map([[mcpRead, "builtin:mcp"], [mcpWrite, "builtin:mcp"]]),
+      childExtensionPaths: ["builtin:mcp"],
+    };
+
+    const result = resolveTools(agent, ["read", "bash", "edit", "write", mcpRead, mcpWrite], options);
+
+    expect(result.tools).toEqual(["read", "bash", "edit", "write", mcpRead, mcpWrite]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("inherits only active MCP tools explicitly marked read-only for Explore", () => {
+    const agent = makeAgent({
+      name: "explore",
+      tools: ["read", "grep", "find", "ls", "bash"],
+      mcpToolInheritance: "read-only",
+    });
+    const readOnly = "mcp__docs__search";
+    const write = "mcp__docs__update";
+    const unannotated = "mcp__docs__unknown";
+    const inactive = "mcp__docs__inactive_read";
+    const options: ToolResolutionOptions = {
+      mcpTools: new Map([
+        [readOnly, { annotations: { readOnlyHint: true }, exposure: "direct" }],
+        [write, { annotations: { readOnlyHint: false }, exposure: "direct" }],
+        [unannotated, { exposure: "direct" }],
+        [inactive, { annotations: { readOnlyHint: true }, exposure: "direct" }],
+        ["mcp__docs__hidden_read", { annotations: { readOnlyHint: true }, exposure: "hidden" }],
+      ]),
+      extensionToolSources: new Map([
+        [readOnly, "builtin:mcp"],
+        [write, "builtin:mcp"],
+        [unannotated, "builtin:mcp"],
+        [inactive, "builtin:mcp"],
+        ["mcp__docs__hidden_read", "builtin:mcp"],
+      ]),
+      childExtensionPaths: ["builtin:mcp"],
+    };
+
+    const result = resolveTools(
+      agent,
+      ["read", "grep", "find", "ls", "bash", readOnly, write, unannotated],
+      options,
+    );
+
+    expect(result.tools).toEqual(["read", "grep", "find", "ls", "bash", readOnly]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("does not inherit MCP tools by default for custom agents", () => {
+    const tool = "mcp__docs__search";
+    const result = resolveTools(makeAgent({ tools: ["read"] }), ["read", tool], {
+      mcpTools: new Map([[tool, { annotations: { readOnlyHint: true } }]]),
+    });
+
+    expect(result.tools).toEqual(["read"]);
+  });
+
+  it("warns when an inherited MCP tool has no backing builtin:mcp package", () => {
+    const tool = "mcp__docs__search";
+    const result = resolveTools(
+      makeAgent({ tools: ["read"], mcpToolInheritance: "read-only" }),
+      ["read", tool],
+      {
+        mcpTools: new Map([[tool, { annotations: { readOnlyHint: true } }]]),
+        extensionToolSources: new Map([[tool, "builtin:mcp"]]),
+        childExtensionPaths: [],
+      },
+    );
+
+    expect(result.tools).toEqual(["read", tool]);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain(`Tool "${tool}"`);
+    expect(result.warnings[0]).toContain("builtin:mcp");
+  });
+
+  it("does not add tools when there are no MCP tools to inherit", () => {
+    const result = resolveTools(
+      makeAgent({ tools: ["read", "bash"], mcpToolInheritance: "active" }),
+      ["read", "bash"],
+      { mcpTools: new Map() },
+    );
+
+    expect(result.tools).toEqual(["read", "bash"]);
+  });
+
+  it("classifies tools by the built-in MCP source, not annotations or names", () => {
+    const pi = {
+      getAllTools: () => [
+        {
+          name: "mcp__docs__search",
+          sourceInfo: { path: "builtin:mcp" },
+          annotations: { readOnlyHint: true },
+        },
+        {
+          name: "looks_like_mcp",
+          sourceInfo: { path: "/extensions/other.js" },
+          annotations: { readOnlyHint: true },
+        },
+      ],
+    };
+
+    const options = buildToolResolutionOptions(pi as never);
+
+    expect(options.mcpTools).toEqual(
+      new Map([["mcp__docs__search", { annotations: { readOnlyHint: true }, exposure: undefined }]]),
+    );
+    expect(options.extensionToolSources?.get("mcp__docs__search")).toBe("builtin:mcp");
+    expect(options.mcpTools?.has("looks_like_mcp")).toBe(false);
   });
 });

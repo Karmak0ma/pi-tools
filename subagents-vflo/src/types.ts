@@ -43,6 +43,9 @@ export type AgentSource = "builtin" | "user" | "project";
 
 export type BuiltinAgentName = "explore" | "build";
 
+/** Which active MCP tools a bundled agent may inherit from its parent session. */
+export type McpToolInheritancePolicy = "none" | "active" | "read-only";
+
 /**
  * Settings-file overrides for one built-in agent (`default_agents.<name>`).
  * Each field is optional; an omitted field keeps the bundled value.
@@ -63,6 +66,12 @@ export interface AgentConfig {
   name: string;
   description: string;
   tools?: string[];
+  /**
+   * MCP tools are inherited separately from the base tools allowlist. Custom
+   * agents omit this field and therefore inherit none. Explore's read-only
+   * policy uses MCP's author-provided readOnlyHint; it is not a security guarantee.
+   */
+  mcpToolInheritance?: McpToolInheritancePolicy;
   /**
    * Extension tools the agent uses when the parent session has them, and
    * silently goes without otherwise. Set only by the built-in agents (not
