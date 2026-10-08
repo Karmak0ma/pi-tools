@@ -1,0 +1,42 @@
+{
+  "packages": [
+    "/home/vflores/repos/pi-tools/pi-opencode-bridge",
+    "/home/vflores/repos/pi-tools/pi-dcp",
+    "/home/vflores/repos/pi-tools/subagents-vflo",
+    "/home/vflores/repos/pi-tools/sidebar-vflo",
+    "/home/vflores/repos/pi-tools/claude-tool-repair",
+    "/home/vflores/.pi/agent/git/github.com/philipbrembeck/pi-advisor",
+    "npm:@aliou/pi-guardrails",
+    "npm:@narumitw/pi-statusline",
+    "npm:@henryqw/pi-herdr-rename",
+    "npm:@benvargas/pi-claude-code-use",
+    "npm:pi-web-access",
+    "builtin:mcp"
+  ],
+  "default_agents": {
+    "explore": {
+      "model": "openai-codex/gpt-6-luna",
+      "thinking": "medium",
+      "tools": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash",
+        "compress"
+      ]
+    },
+    "build": {
+      "model": "openai-codex/gpt-6-luna",
+      "thinking": "xhigh",
+      "tools": [
+        "read",
+        "bash",
+        "edit",
+        "write",
+        "compress",
+        "ask_advisor"
+      ]
+    }
+  }
+}
