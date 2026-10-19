@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { FakeRpcChild } from "./fake-rpc-child.js";
 import { createBackend, createDefaultBackend } from "./backends.js";
 import { NESTING_DEPTH_ENV } from "./runner.js";
@@ -25,6 +29,43 @@ describe("DefaultBackend", () => {
 
     const result = await handle.result;
     expect(result.exitCode).toBe(0);
+  });
+
+  // A resume must contain the real Pi context, not merely pass a path flag.
+  // Private forks also keep a still-open original child from sharing writes.
+  it("forks completed RPC history and refuses a missing history without spawning", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rpc-continuation-"));
+    try {
+      const original = SessionManager.create(dir, dir);
+      original.appendMessage({ role: "user", content: "remember blue lantern", timestamp: 1 });
+      const stop = fs.readFileSync(new URL("./fixtures/real-pi-session.jsonl", import.meta.url), "utf8")
+        .split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((entry) => entry.message?.stopReason === "stop");
+      original.appendMessage(stop.message);
+      const source = original.getSessionFile()!;
+      const before = fs.readFileSync(source, "utf8");
+      let forkFile = "";
+      const spawnProcess = vi.fn((_command: string, args: string[]) => {
+        forkFile = args[args.indexOf("--session") + 1];
+        expect(forkFile).not.toBe(source);
+        const fork = SessionManager.open(forkFile);
+        expect(fork.getSessionId()).not.toBe(original.getSessionId());
+        expect(fork.buildSessionContext().messages).toEqual(original.buildSessionContext().messages);
+        return new FakeRpcChild();
+      });
+      const spec = {
+        resolvedTools: ["read"], resolvedCwd: dir, agentName: "worker", agentPrompt: "",
+        taskText: "what did I ask you to remember?", parentSessionDir: dir,
+        continueFrom: source, spawnProcess: spawnProcess as any,
+      };
+      const handle = await createDefaultBackend().spawn(spec);
+      expect((await handle.result).sessionFile).toBe(forkFile);
+      expect(fs.readFileSync(source, "utf8")).toBe(before);
+      const missing = await createDefaultBackend().spawn({ ...spec, continueFrom: path.join(dir, "missing") });
+      await expect(missing.result).rejects.toThrow();
+      expect(spawnProcess).toHaveBeenCalledTimes(1);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("maps a crashing RPC child to a failed result, never a completion", async () => {
@@ -127,6 +168,7 @@ describe("createBackend selection", () => {
     vi.stubEnv(HERDR_PANE_ID_VAR, "wJ:pH");
     const fake: HerdrClient = {
       paneSplit: async () => ({ paneId: "wJ:p1" }),
+      paneZoom: async () => {},
       agentStart: async () => {},
       agentWait: async () => {},
       agentGet: async () => ({ agentStatus: "idle", lifecycleHookAuthority: true }),

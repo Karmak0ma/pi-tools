@@ -11,6 +11,7 @@ A pi extension that enables delegating tasks to specialized subagents running in
 - **Live streaming** — See subagent output as it's generated
 - **Live usage header** — Track input, output, cached tokens, and context-window utilization while each subagent works
 - **Persistent child history** — Store each child session as an isolated JSONL file below the parent Pi session directory
+- **Context-preserving follow-ups** — Continue completed subagent conversations with blocking or async requests
 - **Context-aware abort** — Graceful SIGTERM → SIGKILL escalation with timer cleanup
 - **Agent discovery** — Built-in, user, and project agents with clear override precedence
 - **Child extension UI bridge** — Blocking RPC dialogs are presented as parent-side modals with FIFO ownership and fail-closed cancellation
@@ -56,6 +57,65 @@ The extension registers a `subagent` tool that accepts a `tasks` array:
 | `task` | Yes | The prompt/instruction for the subagent |
 | `model` | No | Override the model for this task |
 | `cwd` | No | Working directory for the subagent |
+
+### Continue a completed subagent
+
+Both blocking and async calls return task IDs. Once a task completes successfully,
+the parent can send another request to its saved conversation:
+
+```json
+{
+  "taskId": "task-1",
+  "task": "Check whether the same issue exists in the other backend.",
+  "async": true
+}
+```
+
+Send this to **`subagent_continue`**, not `subagent`. `taskId` and `task` are
+required; `async` defaults to false. The result contains a **new task ID**.
+Use that new ID for status, waiting, cancellation, and the next follow-up.
+Blocking results include IDs in their text and `details.taskIds`; async results
+and completion notifications also include them.
+
+Rules and limits:
+
+- Wait for successful completion first. A queued or running child cannot be
+  continued, and only one request in a conversation can be active at a time.
+- Use the latest successfully completed ID in the conversation. Older ancestors
+  cannot create competing branches. A failed or cancelled follow-up does not
+  replace the latest successful ID, so you can retry from that ID.
+- The child keeps its conversation messages, tool results and Pi context
+  changes, including compaction. There are no per-request configuration
+  overrides; use a new `subagent` call for those.
+- **Herdr:** if the original pane is open and its original child is idle,
+  the request runs in that same pane and Pi process. Manual conversation and
+  settings changes made there remain part of the live session. Only new
+  output and usage belong to the follow-up result; old replies are not replayed.
+  Safe reuse requires Pi's managed lifecycle hook to report idle/done. Busy,
+  blocked, unknown, replaced or untracked children return an error, as do
+  connection failures; these never silently open a duplicate pane. Do not type
+  into the child while the parent submits a follow-up: Herdr cannot reserve
+  terminal input against simultaneous human input.
+- **Closed Herdr pane or default RPC backend:** the request forks the frozen
+  completed history into a private session and starts a replacement child,
+  with the original resolved agent settings. A closed Herdr pane gets a new
+  pane; later manual input after the saved completion is not restored. This
+  fallback restores conversation context, not process memory. Project files
+  are not rolled back or isolated.
+- Async follows the same rules as the initial call: top-level interactive TUI
+  sessions receive a completion notification; nested or non-TUI calls fall back
+  to blocking. Existing status, wait, cancel and inspector controls also work
+  for follow-up IDs.
+- Task IDs and conversation ownership belong to the current extension runtime.
+  Session switches, shutdown and extension reload discard them. The session
+  files remain for inspection, but old IDs cannot be resumed after a restart.
+- Continuation requires readable completed child history. If saving it fails,
+  the task still returns its original result with a warning, but cannot be
+  continued. Frozen snapshots (`task-N.continuation`) live beside child JSONL
+  files and follow the same manual cleanup policy.
+
+A nested agent must declare `subagent_continue` in its `tools:` allowlist if it
+needs to issue follow-ups; declaring `subagent` alone does not grant that tool.
 
 ### Allowed Tools
 
@@ -144,10 +204,11 @@ When the parent Pi session runs inside a [Herdr](https://herdr.dev/)
 workspace (`HERDR_ENV=1` plus `HERDR_PANE_ID`), spawned subagents become real,
 interactive Pi sessions instead of headless RPC children:
 
-- Each subagent gets its **own pane** in the current Herdr workspace, created
-  with `herdr pane split --current --no-focus` so it never steals keyboard
-  focus. The first task of a batch splits right; later tasks split down (and a
-  narrow parent always splits down).
+- Each subagent gets its **own pane** in the current Herdr workspace. The
+  backend creates it with `herdr pane split --current --no-focus`, then runs
+  `herdr pane zoom <pane> --on` to show the child full-screen. Zoom focuses
+  the new child. The first task of a batch splits right; later tasks split down
+  (and a narrow parent always splits down).
 - The child is launched with `herdr agent start <name> --kind pi`. Herdr says
   "ready" and `idle` from a guess before Pi can take input, so the backend
   sends the first task prompt only when Pi's lifecycle hook reports `idle`

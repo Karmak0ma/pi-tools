@@ -23,10 +23,12 @@
  * calls it would multiply the number of live children.
  */
 
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import type { AgentConfig } from "./types.js";
 import { findAgent, formatAgentList } from "./agents.js";
 import { withRequiredChildExtensions } from "./child-extensions.js";
-import type { SubagentBackend } from "./backends.js";
+import type { SubagentBackend, SubagentHandle, SubagentSpec } from "./backends.js";
 import type { ChildExtensionUIBroker, ChildUIDialogPresenter, ChildUIRequestOwner } from "./extension-ui-broker.js";
 import type { ChildRunResult } from "./runner.js";
 import {
@@ -97,6 +99,9 @@ export interface TaskManagerDeps {
 interface TaskRecord {
   controller: AbortController;
   result: Promise<PersistedTaskSummary>;
+  /** One owner across the whole chain; queued follow-ups also hold the lock. */
+  conversation: { latestTaskId: string; activeTaskId?: string };
+  continuation?: { spec: SubagentSpec; sessionFile: string; resume?: SubagentHandle["resume"] };
 }
 
 export class SubagentTaskManager {
@@ -108,6 +113,7 @@ export class SubagentTaskManager {
   // child callback from a replaced session update a new task reusing its id.
   private taskSequence = 0;
   private batchSequence = 0;
+  private resetInProgress?: Promise<void>;
 
   constructor(private readonly deps: TaskManagerDeps) {
     this.slots = new Semaphore(deps.maxConcurrent);
@@ -124,6 +130,7 @@ export class SubagentTaskManager {
    * task ids at once; tasks beyond the global limit wait in FIFO order.
    */
   start(tasks: TaskItem[], context: TaskStartContext): string[] {
+    if (this.resetInProgress) throw new Error("Cannot start subagents during session reset");
     const batchId = ++this.batchSequence;
     // Capture the broker for these tasks. A session switch replaces the
     // manager's broker while stale child callbacks are still unwinding;
@@ -144,10 +151,70 @@ export class SubagentTaskManager {
       this.deps.tracker.add(instance);
       const controller = new AbortController();
       const result = this.runTask(instance, task, index, context, broker, controller.signal);
-      this.records.set(id, { controller, result });
+      this.records.set(id, { controller, result, conversation: { latestTaskId: id } });
       ids.push(id);
     });
     return ids;
+  }
+
+  /**
+   * Continue the latest successful exchange. Reserve ownership synchronously:
+   * two simultaneous parent tool calls must not fork competing follow-ups.
+   * Failed/cancelled follow-ups leave the last successful exchange retryable.
+   */
+  continue(id: string, taskText: string, uiContext: unknown): string {
+    if (this.resetInProgress) throw new Error("Cannot continue subagents during session reset");
+    const previous = this.records.get(id);
+    if (!previous) throw new Error(`Unknown subagent task id: ${id}`);
+    if (!taskText.trim()) throw new Error("The follow-up request must not be empty");
+    if (!previous.continuation) throw new Error(`Task ${id} must be completed with saved history before continuation`);
+    const conversation = previous.conversation;
+    if (conversation.activeTaskId) throw new Error(`Subagent conversation is busy (${conversation.activeTaskId})`);
+    if (conversation.latestTaskId !== id) throw new Error(`Use the latest completed task id: ${conversation.latestTaskId}`);
+    const priorInstance = this.deps.tracker.get(id)!;
+    const nextId = `task-${++this.taskSequence}`;
+    const instance = createInstance({
+      id: nextId,
+      batchId: ++this.batchSequence,
+      agent: priorInstance.agent,
+      source: priorInstance.source,
+      task: taskText,
+      cwd: priorInstance.cwd,
+    });
+    instance.model = priorInstance.model;
+    instance.summary.model = priorInstance.model;
+    instance.contextWindow = priorInstance.contextWindow;
+    instance.thinking = priorInstance.thinking;
+    instance.tools = [...priorInstance.tools];
+    this.deps.tracker.add(instance);
+    const controller = new AbortController();
+    const broker = this._broker;
+    const spec = { ...previous.continuation.spec, taskText, continueFrom: previous.continuation.sessionFile };
+    conversation.activeTaskId = nextId;
+    const result = this.runContinuation(instance, spec, broker, controller.signal, uiContext, previous.continuation.resume).finally(() => {
+      if (conversation.activeTaskId === nextId) conversation.activeTaskId = undefined;
+    });
+    this.records.set(nextId, { controller, result, conversation });
+    return nextId;
+  }
+
+  private async runContinuation(
+    instance: RuntimeSubagentInstance,
+    spec: SubagentSpec,
+    broker: ChildExtensionUIBroker,
+    signal: AbortSignal,
+    uiContext: unknown,
+    resume?: SubagentHandle["resume"],
+  ): Promise<PersistedTaskSummary> {
+    const acquired = await this.slots.acquire(signal);
+    if (!acquired) return this.makeCancelledSummary(instance);
+    try {
+      if (signal.aborted) return this.makeCancelledSummary(instance);
+      this.transition(instance, "running", { lifecycle: "running" });
+      return await this.spawnTask(instance, spec, broker, signal, uiContext, resume);
+    } finally {
+      this.slots.release();
+    }
   }
 
   /** Whether the id names a task of the current session. */
@@ -192,16 +259,22 @@ export class SubagentTaskManager {
    * End the current session's tasks: dispose the broker, kill live children,
    * drop all task state, and start the next session with a fresh broker.
    */
-  async resetSession(): Promise<void> {
+  resetSession(): Promise<void> {
+    if (this.resetInProgress) return this.resetInProgress;
     const oldBroker = this._broker;
-    await oldBroker.dispose();
-    // Abort queued tasks first so none of them spawns while live ones are
-    // being killed.
-    for (const record of this.records.values()) record.controller.abort();
-    await this.deps.tracker.killAll();
-    this.deps.tracker.clear();
-    this.records.clear();
-    this._broker = this.deps.createBroker();
+    // Publish the admission gate before cleanup callbacks can run. Otherwise
+    // a new request can miss the kill pass and outlive its tracking records.
+    // Concurrent reset callers share cleanup instead of reopening the gate.
+    this.resetInProgress = Promise.resolve().then(async () => {
+      await oldBroker.dispose();
+      // Abort queued tasks first so none spawns while live ones are killed.
+      for (const record of this.records.values()) record.controller.abort();
+      await this.deps.tracker.killAll();
+      this.deps.tracker.clear();
+      this.records.clear();
+      this._broker = this.deps.createBroker();
+    }).finally(() => { this.resetInProgress = undefined; });
+    return this.resetInProgress;
   }
 
   // ─── Task execution ────────────────────────────────────────────────────────
@@ -302,31 +375,45 @@ export class SubagentTaskManager {
     // inspector steering.
     this.transition(instance, "running", { lifecycle: "running" });
 
-    // Run the child through the selected execution backend (Herdr pane or
-    // RPC subprocess). Spawn resolves once runtime handles exist;
-    // handle.result carries the terminal child semantics.
+    return this.spawnTask(instance, {
+      resolvedModel: modelResult.model,
+      resolvedTools: toolResult.tools,
+      resolvedCwd: cwdResult.cwd,
+      agentName: agent.name,
+      agentPrompt: agent.systemPrompt,
+      taskText: task.task,
+      thinking: instance.thinking,
+      // Both backends (RPC and Herdr) receive the same list, so the
+      // auto-loaded builtin:codemode is added once, here.
+      childExtensionPaths: withRequiredChildExtensions(
+        context.toolResolutionOptions.childExtensionPaths,
+        toolResult.tools,
+      ),
+      parentSessionDir: context.parentSessionDir,
+      splitDirection: index === 0 ? "right" : "down",
+    }, broker, signal, context.uiContext);
+  }
+
+  /** Both new and continued requests share observation, dialogs and cleanup. */
+  private async spawnTask(
+    instance: RuntimeSubagentInstance,
+    spec: SubagentSpec,
+    broker: ChildExtensionUIBroker,
+    signal: AbortSignal,
+    uiContext: unknown,
+    resume?: SubagentHandle["resume"],
+  ): Promise<PersistedTaskSummary> {
+    const id = instance.id;
+    // Capture this record before any await. A session reset must not let a
+    // stale completion register continuation data in the replacement session.
+    const record = this.records.get(id)!;
     try {
-      const handle = await this.deps.backend.spawn({
-        resolvedModel: modelResult.model,
-        resolvedTools: toolResult.tools,
-        resolvedCwd: cwdResult.cwd,
-        agentName: agent.name,
-        agentPrompt: agent.systemPrompt,
-        taskText: task.task,
-        thinking: instance.thinking,
-        // Both backends (RPC and Herdr) receive the same list, so the
-        // auto-loaded builtin:codemode is added once, here.
-        childExtensionPaths: withRequiredChildExtensions(
-          context.toolResolutionOptions.childExtensionPaths,
-          toolResult.tools,
-        ),
-        parentSessionDir: context.parentSessionDir,
-        // The task's own lifetime signal (see cancel()), not a tool call's.
+      // A live backend owns reuse and closure checks. The manager must not
+      // infer pane death from a failed resume and start a duplicate worker.
+      const launch = resume ?? ((nextSpec: SubagentSpec) => this.deps.backend.spawn(nextSpec));
+      const handle = await launch({
+        ...spec,
         signal,
-        // Pane geometry hint (Herdr only): first task of a batch right, the
-        // rest stacked down so a concurrent batch cannot shrink the parent
-        // pane into a sliver.
-        splitDirection: index === 0 ? "right" : "down",
         onEvent: (event) => {
           this.notify(id, applyChildEvent(instance, event));
         },
@@ -336,7 +423,7 @@ export class SubagentTaskManager {
             owner,
             request,
             channel,
-            presenter: this.deps.createPresenter(context.uiContext, owner),
+            presenter: this.deps.createPresenter(uiContext, owner),
             activeToolCalls: Array.from(instance.activeToolCalls.values()),
           });
           instance.pendingUIRequestCount = broker.getOwnerPendingCount(instance.id);
@@ -356,6 +443,28 @@ export class SubagentTaskManager {
 
       const childResult = await handle.result;
       releaseChildRuntime(broker, instance);
+      if (childResult.lifecycle === "completed" && !isTaskFailed(childResult) && childResult.sessionFile) {
+        try {
+          // Freeze a replacement child's context at the completed boundary.
+          // An open Herdr child instead keeps its live conversation, including
+          // manual input; only its backend decides whether reuse is possible.
+          // The non-JSONL suffix keeps snapshots out of the session watcher.
+          const snapshot = path.join(path.dirname(childResult.sessionFile), `${id}.continuation`);
+          const history = await fs.readFile(childResult.sessionFile);
+          const boundary = childResult.sessionBytes ?? history.length;
+          if (history.length < boundary) throw new Error("Completed history was truncated");
+          // Preserve the monitor's exact stop boundary, not later input from
+          // the still-live pane. A late abort cannot revoke a completed reply.
+          await fs.writeFile(snapshot, history.subarray(0, boundary), { mode: 0o600 });
+          if (this.records.get(id) === record) {
+            record.continuation = { spec, sessionFile: snapshot, resume: handle.resume };
+            record.conversation.latestTaskId = id;
+          }
+        } catch {
+          instance.warnings.push("Continuation unavailable: could not save child history");
+          instance.summary.warnings = [...instance.warnings];
+        }
+      }
       return this.makeChildResultSummary(instance, childResult, signal);
     } catch (err: any) {
       // A failed spawn or a backend error. Release anything the child may

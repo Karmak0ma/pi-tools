@@ -1,8 +1,8 @@
 /**
  * Live smoke test for the exact Herdr argv sequences the Herdr backend sends.
- * Run from inside a Herdr pane only. Creates one pane, boots a pi TUI with the
- * managed lifecycle hook, waits until the hook owns an idle state (the
- * backend's readiness gate), submits a real prompt in
+ * Run from inside a Herdr pane only. Creates and zooms one full-screen pane,
+ * boots a pi TUI with the managed lifecycle hook, waits until the hook owns
+ * an idle state (the backend's readiness gate), submits a real prompt in
  * fire-and-forget mode, then closes the pane and verifies the child is gone.
  * Cleans up after itself.
  *
@@ -83,6 +83,10 @@ try {
   ]);
   paneId = split.result.pane.pane_id;
   console.log("split pane:", paneId, "focused:", split.result.pane.focused);
+
+  // Mirrors HerdrCli.paneZoom. Zooming focuses the new child pane.
+  await herdr(["pane", "zoom", paneId, "--on"]);
+  console.log("pane zoomed to full-screen and focused");
 
   // Mirrors HerdrCli.agentStart for the same argv the backend builds.
   const name = `smoke-${Date.now().toString(36).slice(-6)}`;

@@ -11,7 +11,7 @@
  * Adapted from the official pi subagent example.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { discoverAgents, findAgent, formatAgentList } from "./agents.js";
 import { renderCall, renderResult } from "./render.js";
@@ -78,7 +78,13 @@ const SubagentParams = Type.Object({
   ),
 });
 
-/** Task id list. Ids are "task-N", as returned by an async subagent call. */
+const SubagentContinueParams = Type.Object({
+  taskId: Type.String({ description: "Latest successfully completed task id from this conversation (for example task-3)." }),
+  task: Type.String({ description: "New request. The child retains its completed conversation and original configuration.", minLength: 1 }),
+  async: SubagentParams.properties.async,
+});
+
+/** Task id list. Ids are "task-N", as returned by subagent calls. */
 const taskIdsSchema = (description: string) => Type.Array(Type.String(), { description });
 
 const SubagentStatusParams = Type.Object({
@@ -220,9 +226,9 @@ export default function (pi: ExtensionAPI) {
   // Mark final tool results as real tool failures when execute recorded an overall failure.
   // Pi runtime only treats thrown errors or tool_result patches as actual isError results.
   pi.on("tool_result", async (event) => {
-    // subagent_wait returns the same results as a blocking call, so it gets
-    // the same rule: an error only when every returned task failed.
-    if (event.toolName !== "subagent" && event.toolName !== "subagent_wait") return;
+    // Waiting and continuation return the same results as an initial call,
+    // so all three use the same failure boundary.
+    if (!["subagent", "subagent_continue", "subagent_wait"].includes(event.toolName)) return;
     const details = event.details as PersistedSubagentToolDetails | undefined;
     if (!details?.overallFailed) return;
     return { isError: true };
@@ -330,18 +336,93 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
+  /** Shared delivery path: continuation has exactly the same async, wait and abort semantics. */
+  async function deliverTasks(
+    toolCallId: string,
+    taskIds: string[],
+    asyncRequested: boolean,
+    signal: AbortSignal | undefined,
+    onUpdate: Parameters<ToolDefinition["execute"]>[3],
+    ctx: ExtensionContext,
+  ) {
+    const runAsync = asyncRequested && asyncAvailable(ctx);
+    const sessionFile = getParentSessionPath(ctx, "getSessionFile");
+    if (runAsync) {
+      // Tasks now belong to the session, not to this call: the tool
+      // signal is NOT connected to cancel (the call ends right away).
+      deliveries.track(taskIds, manager.wait(taskIds), (results) => pushBackgroundResults(results, sessionFile));
+      const listing = taskIds.map((id) => `${id} (${tracker.get(id)?.agent})`).join(", ");
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Started ${taskIds.length} subagent task(s) in the background: ${listing}.\n` +
+            `The results will arrive as one message when all of them have finished. Continue with other work. ` +
+            `Use subagent_status, subagent_wait or subagent_cancel with these ids if needed.`,
+        }],
+        details: {
+          mode: "tasks",
+          taskCount: taskIds.length,
+          summaries: [],
+          taskIds,
+          background: true,
+        } as PersistedSubagentToolDetails,
+      };
+    }
+
+    // Live tool row: show this call's tasks, throttled like the inspector.
+    // The row is hidden behind the inspector overlay, so skip it while the
+    // inspector is open.
+    const invocationIds = new Set(taskIds);
+    const rowRefresh = new Throttle(() => {
+      if (!onUpdate || tuiManager.isActive) return;
+      onUpdate(liveToolUpdate(tracker, taskIds));
+    });
+    const unsubscribe = manager.onChange((change) => {
+      if (!invocationIds.has(change.taskId)) return;
+      if (change.urgency === "immediate") rowRefresh.immediate();
+      else rowRefresh.throttled();
+    });
+    rowRefresh.immediate();
+
+    // Blocking call: aborting the tool call (Escape) cancels its tasks.
+    const cancelInvocation = () => manager.cancel(taskIds);
+    signal?.addEventListener("abort", cancelInvocation, { once: true });
+    if (signal?.aborted) cancelInvocation();
+
+    let results: PersistedTaskSummary[];
+    try {
+      results = await manager.wait(taskIds);
+    } finally {
+      unsubscribe();
+      signal?.removeEventListener("abort", cancelInvocation);
+      rowRefresh.flush();
+    }
+
+    const result = buildToolResult(results, toolCallId, sessionFile);
+    result.details.taskIds = taskIds;
+    result.content[0].text += `\n\nTask ids: ${taskIds.join(", ")}. Use subagent_continue with the latest completed id for a follow-up.`;
+    if (asyncRequested) {
+      // The model asked for async; tell it why it got results instead.
+      result.content[0].text =
+        "Note: async is not available in this mode (only the interactive TUI at the top level), so the tasks ran blocking.\n\n" +
+        result.content[0].text;
+    }
+    return result;
+  }
+
   // ─── Tool Registration ───────────────────────────────────────────────────
 
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
     description:
-      "Delegate tasks to specialized subagents with isolated context windows. Each task runs in a separate process.",
+      "Delegate tasks to specialized subagents with isolated context windows. Returns task IDs. After successful completion, use subagent_continue({ taskId, task, async? }) for follow-up requests to the same conversation only if it's beneficial to keep the subagent previous context. Use the latest successfully completed ID. Initial and follow-up requests support blocking or async delivery.",
     promptSnippet:
       "Delegate tasks to specialized subagents (explore, build, or custom) with isolated context",
     promptGuidelines: [
       `Use subagent proactively for: independent read-only research, broad codebase reconnaissance, high-volume command output that would clutter the main context, parallel multi-domain investigation where each branch can return a concise summary, and independent review or verification after implementation with the read-only explore agent.`,
       `Do not use subagent for: simple answers, quick targeted edits, latency-sensitive one-step work, tasks needing frequent user back-and-forth, or parallel implementation editing the same files (serialize write-heavy work instead). Do not spawn a build agent just to rename one symbol in a known file; edit it directly.`,
+      `For follow-up work with the same agent, call subagent_continue with the latest successfully completed task ID and the new request. The child keeps its conversation context, so do not reconstruct its earlier work in a fresh subagent prompt and only use this option when prior work might still be useful. Wait for completion before continuing; only one request per conversation can be active. Each follow-up returns a new task ID. Busy or uncertain live state reports an error. Set async on the continuation independently under the same async rules as the initial call.`,
       `Only set tasks[i].model when the user explicitly asks for a different model. If omitted, built-in agents use their configured default (or the bundled default), custom agents may use a model from their frontmatter, and the parent model is the final fallback.`,
       `Only set tasks[i].thinking when the user explicitly asks for a different thinking effort level. Values: "off", "minimal", "low", "medium", "high", "xhigh", "max". If omitted, built-in agents use their configured or bundled level; custom agents use the model's default.`,
       `subagent is BLOCKING by default (async omitted or false): the call waits and returns the results. Keep this default unless there is a clear reason for background work.`,
@@ -375,10 +456,6 @@ export default function (pi: ExtensionAPI) {
         return failedToolResult(unknownAgentErrors.join("\n\n"), tasks.length);
       }
 
-      const asyncRequested = params.async === true;
-      const runAsync = asyncRequested && asyncAvailable(ctx);
-      const sessionFile = getParentSessionPath(ctx, "getSessionFile");
-
       const availableModels = await ctx.modelRegistry.getAvailable();
       const taskIds = manager.start(tasks, {
         agents,
@@ -395,65 +472,7 @@ export default function (pi: ExtensionAPI) {
         uiContext: ctx,
       });
 
-      if (runAsync) {
-        // Tasks now belong to the session, not to this call: the tool
-        // signal is NOT connected to cancel (the call ends right away).
-        deliveries.track(taskIds, manager.wait(taskIds), (results) => pushBackgroundResults(results, sessionFile));
-        const listing = taskIds.map((id, index) => `${id} (${tasks[index].agent})`).join(", ");
-        return {
-          content: [{
-            type: "text" as const,
-            text: `Started ${taskIds.length} subagent task(s) in the background: ${listing}.\n` +
-              `The results will arrive as one message when all of them have finished. Continue with other work. ` +
-              `Use subagent_status, subagent_wait or subagent_cancel with these ids if needed.`,
-          }],
-          details: {
-            mode: "tasks",
-            taskCount: taskIds.length,
-            summaries: [],
-            taskIds,
-            background: true,
-          } as PersistedSubagentToolDetails,
-        };
-      }
-
-      // Live tool row: show this call's tasks, throttled like the inspector.
-      // The row is hidden behind the inspector overlay, so skip it while the
-      // inspector is open.
-      const invocationIds = new Set(taskIds);
-      const rowRefresh = new Throttle(() => {
-        if (!onUpdate || tuiManager.isActive) return;
-        onUpdate(liveToolUpdate(tracker, taskIds));
-      });
-      const unsubscribe = manager.onChange((change) => {
-        if (!invocationIds.has(change.taskId)) return;
-        if (change.urgency === "immediate") rowRefresh.immediate();
-        else rowRefresh.throttled();
-      });
-      rowRefresh.immediate();
-
-      // Blocking call: aborting the tool call (Escape) cancels its tasks.
-      const cancelInvocation = () => manager.cancel(taskIds);
-      signal?.addEventListener("abort", cancelInvocation, { once: true });
-      if (signal?.aborted) cancelInvocation();
-
-      let results: PersistedTaskSummary[];
-      try {
-        results = await manager.wait(taskIds);
-      } finally {
-        unsubscribe();
-        signal?.removeEventListener("abort", cancelInvocation);
-        rowRefresh.flush();
-      }
-
-      const result = buildToolResult(results, toolCallId, sessionFile);
-      if (asyncRequested) {
-        // The model asked for async; tell it why it got results instead.
-        result.content[0].text =
-          "Note: async is not available in this mode (only the interactive TUI at the top level), so the tasks ran blocking.\n\n" +
-          result.content[0].text;
-      }
-      return result;
+      return deliverTasks(toolCallId, taskIds, params.async === true, signal, onUpdate, ctx);
     },
 
     renderCall(args, theme, _context) {
@@ -461,6 +480,32 @@ export default function (pi: ExtensionAPI) {
     },
 
     renderResult(result, options, theme, _context) {
+      return renderResult(result, options, theme);
+    },
+  });
+
+  pi.registerTool({
+    name: "subagent_continue",
+    label: "Continue subagent",
+    description: "Send a follow-up to a completed subagent without losing its conversation. Reuses its idle open Herdr pane; otherwise restores saved context in a new child. Returns a new task id. Supports blocking and async delivery like subagent.",
+    promptSnippet: "Send a follow-up to a completed subagent without losing its context",
+    promptGuidelines: [
+      "Use subagent_continue for follow-up work with a completed child, not a fresh subagent with a summary of its earlier answer. Use the latest successfully completed task id from that conversation.",
+      "Do not continue a queued or running conversation. Wait for completion first. Async continuation follows the same availability and usage rules as async subagent calls.",
+    ],
+    parameters: SubagentContinueParams,
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      let taskId: string;
+      try {
+        taskId = manager.continue(params.taskId, params.task, ctx);
+      } catch (error) {
+        // Validation errors create no tasks and must not schedule an async
+        // notification. Only the manager owns continuation eligibility.
+        return failedToolResult(error instanceof Error ? error.message : String(error), 1);
+      }
+      return deliverTasks(toolCallId, [taskId], params.async === true, signal, onUpdate, ctx);
+    },
+    renderResult(result, options, theme) {
       return renderResult(result, options, theme);
     },
   });

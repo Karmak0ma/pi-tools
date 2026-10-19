@@ -7,6 +7,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { forkChildHistory } from "./continuation.js";
+import { discoverSessionFiles } from "./session-watcher.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -131,6 +133,10 @@ export async function writePromptToTempFile(
 // ─── RPC Session ─────────────────────────────────────────────────────────────
 
 export interface ChildRunResult {
+  /** Runtime-only source for a completed request's continuation snapshot. */
+  sessionFile?: string;
+  /** Exact completed-entry boundary when the writer stays alive (Herdr). */
+  sessionBytes?: number;
   exitCode: number;
   /** Final delegated-task state; a turn-level `aborted` is not terminal. */
   lifecycle: SubagentLifecycleState;
@@ -184,6 +190,8 @@ export interface RunChildOptions {
   childExtensionPaths?: string[];
   /** Parent Pi session directory where this child's isolated directory is created. */
   parentSessionDir?: string;
+  /** Frozen history from a completed request, forked before prompting. */
+  continueFrom?: string;
   /** Test seam for deterministic JSONL transport tests; production uses spawn. */
   spawnProcess?: typeof spawn;
   signal?: AbortSignal;
@@ -280,6 +288,10 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
   // parent's history.
   const sessionDir = await createSubagentSessionDir(parentSessionDir);
   const args: string[] = ["--mode", "rpc", "--session-dir", sessionDir, "--no-extensions"];
+  const continued = options.continueFrom
+    ? await forkChildHistory(options.continueFrom, resolvedCwd, sessionDir)
+    : undefined;
+  if (continued) args.push("--session", continued.sessionFile);
   if (childExtensionPaths && childExtensionPaths.length > 0) {
     for (const extPath of childExtensionPaths) {
       args.push("-e", extPath);
@@ -642,6 +654,10 @@ export async function runChild(options: RunChildOptions): Promise<ChildRunResult
     // settled. This prevents completed subagents from remaining available.
     if (!processExited) proc.stdin?.end();
     await processClosed;
+    // The private directory excludes siblings and descendant subagents. If a
+    // child switched sessions, do not guess which file owns the final reply.
+    const files = await discoverSessionFiles(sessionDir);
+    if (files.length === 1) result.sessionFile = files[0];
     return result;
   } catch (error) {
     result.errorMessage = error instanceof Error ? error.message : String(error);

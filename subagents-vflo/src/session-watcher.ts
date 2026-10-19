@@ -24,7 +24,9 @@ export interface SessionWatcherOptions {
   /** Directory passed to the child via --session-dir. Its owned tree is scanned recursively. */
   sessionDir: string;
   /** Called for every assistant message entry observed since the last poll. */
-  onAssistantMessage: (message: any) => void;
+  onAssistantMessage: (message: any, sessionFile: string, endOffset: number) => void;
+  /** Complete inherited prefixes already present before this request starts. */
+  initialOffsets?: ReadonlyMap<string, number>;
   /**
    * Called for entries that feed a NEW model request in the same child run:
    * a `custom_message` entry (an extension injected a message, for example
@@ -61,7 +63,7 @@ interface TrackedFile {
  * separate result channels and must be pruned before their messages can enter
  * the direct child's usage, events, or lifecycle state.
  */
-async function discoverSessionFiles(sessionDir: string): Promise<string[]> {
+export async function discoverSessionFiles(sessionDir: string): Promise<string[]> {
   const directories = [sessionDir];
   const sessionFiles: string[] = [];
 
@@ -91,7 +93,7 @@ async function discoverSessionFiles(sessionDir: string): Promise<string[]> {
 
 export class SessionWatcher {
   private readonly offsets = new Map<string, TrackedFile>();
-  private readonly onAssistantMessage: (message: any) => void;
+  private readonly onAssistantMessage: (message: any, sessionFile: string, endOffset: number) => void;
   private readonly onContinuationEntry: ((entry: any) => void) | undefined;
   private readonly sessionDir: string;
   private polling = false;
@@ -100,6 +102,11 @@ export class SessionWatcher {
     this.sessionDir = options.sessionDir;
     this.onAssistantMessage = options.onAssistantMessage;
     this.onContinuationEntry = options.onContinuationEntry;
+    // Seed only the fork's known file, before the child starts. A later
+    // poll-to-end could skip the first real reply if startup is fast.
+    for (const [file, offset] of options.initialOffsets ?? []) {
+      this.offsets.set(file, { offset, carry: Buffer.alloc(0) });
+    }
   }
 
   /**
@@ -163,15 +170,19 @@ export class SessionWatcher {
       tracked.offset = size;
       this.offsets.set(filePath, tracked);
 
+      let endOffset = size - full.length;
       for (const lineBuffer of complete.toString("utf-8").split("\n")) {
-        this.processLine(lineBuffer);
+        // Count bytes, not UTF-16 characters: Unicode and carried fragments
+        // must preserve the exact stop boundary in the on-disk JSONL file.
+        endOffset += Buffer.byteLength(lineBuffer, "utf8") + 1;
+        this.processLine(lineBuffer, filePath, endOffset);
       }
     } finally {
       await handle.close();
     }
   }
 
-  private processLine(line: string): void {
+  private processLine(line: string, filePath: string, endOffset: number): void {
     if (!line.trim()) return;
     let entry: any;
     try {
@@ -186,7 +197,7 @@ export class SessionWatcher {
     // assistant entry defensively in case the entry shape evolves.
     const message = entry?.type === "message" ? entry.message : entry;
     if (message?.role === "assistant") {
-      this.onAssistantMessage(message);
+      this.onAssistantMessage(message, filePath, endOffset);
     } else if (
       entry?.type === "custom_message"
       || entry?.type === "context_edit"

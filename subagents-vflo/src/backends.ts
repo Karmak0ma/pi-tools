@@ -42,6 +42,8 @@ export interface SubagentSpec {
   childExtensionPaths?: string[];
   /** Parent Pi session directory where this child stores its isolated history. */
   parentSessionDir?: string;
+  /** Frozen history for a replacement child; live continuation keeps its own writer. */
+  continueFrom?: string;
   /** Tool-call abort signal for the parent's subagent tool invocation. */
   signal?: AbortSignal;
   /** Observation callbacks. The Herdr backend emits synthetic session events. */
@@ -57,6 +59,13 @@ export interface SubagentSpec {
 export interface SubagentHandle {
   /** Resolves exactly once with terminal child semantics. */
   result: Promise<ChildRunResult>;
+  /**
+   * Optional live-conversation capability. It creates a fresh per-request
+   * handle, not a second writer. The backend alone owns pane identity and
+   * may spawn a replacement from continueFrom only after confirmed closure.
+   * Call only after this handle completes; the manager serializes requests.
+   */
+  resume?: (spec: SubagentSpec) => Promise<SubagentHandle>;
   /**
    * Steering control. Undefined only for refused spawns (nesting depth guard).
    */

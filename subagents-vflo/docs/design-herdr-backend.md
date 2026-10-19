@@ -27,7 +27,8 @@ interface SubagentBackend {
 
 ```ts
 interface SubagentHandle {
-  result: Promise<ChildRunResult>       // resolves once, terminal semantics
+  result: Promise<ChildRunResult>       // resolves once per request, terminal semantics
+  resume?: (spec: SubagentSpec) => Promise<SubagentHandle> // optional live conversation capability
   control?: SubagentProcessControl      // sendMessage / abort; undefined for refused spawns
   process?: ChildProcess                // RPC backend only; Herdr children have no process handle
 }
@@ -37,6 +38,44 @@ interface SubagentHandle {
 the handle. The old `onProcessReady`/`onProcessExit` callbacks are replaced by
 handle attachment plus post-result cleanup. Backends are chosen once per
 runtime by `createBackend()` using `selectBackendKind()`.
+
+## Continuing a completed request
+
+The task manager owns request IDs, the latest-successful-ID rule and the
+one-active-request conversation lock. The Herdr backend owns live pane identity.
+A completed handle retains a `resume` capability bound only to the original
+pane ID, agent name and private session directory; no old task callbacks,
+watchers or timers stay active between requests.
+
+On `subagent_continue`, the manager supplies fresh request callbacks and signal
+through that capability rather than calling `spawn` unconditionally:
+
+1. Query the original pane. Only confirmed `gone` permits a new pane. That
+   replacement forks the last frozen successful history into its own writable
+   session, with the same resolved agent configuration as before.
+2. For an open pane, query its original named agent. Its returned `pane_id`
+   must still match, and Pi's lifecycle hook must report `idle`/`done`.
+   Busy, blocked, unknown or replaced children and transport failures return
+   an error without creating or closing a pane. If the hook reports a session
+   path outside the watched directory (for example after `/resume`), refuse
+   rather than watch the wrong conversation.
+3. Capture current byte offsets for the session directory **before** typing
+   the new prompt. The new monitor starts from these offsets. Existing messages,
+   including manual activity since completion, remain in the live child's
+   context but cannot settle the new request or inflate its usage.
+4. Submit the normal prompt to the same agent. Create a fresh per-request
+   monitor and result promise, retaining the same `resume` capability for
+   the next completed ID. No Pi process or session file is forked on reuse.
+
+A rejected reuse prompt does not run new-pane startup cleanup: the existing
+pane may contain user work. Once accepted, the ordinary monitor rules still
+apply, including parent cancellation closing the active pane and fallback
+settlement closing a child whose idle state could not be confirmed. A later
+continuation can then restore the saved successful history in a replacement.
+Herdr does not offer an atomic reservation against human terminal input, so
+the user must not submit manual work while the parent submits a follow-up.
+The default RPC backend has no live capability and continues through a private
+history fork as before. Blocking and async calls share all these rules.
 
 ## How the parent observes a Herdr child
 
@@ -124,10 +163,11 @@ The authoritative observation surface for task completion remains the child's
    running. The parent started a replacement child, and the unwatched first
    child kept editing the same files for hours. Losing the pane view is a
    much smaller cost than two children changing the same work tree.
-5. Startup failures are caught synchronously: `pane split` / `agent start` /
-   the readiness gate (see "Initial-prompt readiness") / initial
-   `agent prompt` reject → spawn rejects → task error. A startup command failure may leave an empty pane → parent
-   closes it (`herdr pane close`), best effort.
+5. Startup failures are caught synchronously: `pane split` / `pane zoom` /
+   `agent start` / the readiness gate (see "Initial-prompt readiness") /
+   initial `agent prompt` reject → spawn rejects → task error. A startup
+   command failure may leave a pane behind → parent closes it (`herdr pane close`),
+   best effort.
 6. After the initial prompt is accepted, the monitor waits for Herdr to report
    `working` or `blocked`. If neither that state nor an assistant session
    message appears within the startup-activity deadline (30s by default),
@@ -145,7 +185,8 @@ when new guidance has already started a newer one.
 ## Turn lifecycle vs task lifecycle
 
 - **Turn** = one assistant pass; observed per assistant message in JSONL.
-- **Task** = the whole child session. Its explicit lifecycle is
+- **Conversation** = the child session, which can outlive several completed requests.
+- **Task** = one delegated request, potentially containing several turns. Its explicit lifecycle is
   `starting | running | waiting | interrupted | completed | failed | closed`.
   Only `completed`, `failed`, and `closed` are terminal.
 
@@ -172,8 +213,8 @@ classification.
 ## Verifying against reality
 
 - `docs/smoke-herdr-cli.mjs` (run from inside a Herdr pane) exercises the
-  exact argv sequences against the real binary: split without focus steal,
-  pi agent start, pane state, close + not-found classification. No model call.
+  exact argv sequences against the real binary: split, zoom/focus the new pane,
+  pi agent start, pane state, close + not-found classification. One live model call.
 - `src/session-fixture.test.ts` replays a real captured session file
   (`src/fixtures/real-pi-session.jsonl`, one real entry per stopReason) through
   the watcher and the monitor, pinning the JSONL contract against real data.
@@ -193,12 +234,17 @@ classification.
 - Herdr detection lives in `src/herdr.ts` (`isHerdrEnvironment()`,
   `herdrContextFromEnv()`) and nowhere else.
 
-## Herdr CLI facts (verified against herdr 0.9.0)
+## Herdr CLI facts (live-verified against Herdr 0.9.0 unless noted)
 
 - `herdr pane split --current --direction right --ratio 0.5 --cwd <dir>
-  --no-focus --env K=V` → `{result:{pane:{pane_id,...}}}`. `--no-focus` prevents
-  focus steal. New pane gets its own `HERDR_PANE_ID`, so `--current` inside a
-  child pane anchors correctly for recursive grandchild spawns.
+  --no-focus --env K=V` → `{result:{pane:{pane_id,...}}}`. `--no-focus` keeps
+  the split itself from changing focus. New pane gets its own `HERDR_PANE_ID`,
+  so `--current` inside a child pane anchors correctly for recursive grandchild
+  spawns.
+- The current Herdr CLI reference documents `herdr pane zoom <pane-id> --on`
+  to zoom that pane to full-screen. The `--on` mode is idempotent, and zoom
+  focuses the target pane; this focus change is intentional so the newly
+  spawned subagent becomes the live view.
 - `herdr agent start <name> --kind pi --pane <id> -- <pi args...>` waits until
   the pi TUI is detected (`interactive_ready`). Name rules:
   `[a-z][a-z0-9_-]{0,31}`, unique among live agents. On `agent_not_ready` the
@@ -421,9 +467,9 @@ constraints.
 
 - **Inspector abort during startup.** Parent Escape (the tool signal) is
   honored mid-spawn — the backend checks it after every top-level startup
-  step (split, start) and closes any half-created pane — but an abort from
-  the inspector's `x` key during the multi-second Herdr startup window
-  (split → start → prompt) can only mark the instance aborted; the spawn may
+  step (split, zoom, start) and closes any half-created pane — but an abort
+  from the inspector's `x` key during the multi-second Herdr startup window
+  (split → zoom → start → prompt) can only mark the instance aborted; the spawn may
   still finish and later complete. The RPC backend has the same race with a
   much smaller window.
 - **The readiness gate depends on an undocumented Herdr field.** The
@@ -436,10 +482,11 @@ constraints.
   slow Pi start can leave the task unsubmitted in the editor. The startup
   activity deadline then reports it. Install
   `~/.pi/agent/extensions/herdr-agent-state.ts` to avoid this.
-- **Requires a Herdr version with `agent get` and `agent wait`.** Verified
-  against 0.9.0. There is no runtime feature detection or version check; an
-  older Herdr that lacks a command fails startup, and the backend closes the
-  leftover pane.
+- **Requires a Herdr version with `pane zoom --on`, `agent get`, and
+  `agent wait`.** `agent get` and `agent wait` were verified against 0.9.0;
+  pane zoom is documented by the current CLI reference. There is no runtime
+  feature detection or version check; an older Herdr that lacks a command fails
+  startup, and the backend closes the leftover pane.
 - **Managed hook load is part of startup.** The resolver skips an absent hook,
   but Pi treats an explicit `-e` path that disappears or fails to load as a
   startup error. The backend surfaces that error and closes the pane instead

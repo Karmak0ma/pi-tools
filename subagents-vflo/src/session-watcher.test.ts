@@ -45,6 +45,26 @@ describe("SessionWatcher", () => {
     expect(seen[0].stopReason).toBe("stop");
   });
 
+  // A fork contains earlier final stops. Replaying them would complete a
+  // follow-up before its prompt runs and charge old usage a second time.
+  it("skips inherited bytes but observes new messages and their owning file", async () => {
+    const dir = makeSessionDir();
+    const filePath = path.join(dir, "session.jsonl");
+    writeSessionLines(dir, [assistantEntry({ content: [], stopReason: "stop" })]);
+    const seen: string[] = [];
+    const watcher = new SessionWatcher({
+      sessionDir: dir,
+      initialOffsets: new Map([[filePath, fs.statSync(filePath).size]]),
+      onAssistantMessage: (message, file) => seen.push(`${file}:${message.stopReason}`),
+    });
+    await watcher.poll();
+    expect(seen).toEqual([]);
+    fs.appendFileSync(filePath, assistantEntry({ content: [], stopReason: "toolUse" }) + "\n");
+    await watcher.poll();
+    await watcher.poll();
+    expect(seen).toEqual([`${filePath}:toolUse`]);
+  });
+
   it("does not re-emit lines on repeated polls", async () => {
     const dir = makeSessionDir();
     writeSessionLines(dir, [assistantEntry({ content: [], stopReason: "toolUse" })]);

@@ -179,6 +179,19 @@ describe("HerdrCli", () => {
     ]);
   });
 
+  it("zooms a specific pane to full-screen and focuses it", async () => {
+    const { runner, calls } = makeRunner(() => ({
+      exitCode: 0,
+      stdout: JSON.stringify({ result: { pane: { pane_id: "wJ:pX", zoomed: true } } }),
+      stderr: "",
+    }));
+    const cli = new HerdrCli(runner);
+
+    await cli.paneZoom("wJ:pX");
+
+    expect(calls[0].args).toEqual(["pane", "zoom", "wJ:pX", "--on"]);
+  });
+
   it("rejects a split whose response lacks a pane id", async () => {
     const { runner } = makeRunner(() => ({
       exitCode: 0,
@@ -237,12 +250,15 @@ describe("HerdrCli", () => {
     expect(calls[0].timeoutMs).toBe(70_000);
   });
 
-  it("reports hook authority only when Herdr says screen detection is skipped", async () => {
+  it("reports hook readiness and live conversation identity", async () => {
     // Shapes captured live from herdr 0.9.0 `agent get`: the fallback guess
     // has no `screen_detection_skipped`; a hook-owned agent has it set true.
     const outputs = [
       { result: { agent: { name: "sa-x", agent_status: "idle", interactive_ready: true } } },
-      { result: { agent: { name: "sa-x", agent_status: "idle", screen_detection_skipped: true } } },
+      // Live continuation needs the pane binding and session path too: a
+      // user can move an agent or switch its session after task completion.
+      { result: { agent: { name: "sa-x", pane_id: "w1:p2", agent_status: "idle", screen_detection_skipped: true,
+        agent_session: { kind: "path", value: "/sessions/child.jsonl" } } } },
     ];
     const { runner, calls } = makeRunner(() => ({
       exitCode: 0,
@@ -252,7 +268,9 @@ describe("HerdrCli", () => {
     const cli = new HerdrCli(runner);
 
     await expect(cli.agentGet("sa-x")).resolves.toEqual({ agentStatus: "idle", lifecycleHookAuthority: false });
-    await expect(cli.agentGet("sa-x")).resolves.toEqual({ agentStatus: "idle", lifecycleHookAuthority: true });
+    await expect(cli.agentGet("sa-x")).resolves.toEqual({
+      agentStatus: "idle", lifecycleHookAuthority: true, paneId: "w1:p2", sessionFile: "/sessions/child.jsonl",
+    });
     expect(calls[0].args).toEqual(["agent", "get", "sa-x"]);
   });
 

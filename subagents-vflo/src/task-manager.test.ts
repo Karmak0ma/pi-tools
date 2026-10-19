@@ -4,8 +4,11 @@
  * each spawned child stays running until the test finishes it or its task
  * signal aborts it (the same contract both real backends follow).
  */
-import { describe, expect, it } from "vitest";
-import type { SubagentBackend, SubagentSpec } from "./backends.js";
+import { describe, expect, it, vi } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { SubagentBackend, SubagentHandle, SubagentSpec } from "./backends.js";
 import { ChildExtensionUIBroker } from "./extension-ui-broker.js";
 import type { ChildRunResult } from "./runner.js";
 import { SubagentTaskManager, type TaskChange, type TaskStartContext } from "./task-manager.js";
@@ -14,11 +17,12 @@ import { type AgentConfig, emptyUsage } from "./types.js";
 
 interface FakeChild {
   spec: SubagentSpec;
-  finish(output: string): void;
+  finish(output: string, sessionFile?: string, sessionBytes?: number): void;
 }
 
-function fakeBackend() {
+function fakeBackend(live = false) {
   const children: FakeChild[] = [];
+  const resume = vi.fn(async (spec: SubagentSpec): Promise<SubagentHandle> => backend.spawn(spec));
   const backend: SubagentBackend = {
     async spawn(spec) {
       let resolveResult!: (result: ChildRunResult) => void;
@@ -29,12 +33,12 @@ function fakeBackend() {
       );
       children.push({
         spec,
-        finish: (output) => resolveResult({ ...base, lifecycle: "completed", finalOutput: output, stopReason: "stop" }),
+        finish: (output, sessionFile, sessionBytes) => resolveResult({ ...base, lifecycle: "completed", finalOutput: output, stopReason: "stop", sessionFile, sessionBytes }),
       });
-      return { result, control: { sendMessage: async () => {}, abort: () => {} } };
+      return { result, control: { sendMessage: async () => {}, abort: () => {} }, resume: live ? resume : undefined };
     },
   };
-  return { backend, children };
+  return { backend, children, resume };
 }
 
 const agent: AgentConfig = { name: "explore", description: "", tools: ["read"], systemPrompt: "", source: "builtin" };
@@ -51,9 +55,9 @@ function context(): TaskStartContext {
   };
 }
 
-function setup(maxConcurrent = 2) {
+function setup(maxConcurrent = 2, live = false) {
   const tracker = new SubagentTracker();
-  const { backend, children } = fakeBackend();
+  const { backend, children, resume } = fakeBackend(live);
   const manager = new SubagentTaskManager({
     tracker,
     backend,
@@ -61,7 +65,7 @@ function setup(maxConcurrent = 2) {
     createBroker: () => new ChildExtensionUIBroker(),
     createPresenter: () => ({ present: async () => ({ kind: "cancelled" }) }),
   });
-  return { tracker, manager, children };
+  return { tracker, manager, children, resume };
 }
 
 /** Let queued microtasks (slot hand-off, spawn) run. */
@@ -147,6 +151,78 @@ describe("SubagentTaskManager", () => {
     expect(unknown.failed).toBe(true);
     expect(unknown.errorMessage).toContain('Agent "nope" not found');
     expect(known.finalOutput).toBe("A");
+  });
+
+  // A follow-up must inherit the child's resolved configuration and frozen
+  // history, not re-resolve current parent settings or overwrite old results.
+  it("continues completed context with independent ids and exclusive conversation ownership", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "continuation-test-"));
+    const sessionFile = path.join(dir, "session.jsonl");
+    const history = fs.readFileSync(new URL("./fixtures/real-pi-session.jsonl", import.meta.url), "utf8");
+    fs.writeFileSync(sessionFile, history);
+    const { manager, children, tracker, resume } = setup(1, true);
+    try {
+      const [first] = manager.start([task("first")], context());
+      expect(() => manager.continue(first, "too early", undefined)).toThrow(/completed/i);
+      await settle();
+      // The pane may append again before the completion promise reaches the
+      // manager. Only the monitor's completed-entry prefix belongs to first.
+      fs.appendFileSync(sessionFile, "later user activity\n");
+      children[0].finish("original", sessionFile, Buffer.byteLength(history));
+      // Cancellation after the authoritative completion must not erase its
+      // saved context while still returning a successful task to the caller.
+      manager.cancel([first]);
+      expect((await manager.wait([first]))[0].lifecycle).toBe("completed");
+      const second = manager.continue(first, "follow-up", undefined);
+      expect(second).not.toBe(first);
+      expect(() => manager.continue(first, "overlap", undefined)).toThrow(/busy/i);
+      await settle();
+      expect(children[1].spec).toMatchObject({
+        agentName: children[0].spec.agentName,
+        resolvedModel: children[0].spec.resolvedModel,
+        resolvedTools: children[0].spec.resolvedTools,
+        resolvedCwd: children[0].spec.resolvedCwd,
+        taskText: "follow-up",
+      });
+      // The adapter must pass fresh request callbacks to the backend's live
+      // capability. Calling spawn instead would silently open a second pane.
+      expect(resume).toHaveBeenCalledOnce();
+      expect(children[1].spec.signal).not.toBe(children[0].spec.signal);
+      expect(fs.readFileSync(children[1].spec.continueFrom!, "utf8")).toBe(history);
+      children[1].finish("follow-up result", sessionFile);
+      const [oldResult, newResult] = await manager.wait([first, second]);
+      expect([oldResult.finalOutput, newResult.finalOutput]).toEqual(["original", "follow-up result"]);
+      // Use the newest successful id: silently using an ancestor loses the
+      // follow-up exchange and would look like a context-preserving resume.
+      expect(() => manager.continue(first, "stale", undefined)).toThrow(/latest/i);
+      const third = manager.continue(second, "cancel me", undefined);
+      manager.cancel([third]);
+      expect((await manager.wait([third]))[0].cancelledByParent).toBe(true);
+      const retry = manager.continue(second, "retry", undefined);
+      manager.cancel([retry]);
+      await manager.wait([retry]);
+      // Hold reset after its kill pass. New work here would escape cleanup
+      // and keep running after the manager drops its tracking records.
+      let releaseReset!: () => void;
+      const resetGate = new Promise<void>((resolve) => { releaseReset = resolve; });
+      const killAll = tracker.killAll.bind(tracker);
+      tracker.killAll = async () => { await killAll(); await resetGate; };
+      const resetting = manager.resetSession();
+      try {
+        await settle();
+        expect(manager.resetSession()).toBe(resetting);
+        expect(() => manager.continue(second, "during reset", undefined)).toThrow(/reset/i);
+        expect(() => manager.start([task("during reset")], context())).toThrow(/reset/i);
+      } finally {
+        releaseReset();
+        await resetting;
+        tracker.killAll = killAll;
+      }
+      expect(() => manager.continue(second, "old session", undefined)).toThrow(/unknown/i);
+    } finally {
+      await manager.resetSession();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("resetSession aborts queued tasks and drops all state", async () => {

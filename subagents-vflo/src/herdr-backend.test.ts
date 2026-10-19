@@ -13,7 +13,7 @@ import type { SubagentSpec } from "./backends.js";
 
 /**
  * In-memory Herdr. Records every CLI call so tests can assert the exact
- * command sequence (split → start → prompt) and simulate server-side events
+ * command sequence (split → zoom → start → prompt) and simulate server-side events
  * (pane death) and CLI failures.
  */
 class FakeHerdr implements HerdrClient {
@@ -22,6 +22,8 @@ class FakeHerdr implements HerdrClient {
   onAgentStart: (() => void) | undefined;
   agentStartDelayMs = 0;
   splits: Array<{ direction: string; cwd: string; env: Record<string, string> }> = [];
+  zoomedPanes: string[] = [];
+  paneZoomError: Error | undefined;
   started: Array<{ name: string; paneId: string; args: string[]; timeoutMs: number }> = [];
   prompts: Array<{ target: string; text: string }> = [];
   closedPanes: string[] = [];
@@ -52,6 +54,11 @@ class FakeHerdr implements HerdrClient {
     const paneId = `wJ:p${++this.paneCounter}`;
     this.paneExists.set(paneId, true);
     return { paneId };
+  }
+
+  async paneZoom(paneId: string) {
+    this.zoomedPanes.push(paneId);
+    if (this.paneZoomError) throw this.paneZoomError;
   }
 
   async agentStart(name: string, paneId: string, args: string[], timeoutMs: number) {
@@ -324,6 +331,7 @@ describe("HerdrBackend happy path", () => {
   it("splits a pane, starts pi, injects the task, and delivers the result on a normal settle", async () => {
     vi.stubEnv(NESTING_DEPTH_ENV, "0");
     const fake = new FakeHerdr();
+    fake.onAgentStart = () => expect(fake.zoomedPanes).toEqual(["wJ:p1"]);
     const events: any[] = [];
     const handle = await makeBackend(fake).spawn(makeSpec({
       resolvedModel: "openai-codex/gpt-6-luna",
@@ -331,8 +339,9 @@ describe("HerdrBackend happy path", () => {
       onEvent: (event) => events.push(event),
     }));
 
-    // Spawn sequence: split → agent start → prompt, in order.
+    // Spawn sequence: split → zoom/focus → agent start → prompt, in order.
     expect(fake.splits).toHaveLength(1);
+    expect(fake.zoomedPanes).toEqual([fake.started[0].paneId]);
     expect(fake.splits[0].direction).toBe("right");
     expect(fake.splits[0].cwd).toBe("/repo");
     expect(fake.splits[0].env[NESTING_DEPTH_ENV]).toBe("1");
@@ -759,6 +768,17 @@ describe("HerdrBackend failure handling", () => {
     expect(result.stopReason).toBe("stop");
     expect(result.errorMessage).toBeUndefined();
     expect(result.finalOutput).toBe("Recovered");
+  });
+
+  it("rejects spawn and closes the pane when full-screen zoom fails", async () => {
+    const fake = new FakeHerdr();
+    fake.paneZoomError = new Error("herdr pane zoom failed: server_unavailable");
+
+    await expect(makeBackend(fake).spawn(makeSpec())).rejects.toThrow("server_unavailable");
+
+    expect(fake.zoomedPanes).toEqual(["wJ:p1"]);
+    expect(fake.started).toEqual([]);
+    expect(fake.closedPanes).toEqual(["wJ:p1"]);
   });
 
   it("rejects spawn and closes the leftover pane when the Herdr command fails", async () => {

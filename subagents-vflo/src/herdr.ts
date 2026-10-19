@@ -267,7 +267,7 @@ function parseCliResult(operation: string, res: HerdrCommandResult): any {
 /** Error codes that mean the pane (or its agent) no longer exists. */
 const HERDR_NOT_FOUND_CODES = new Set(["pane_not_found", "agent_not_found"]);
 
-function isHerdrNotFound(error: unknown): boolean {
+export function isHerdrNotFound(error: unknown): boolean {
   return HERDR_NOT_FOUND_CODES.has((error as any)?.herdrCode);
 }
 
@@ -280,11 +280,10 @@ function isHerdrNotFound(error: unknown): boolean {
 export type HerdrAgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
 
 export interface HerdrClient {
-  /**
-   * Split the calling pane into a new pane. `--no-focus` is always sent: a
-   * spawned subagent must never steal keyboard focus from the parent.
-   */
+  /** Split the calling pane into a new pane without changing keyboard focus. */
   paneSplit(options: { direction: "right" | "down"; cwd: string; env: Record<string, string> }): Promise<{ paneId: string }>;
+  /** Zoom a pane to full-screen and focus it. */
+  paneZoom(paneId: string): Promise<void>;
   /**
    * Start a pi agent in an existing pane and wait until it is interactive-ready.
    * Rejects if the agent never becomes ready (the pane stays usable for cleanup).
@@ -310,7 +309,7 @@ export interface HerdrClient {
    * `session_start`, which Pi emits only after its real submit handler is
    * installed, so hook authority proves the editor accepts Enter.
    */
-  agentGet(target: string): Promise<{ agentStatus?: string; lifecycleHookAuthority: boolean }>;
+  agentGet(target: string): Promise<{ agentStatus?: string; lifecycleHookAuthority: boolean; paneId?: string; sessionFile?: string }>;
   /** Type a prompt into the agent's terminal and press Enter. */
   agentPrompt(target: string, text: string): Promise<void>;
   /** Pane state including agent_status (idle/working/blocked); throws on unexpected errors. */
@@ -343,6 +342,11 @@ export class HerdrCli implements HerdrClient {
     return { paneId };
   }
 
+  async paneZoom(paneId: string): Promise<void> {
+    // --on is idempotent on retry; zooming also focuses the target pane.
+    parseCliResult("pane zoom", await this.run(["pane", "zoom", paneId, "--on"], DEFAULT_COMMAND_TIMEOUT_MS));
+  }
+
   async agentStart(name: string, paneId: string, agentArgs: string[], timeoutMs: number): Promise<void> {
     // The CLI's own --timeout bounds the wait for interactive readiness; the
     // runner timeout adds slack for process startup and transport.
@@ -368,11 +372,18 @@ export class HerdrCli implements HerdrClient {
     );
   }
 
-  async agentGet(target: string): Promise<{ agentStatus?: string; lifecycleHookAuthority: boolean }> {
+  async agentGet(target: string): Promise<{ agentStatus?: string; lifecycleHookAuthority: boolean; paneId?: string; sessionFile?: string }> {
     const result = parseCliResult("agent get", await this.run(["agent", "get", target], DEFAULT_COMMAND_TIMEOUT_MS));
     const agent = result?.agent ?? result;
     return {
       agentStatus: typeof agent?.agent_status === "string" ? agent.agent_status : undefined,
+      // A live name must still belong to the pane we created. A moved or
+      // replaced agent is not permission to prompt a different terminal.
+      ...(typeof agent?.pane_id === "string" ? { paneId: agent.pane_id } : {}),
+      // The managed hook reports Pi's current session path. A user may have
+      // switched sessions in the open pane; never watch an unrelated file.
+      ...(agent?.agent_session?.kind === "path" && typeof agent.agent_session.value === "string"
+        ? { sessionFile: agent.agent_session.value } : {}),
       // Verified live on herdr 0.9.0: this field is absent while Herdr uses
       // its idle fallback guess, and `true` once the hook owns the state
       // (`herdr agent explain` then shows

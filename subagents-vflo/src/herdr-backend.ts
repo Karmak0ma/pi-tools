@@ -57,9 +57,10 @@ import {
   writePromptToTempFile,
   type ChildRunResult,
 } from "./runner.js";
-import { HERDR_PANE_ID_VAR, resolveHerdrAgentStateExtension, type HerdrClient } from "./herdr.js";
+import { HERDR_PANE_ID_VAR, isHerdrNotFound, resolveHerdrAgentStateExtension, type HerdrClient } from "./herdr.js";
 import { canonicalEntryPath } from "./path-utils.js";
-import { SessionWatcher } from "./session-watcher.js";
+import { discoverSessionFiles, SessionWatcher } from "./session-watcher.js";
+import { forkChildHistory } from "./continuation.js";
 import type { SubagentBackend, SubagentHandle, SubagentSpec } from "./backends.js";
 import type { SubagentProcessControl } from "./tracker.js";
 import {
@@ -171,8 +172,10 @@ function buildChildArgs(
   sessionDir: string,
   promptFilePath: string | null,
   herdrIntegration: string | null,
+  continuedSessionFile?: string,
 ): string[] {
   const args: string[] = ["--session-dir", sessionDir, "--no-extensions"];
+  if (continuedSessionFile) args.push("--session", continuedSessionFile);
   const configuredExtensions = spec.childExtensionPaths ?? [];
   const herdrIntegrationKey = herdrIntegration ? canonicalEntryPath(herdrIntegration) : undefined;
   let integrationAlreadyConfigured = false;
@@ -282,6 +285,8 @@ interface MonitoredChild {
   paneId: string;
   agentName: string;
   promptFilePath: string | null;
+  /** Existing history is context, not output produced by this request. */
+  initialOffsets?: ReadonlyMap<string, number>;
 }
 
 /**
@@ -311,6 +316,8 @@ class HerdrChildMonitor {
   private readonly usage = emptyUsage();
   private model: string | undefined;
   private finalOutput = "";
+  private sessionFile: string | undefined;
+  private sessionBytes: number | undefined;
   private readonly toolCalls: Array<{ name: string; argsPreview: string }> = [];
   private lastStopReason: string | undefined;
   private lastError: string | undefined;
@@ -350,7 +357,12 @@ class HerdrChildMonitor {
     this.promptFilePath = child.promptFilePath;
     this.watcher = new SessionWatcher({
       sessionDir: child.sessionDir,
-      onAssistantMessage: (m) => this.observeAssistantMessage(m),
+      initialOffsets: child.initialOffsets,
+      onAssistantMessage: (m, file, endOffset) => {
+        this.sessionFile = file;
+        this.sessionBytes = endOffset;
+        this.observeAssistantMessage(m);
+      },
       onContinuationEntry: () => this.observeContinuationEntry(),
     });
     this.startupActivityDeadline = new StartupActivityDeadline(
@@ -546,6 +558,8 @@ class HerdrChildMonitor {
     return {
       exitCode,
       lifecycle,
+      sessionFile: this.sessionFile,
+      sessionBytes: this.sessionBytes,
       usage: this.usage,
       finalOutput: this.finalOutput,
       ...details,
@@ -917,6 +931,66 @@ async function waitForLifecycleHookIdle(
   }
 }
 
+/** Identity outlives a single request, but owns no timers or old task callbacks. */
+type HerdrConversation = Pick<MonitoredChild, "cli" | "timings" | "sessionDir" | "paneId" | "agentName">;
+
+/** Each request gets fresh observers; the existing Pi process is never duplicated. */
+function monitorHerdrTurn(child: MonitoredChild): SubagentHandle {
+  const monitor = new HerdrChildMonitor(child);
+  monitor.start();
+  const { cli, timings, sessionDir, paneId, agentName } = child;
+  const conversation = { cli, timings, sessionDir, paneId, agentName };
+  return {
+    result: monitor.result,
+    control: monitor.control,
+    resume: (spec) => resumeHerdrTurn(conversation, spec),
+  };
+}
+
+/**
+ * Reuse an idle live child. Only confirmed pane closure permits a replacement:
+ * a failed lookup, busy child or changed occupant is not evidence of closure.
+ */
+async function resumeHerdrTurn(conversation: HerdrConversation, spec: SubagentSpec): Promise<SubagentHandle> {
+  const { cli, timings, paneId, agentName, sessionDir } = conversation;
+  if (spec.signal?.aborted) throw new Error("Subagent aborted before continuation");
+  const pane = await cli.paneGet(paneId);
+  if (pane.state === "gone") return spawnSubagentInHerdr(spec, cli, timings);
+
+  let agent: Awaited<ReturnType<HerdrClient["agentGet"]>>;
+  try {
+    agent = await cli.agentGet(agentName);
+  } catch (error) {
+    // The pane may close after the first lookup. Only a typed not-found plus
+    // a second confirmed pane absence permits replacement; an agent missing
+    // from an open pane or a transport failure must not create a duplicate.
+    if (isHerdrNotFound(error) && (await cli.paneGet(paneId)).state === "gone") {
+      return spawnSubagentInHerdr(spec, cli, timings);
+    }
+    throw error;
+  }
+  if (agent.paneId !== paneId) {
+    throw new Error(`Cannot continue Herdr pane "${paneId}": the original agent no longer occupies it`);
+  }
+  if (!agent.lifecycleHookAuthority || (agent.agentStatus !== "idle" && agent.agentStatus !== "done")) {
+    throw new Error(`Cannot continue Herdr pane "${paneId}": Pi must report idle through its lifecycle hook (status ${agent.agentStatus ?? "unknown"})`);
+  }
+  // Capture EOF before injecting input. This includes manual conversation
+  // since the last result without charging or replaying those old messages.
+  // A fresh monitor keeps result promises and usage independent per task.
+  const files = await discoverSessionFiles(sessionDir);
+  if (files.length === 0) throw new Error(`Cannot continue Herdr pane "${paneId}": live session history is unavailable`);
+  const initialOffsets = new Map(files.map((file) => [file, fs.statSync(file).size]));
+  if (agent.sessionFile && !initialOffsets.has(agent.sessionFile)) {
+    throw new Error(`Cannot continue Herdr pane "${paneId}": Pi switched outside its tracked session directory`);
+  }
+  if (spec.signal?.aborted) throw new Error("Subagent aborted before continuation");
+  // Reuse failure must not run new-pane startup cleanup: this pane may hold
+  // user work. In particular, never close it when a prompt command rejects.
+  await submitInitialPrompt(cli, agentName, spec.taskText);
+  return monitorHerdrTurn({ ...conversation, spec, promptFilePath: null, initialOffsets });
+}
+
 /**
  * Spawn one subagent as an interactive pi session in a new Herdr pane.
  *
@@ -936,6 +1010,9 @@ async function spawnSubagentInHerdr(
   if (refusal) return { result: Promise.resolve(refusal) };
 
   const sessionDir = await createSubagentSessionDir(spec.parentSessionDir);
+  const continued = spec.continueFrom
+    ? await forkChildHistory(spec.continueFrom, spec.resolvedCwd, sessionDir)
+    : undefined;
   let promptFilePath: string | null = null;
   if (spec.agentPrompt.trim()) {
     // Same mechanism as the RPC runner: the agent definition rides in via
@@ -955,12 +1032,18 @@ async function spawnSubagentInHerdr(
   // Resolve relative PI_CODING_AGENT_DIR values as the child Pi process will:
   // the pane's cwd can differ from the parent's cwd.
   const herdrIntegration = resolveHerdrAgentStateExtension(process.env, spec.resolvedCwd);
-  const agentArgs = buildChildArgs(spec, sessionDir, promptFilePath, herdrIntegration);
+  const agentArgs = buildChildArgs(spec, sessionDir, promptFilePath, herdrIntegration, continued?.sessionFile);
 
   let paneId = "";
   try {
     const pane = await splitPaneForSubagent(cli, spec);
     paneId = pane.paneId;
+    if (spec.signal?.aborted) throw new Error("Subagent aborted during startup");
+
+    // Make the child the live full-screen view before starting Pi. Herdr zooms
+    // and focuses this pane; retaining paneId first lets the catch block close
+    // it if zoom fails.
+    await cli.paneZoom(paneId);
     if (spec.signal?.aborted) throw new Error("Subagent aborted during startup");
 
     const agentName = await startHerdrAgent(cli, spec, paneId, agentArgs, timings, herdrIntegration !== null);
@@ -969,7 +1052,7 @@ async function spawnSubagentInHerdr(
     // a specific startup timeout if Herdr never observes the child begin it.
     await submitInitialPrompt(cli, agentName, spec.taskText);
 
-    const monitor = new HerdrChildMonitor({
+    return monitorHerdrTurn({
       cli,
       timings,
       spec,
@@ -977,9 +1060,8 @@ async function spawnSubagentInHerdr(
       paneId,
       agentName,
       promptFilePath,
+      initialOffsets: continued ? new Map([[continued.sessionFile, continued.historyBytes]]) : undefined,
     });
-    monitor.start();
-    return { result: monitor.result, control: monitor.control };
   } catch (error) {
     // Startup failure: close the pane (may not exist yet) and drop the prompt
     // file, then surface the real error. This must never become a completion.
