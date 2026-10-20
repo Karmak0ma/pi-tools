@@ -318,9 +318,10 @@ export interface ChildExtensionResolution {
  * the main pi settings (packages array). Only extensions explicitly listed in
  * this file will be loaded in child processes.
  *
- * If the config file doesn't exist or has no packages, no extensions are loaded
- * (child processes run with --no-extensions only). Provider extensions must be
- * listed here when their models are used by a child process.
+ * The child always loads ALWAYS_LOADED_BUILTIN_EXTENSIONS, even when the
+ * config file doesn't exist or has no packages. Everything else must be
+ * listed. Provider extensions must be listed here when their models are used
+ * by a child process.
  *
  * Results are cached for the lifetime of the process since the config doesn't
  * change during a session.
@@ -330,36 +331,29 @@ let cachedResolution: ChildExtensionResolution | null = null;
 /** Matches a pi built-in extension source such as `builtin:codemode`. */
 const BUILTIN_EXTENSION_PATTERN = /^builtin:[a-z0-9._-]+$/i;
 
-/** pi's codemode tool and the built-in extension that registers it. */
-export const CODEMODE_TOOL = "codemode";
-const CODEMODE_EXTENSION = "builtin:codemode";
-
 /**
- * Add the extensions a child needs for its resolved tools, on top of the
- * configured ones.
+ * Built-in extensions that every child loads, whatever `packages` says.
  *
- * resolveTools() gives codemode to every child whose parent has it. The child
- * spawn uses --no-extensions, which also turns off pi's built-in extensions,
- * so `builtin:codemode` must be loaded explicitly. Doing it here, from the
- * tool list, means the user never has to list it in the settings file and a
- * child can never get the tool name without the extension behind it.
+ * Why: the parent loads pi's built-in extensions by default, but the child
+ * spawn uses --no-extensions, which turns them off too. codemode and MCP are
+ * part of pi itself, not optional add-ons, so asking the user to list them in
+ * `packages` only adds a way to get the configuration wrong.
+ *
+ * Loading an extension does NOT give the agent its tools: the agent's tool
+ * list still decides that (an agent needs `codemode` in its list, or must
+ * inherit it from the parent). Loading only makes the names valid.
+ *
+ * Cost: builtin:mcp connects each child to every enabled server in
+ * ~/.pi/agent/mcp.json (in the background; `"enabled": false` servers do not
+ * start). llama.cpp and tool-search stay opt-in through `packages`.
  */
-export function withRequiredChildExtensions(
-  configuredPaths: string[] | undefined,
-  resolvedTools: string[],
-): string[] {
-  const paths = [...(configuredPaths ?? [])];
-  if (resolvedTools.includes(CODEMODE_TOOL) && !paths.includes(CODEMODE_EXTENSION)) {
-    paths.push(CODEMODE_EXTENSION);
-  }
-  return paths;
-}
+export const ALWAYS_LOADED_BUILTIN_EXTENSIONS = ["builtin:codemode", "builtin:mcp"] as const;
 
 export function resolveChildExtensions(): ChildExtensionResolution {
   if (cachedResolution) return cachedResolution;
 
   const result: ChildExtensionResolution = {
-    paths: [],
+    paths: [...ALWAYS_LOADED_BUILTIN_EXTENSIONS],
     unresolved: [],
   };
 
@@ -377,7 +371,8 @@ export function resolveChildExtensions(): ChildExtensionResolution {
     // turns them off too, and pi accepts `-e builtin:<name>` to load one
     // again. Pass the entry through verbatim; pi reports an unknown name.
     if (BUILTIN_EXTENSION_PATTERN.test(source)) {
-      result.paths.push(source);
+      // Skip duplicates such as a listed `builtin:mcp`, which is always loaded.
+      if (!result.paths.includes(source)) result.paths.push(source);
       continue;
     }
 

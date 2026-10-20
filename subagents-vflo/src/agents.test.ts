@@ -58,19 +58,17 @@ describe("discoverAgents built-in settings", () => {
       model: "openai-codex/gpt-6-luna",
       thinking: "medium",
       source: "builtin",
-      mcpToolInheritance: "read-only",
     });
     expect(findAgent(agents, "build")).toMatchObject({
       model: "openai-codex/gpt-6-luna",
       thinking: "max",
       source: "builtin",
-      mcpToolInheritance: "active",
     });
   });
 
-  it("replaces the bundled tools and optional tools with configured tools", () => {
-    // Settings tools are the user's explicit choice, so they also drop the
-    // soft optional list; resolveTools() then checks them strictly.
+  it("replaces the bundled fallback tools with configured tools", () => {
+    // Settings tools are the user's explicit choice; resolveTools() then
+    // checks them strictly. An agent without settings keeps its fallback.
     cwd = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-agent-settings-"));
     mockSettings.agentRoot = path.join(cwd, "user-agent-home");
     mockSettings.defaults = { build: { tools: ["read", "ask_advisor"] } };
@@ -79,11 +77,7 @@ describe("discoverAgents built-in settings", () => {
 
     const build = findAgent(agents, "build");
     expect(build?.tools).toEqual(["read", "ask_advisor"]);
-    expect(build?.optionalTools).toBeUndefined();
-    expect(findAgent(agents, "explore")).toMatchObject({
-      tools: ["read", "grep", "find", "ls", "bash"],
-      optionalTools: ["compress"],
-    });
+    expect(findAgent(agents, "explore")?.tools).toEqual(["read", "grep", "find", "ls", "bash"]);
   });
 
   it("keeps bundled defaults when no model or thinking key is configured", () => {

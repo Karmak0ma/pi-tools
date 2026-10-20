@@ -27,7 +27,6 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentConfig } from "./types.js";
 import { findAgent, formatAgentList } from "./agents.js";
-import { withRequiredChildExtensions } from "./child-extensions.js";
 import type { SubagentBackend, SubagentHandle, SubagentSpec } from "./backends.js";
 import type { ChildExtensionUIBroker, ChildUIDialogPresenter, ChildUIRequestOwner } from "./extension-ui-broker.js";
 import type { ChildRunResult } from "./runner.js";
@@ -349,7 +348,7 @@ export class SubagentTaskManager {
     );
     instance.contextWindow = resolvedModel?.contextWindow;
 
-    // Resolve tools (two-key validation; see ToolResolutionOptions)
+    // Resolve tools (see resolveTools for the one rule)
     const toolResult = resolveTools(agent, context.parentActiveToolNames, context.toolResolutionOptions);
     instance.warnings.push(...toolResult.warnings);
     instance.summary.warnings = [...instance.warnings];
@@ -383,12 +382,8 @@ export class SubagentTaskManager {
       agentPrompt: agent.systemPrompt,
       taskText: task.task,
       thinking: instance.thinking,
-      // Both backends (RPC and Herdr) receive the same list, so the
-      // auto-loaded builtin:codemode is added once, here.
-      childExtensionPaths: withRequiredChildExtensions(
-        context.toolResolutionOptions.childExtensionPaths,
-        toolResult.tools,
-      ),
+      // Exactly the `packages` list: the child loads nothing else.
+      childExtensionPaths: context.toolResolutionOptions.childExtensionPaths,
       parentSessionDir: context.parentSessionDir,
       splitDirection: index === 0 ? "right" : "down",
     }, broker, signal, context.uiContext);

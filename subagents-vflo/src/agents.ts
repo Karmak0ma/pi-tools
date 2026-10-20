@@ -17,7 +17,6 @@ import {
   type AgentConfig,
   type AgentSource,
   type BuiltinAgentName,
-  DEFAULT_BUILD_TOOLS,
   THINKING_LEVELS,
   type ThinkingLevel,
 } from "./types.js";
@@ -25,21 +24,17 @@ import {
 // ─── Built-in Fallback Agents ────────────────────────────────────────────────
 
 /**
- * Extension tools the built-in agents take from the parent when available.
- * - compress: pi-dcp context compression, so long child runs can shed
- *   closed work. It only rewrites the child's own context.
- * codemode is not listed: resolveTools() gives it to every agent whose parent
- * has it active.
+ * Built-in agents. Their `tools` are only a fallback: a `default_agents.<name>.tools`
+ * list in subagents-vflo_settings.json replaces it. The fallback exists so that
+ * a user without a settings file does not get an Explore that inherits the
+ * parent's `edit` and `write`, which would contradict its read-only prompt.
+ * The fallback uses pi core tools only, so it works with any `packages` list.
  */
-const BUILTIN_OPTIONAL_TOOLS = ["compress"];
-
 const BUILTIN_AGENTS: Array<AgentConfig & { name: BuiltinAgentName }> = [
   {
     name: "explore",
     description: "Fast read-only codebase reconnaissance",
     tools: ["read", "grep", "find", "ls", "bash"],
-    mcpToolInheritance: "read-only",
-    optionalTools: [...BUILTIN_OPTIONAL_TOOLS],
     model: "openai-codex/gpt-5.6-luna",
     thinking: "medium",
     systemPrompt: `You are an exploration agent. Your job is to quickly scan and understand codebases.
@@ -56,9 +51,7 @@ Rules:
   {
     name: "build",
     description: "General-purpose agent with coding capabilities",
-    tools: [...DEFAULT_BUILD_TOOLS],
-    mcpToolInheritance: "active",
-    optionalTools: [...BUILTIN_OPTIONAL_TOOLS],
+    tools: ["read", "bash", "edit", "write"],
     model: "openai-codex/gpt-5.6-luna",
     thinking: "xhigh",
     systemPrompt: `You are a build agent. Your job is to implement code changes.
@@ -183,11 +176,10 @@ export function discoverAgents(cwd: string): AgentDiscoveryResult {
       ...agent,
       model: defaults.model ?? agent.model,
       thinking: defaults.thinking ?? agent.thinking,
-      // A settings tool list replaces the bundled list and its soft optional
-      // tools. The user chose those tools on purpose, so they are checked
+      // A settings tool list replaces the bundled fallback list. It is checked
       // strictly like an agent file's tools: a typo or a missing extension
       // fails the spawn instead of silently giving the child fewer tools.
-      ...(defaults.tools ? { tools: defaults.tools, optionalTools: undefined } : {}),
+      tools: defaults.tools ?? agent.tools,
     };
   });
   const userDir = path.join(getAgentDir(), "agents");

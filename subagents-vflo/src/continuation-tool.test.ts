@@ -31,7 +31,7 @@ describe("subagent continuation tool", () => {
       agents: [{ name: "worker", description: "", source: "builtin", systemPrompt: "", tools: ["read"] }],
       projectAgentsDir: null, userAgentsDir: dir,
     });
-    vi.spyOn(resolver, "buildToolResolutionOptions").mockReturnValue({});
+    vi.spyOn(resolver, "buildToolResolutionOptions").mockReturnValue({ parentToolSources: new Map(), childExtensionPaths: [] });
     const tools = new Map<string, any>();
     const hooks = new Map<string, any>();
     const sendMessage = vi.fn();

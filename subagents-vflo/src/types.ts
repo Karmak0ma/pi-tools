@@ -11,7 +11,7 @@ export const MAX_CONCURRENT = 4;
  * Maximum number of subagent-vflo generations below a top-level pi session.
  *
  * Declaring `subagent` in an agent's tools: now reaches the child's --tools
- * allowlist (two-key model), so an agent can dispatch subagents of its own —
+ * allowlist, so an agent can dispatch subagents of its own —
  * including one named like itself, and every agent file is visible to every
  * child because discovery scans the same user/project directories. Without a
  * bound, a self-dispatching agent could fork pi processes until the machine
@@ -23,28 +23,11 @@ export const MAX_CONCURRENT = 4;
  */
 export const MAX_NESTING_DEPTH = 2;
 
-export const ALLOWED_CHILD_BUILTINS = [
-  "read",
-  "bash",
-  "edit",
-  "write",
-  "grep",
-  "find",
-  "ls",
-] as const;
-
-export type AllowedChildBuiltin = (typeof ALLOWED_CHILD_BUILTINS)[number];
-
-export const DEFAULT_BUILD_TOOLS: AllowedChildBuiltin[] = ["read", "bash", "edit", "write"];
-
 // ─── Agent Types ─────────────────────────────────────────────────────────────
 
 export type AgentSource = "builtin" | "user" | "project";
 
 export type BuiltinAgentName = "explore" | "build";
-
-/** Which active MCP tools a bundled agent may inherit from its parent session. */
-export type McpToolInheritancePolicy = "none" | "active" | "read-only";
 
 /**
  * Settings-file overrides for one built-in agent (`default_agents.<name>`).
@@ -54,9 +37,8 @@ export interface BuiltinAgentDefaults {
   model?: string;
   thinking?: ThinkingLevel;
   /**
-   * Replaces the bundled tool list, including the soft optional tools. Checked
-   * like an agent file's `tools:` list, so a tool the parent does not have
-   * stops the spawn with a clear error instead of being dropped.
+   * Replaces the bundled fallback tool list. Checked like an agent file's
+   * `tools:` list: a tool the child cannot have stops the spawn with an error.
    */
   tools?: string[];
 }
@@ -66,20 +48,6 @@ export interface AgentConfig {
   name: string;
   description: string;
   tools?: string[];
-  /**
-   * MCP tools are inherited separately from the base tools allowlist. Custom
-   * agents omit this field and therefore inherit none. Explore's read-only
-   * policy uses MCP's author-provided readOnlyHint; it is not a security guarantee.
-   */
-  mcpToolInheritance?: McpToolInheritancePolicy;
-  /**
-   * Extension tools the agent uses when the parent session has them, and
-   * silently goes without otherwise. Set only by the built-in agents (not
-   * parseable from frontmatter): `compress` depends on pi-dcp being loaded,
-   * and a missing optional tool must not stop explore/build from starting.
-   * Declared `tools:` stay strict.
-   */
-  optionalTools?: string[];
   model?: string;
   thinking?: ThinkingLevel;
   systemPrompt: string;

@@ -49,7 +49,7 @@ function context(): TaskStartContext {
     registry: { resolve: () => undefined, getParentModel: () => ({ provider: "p", id: "m" }) },
     availableModels: [],
     parentActiveToolNames: ["read"],
-    toolResolutionOptions: {},
+    toolResolutionOptions: { parentToolSources: new Map(), childExtensionPaths: [] },
     cwd: process.cwd(),
     uiContext: undefined,
   };

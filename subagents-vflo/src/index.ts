@@ -463,9 +463,9 @@ export default function (pi: ExtensionAPI) {
         availableModels,
         // Parent active tool names, for inheritance.
         parentActiveToolNames: pi.getActiveTools(),
-        // Two-key tool model (see ToolResolutionOptions): the settings file
-        // decides which extensions are loaded into children, the agent's
-        // tools: frontmatter decides which of the available tools are active.
+        // The settings file `packages` decides which extensions children load;
+        // the agent's tool list decides which tools they may use. See
+        // ToolResolutionOptions.
         toolResolutionOptions: buildToolResolutionOptions(pi),
         cwd: ctx.cwd,
         parentSessionDir: getParentSessionPath(ctx, "getSessionDir"),

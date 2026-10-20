@@ -10,8 +10,7 @@
     "npm:@narumitw/pi-statusline",
     "npm:@henryqw/pi-herdr-rename",
     "npm:@benvargas/pi-claude-code-use",
-    "npm:pi-web-access",
-    "builtin:mcp"
+    "npm:pi-web-access"
   ],
   "default_agents": {
     "explore": {

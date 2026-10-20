@@ -117,42 +117,107 @@ Rules and limits:
 A nested agent must declare `subagent_continue` in its `tools:` allowlist if it
 needs to issue follow-ups; declaring `subagent` alone does not grant that tool.
 
-### Allowed Tools
+## How subagents get their tools
 
-What a child subagent can actually use is decided by two independent keys, both of which must match:
+A subagent runs in its own pi process (the **child**). The session that starts
+it is the **parent**. Two settings decide what the child can do. Each setting
+has one job:
 
-1. **Extension pool** — packages listed in `~/.pi/agent/subagents-vflo_settings.json` are loaded into every child process (`--no-extensions` plus one `-e` per package). A tool that no loaded package registers does not exist in the child at all.
-2. **Agent declaration** — the agent's `tools:` frontmatter becomes the child's `--tools` allowlist. pi core applies this allowlist to extension tools as well as built-ins.
+| Setting | Job |
+| --- | --- |
+| `packages` in `~/.pi/agent/subagents-vflo_settings.json` | Which extensions the child loads. This is the complete list. |
+| The agent's tool list | Which tools the child may use. |
 
-Built-in tools a child may declare:
-- `read` — Read files
-- `bash` — Execute shell commands
-- `edit` — Edit files with precise replacements
-- `write` — Write/create files
-- `grep` — Search file contents
-- `find` — Find files
-- `ls` — List directory contents
+### Which extensions the child loads
 
-Extension tools (including `subagent` itself, for recursive dispatch) are usable when the providing package is listed in `subagents-vflo_settings.json` **and** the agent declares the tool in `tools:`. For example, an orchestrator agent declares `tools: read, bash, edit, write, subagent` and the settings file lists this extension — the child then gets a working `subagent` tool.
+The child starts with `--no-extensions`. It always loads pi's built-in
+`builtin:codemode` and `builtin:mcp`. It also loads the packages in `packages`
+and nothing else. Your normal `settings.json` packages are **not** loaded.
 
-**Build and Explore inherit MCP tools with different policies.** Built-in Build inherits MCP tools that
-are active in its parent. Built-in Explore inherits only active MCP tools whose server sets
-`readOnlyHint: true`. Both still need `builtin:mcp` in the child `packages` list, and the child's
-MCP configuration must register matching tool names. Other agents do not inherit MCP tools unless
-they declare them in `tools:`. MCP annotations come from server authors and
-are not verified, so the read-only policy is a useful filter, not a security boundary. Do not expose
-an untrusted MCP server to Explore if it must be unable to make changes.
+```json
+{
+  "packages": [
+    "/path/to/pi-dcp",
+    "npm:pi-web-access"
+  ]
+}
+```
 
-pi's own built-in extensions are turned off by `--no-extensions` too. List them in `packages` as `builtin:<name>`; the child then gets `-e builtin:<name>`.
+- `--no-extensions` also turns off pi's other built-in extensions. To load
+  one, add it as `builtin:<name>`, for example `builtin:tool-search`.
+- `builtin:mcp` connects each child to every *enabled* server in
+  `~/.pi/agent/mcp.json`, in the background. Servers with `"enabled": false`
+  do not start.
+- Loading `builtin:codemode` does not give the agent the `codemode` tool. The
+  agent must have `codemode` in its tool list, or inherit it from the parent.
+- The extension reads this list once. After you change it, run `/reload` or
+  restart pi.
 
-**Codemode follows the parent.** When the parent session has `codemode` active, every child gets it, whatever its `tools:` list says, and the extension loads `builtin:codemode` into the child itself. Codemode scripts can only call tools that are already active in the child, so the per-agent allowlist still limits what the child can do. Because the child then has codemode active, its own subagents get it the same way.
+### Which tools the agent may use
 
-Two failure modes are distinguished at spawn time:
+The extension finds the tool list in this order and uses the first one it
+finds:
 
-- Declaring a tool that is neither a built-in nor active in the parent session is a hard error; the child is not spawned.
-- Declaring an extension tool whose providing package is missing from the settings file spawns the child **with a warning**: the tool is silently absent there, and calling it fails with an unknown-tool error.
+1. **Custom agent:** `tools:` in the agent file.
+2. **Built-in `explore` or `build`:** `default_agents.<name>.tools` in the
+   settings file. If that is not set, the bundled list:
+   `explore` = `read, grep, find, ls, bash`, `build` = `read, bash, edit, write`.
+3. **No list (custom agent without `tools:`):** the tools that are active in
+   the parent, except tools whose extension the child does not load.
 
-Custom agents that declare no `tools:` inherit built-in tools only and do not inherit MCP tools. Built-in Build and Explore are the exceptions: they inherit active MCP tools under the policies above. Other extension tools stay off unless an agent explicitly declares them.
+The list goes to the child's `--tools` option without changes. The extension
+adds nothing to it. `compress`, MCP tools, and `codemode` are normal tools:
+list them if the agent needs them.
+
+A list can contain:
+
+- pi core tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`,
+  `powershell`;
+- any tool that an extension in the parent registered, if that extension is
+  also in `packages`. The tool does not have to be active in the parent;
+- patterns with `*`, for example `mcp__docs__*` for all tools of one MCP
+  server. The extension does not check patterns.
+
+### Tools that turn on other tools
+
+Some extensions keep their tools off until the model asks for them. For
+example, pi-web-access keeps `web_search` and `fetch_content` off until the
+model calls `web_enable`. A tool that is not in the child's list does not
+exist in the child, so `web_enable` can only turn on tools that are also in
+the list. List all of them:
+
+```json
+"tools": ["read", "bash", "web_enable", "web_search", "source_check", "fetch_content", "get_search_content"]
+```
+
+An agent without a list inherits only what is active in the parent **now**.
+If the parent has not called `web_enable`, such an agent gets `web_enable`
+but not `web_search`, and its call to `web_enable` fails.
+
+### MCP tools and codemode
+
+pi keeps MCP tools available to `codemode` scripts when the agent's list has
+no `mcp__` entry. So an agent with `codemode` in its list can call **every**
+MCP tool from a script. To limit this, add
+at least one `mcp__...` name or pattern to the list. Then pi keeps only the MCP
+tools that the list names.
+
+### Checks before the child starts
+
+Every name in an agent's list (except patterns) must be a pi core tool or a
+tool that the child will have. If not, the child does not start, and the
+error tells you what to fix:
+
+| Error | Cause | Fix |
+| --- | --- | --- |
+| `"X": no extension in the parent session registers this tool` | Nothing in the parent registers `X`. | Check the spelling. Install the extension in the parent too, or remove `X` from the list. |
+| `"X": its extension ... is not in "packages"` | The child does not load the extension that registers `X`. | Add the package to `packages`, then run `/reload`. Or remove `X` from the list. |
+
+### Nested subagents
+
+An agent can start its own subagents when its tool list has `subagent` and
+`packages` lists this extension. For example, an orchestrator agent declares
+`tools: read, bash, edit, write, subagent`.
 
 **Recursion is bounded.** An agent that declares `subagent` (like an orchestrator) can dispatch subagents of its own — including one named like itself, because every child discovers the same user/project agent files. runChild stamps each child with a generation counter (`PI_SUBAGENTS_VFLO_DEPTH` environment variable) and refuses to spawn at nesting level `MAX_NESTING_DEPTH` (2): one orchestrator layer with its specialists works, deeper self-dispatch chains return a child error instead of forking pi processes without bound.
 
@@ -301,17 +366,12 @@ Behavior:
 ### `explore`
 Fast read-only codebase reconnaissance. Its bundled model is `openai-codex/gpt-5.6-luna`; its bundled thinking level is `medium`.
 
-**Tools:** `read`, `bash`, `find`, `ls`, `grep`, plus optional `compress` (and `codemode` when the parent has it)
+**Bundled tools:** `read`, `bash`, `find`, `ls`, `grep`. See [How subagents get their tools](#how-subagents-get-their-tools).
 
 ### `build`
 General-purpose agent with full coding capabilities. Its bundled model is `openai-codex/gpt-5.6-luna`; its bundled thinking level is `xhigh`.
 
-**Tools:** `read`, `bash`, `edit`, `write`, plus optional `compress` (and `codemode` when the parent has it)
-
-Optional tools are added only when they are active in the parent session; a
-missing one is dropped silently instead of stopping the spawn. The child
-also needs the providing extension: the pi-dcp package for `compress`, listed
-in `packages`.
+**Bundled tools:** `read`, `bash`, `edit`, `write`. See [How subagents get their tools](#how-subagents-get-their-tools).
 
 You can override the built-in agents' model, thinking level and tools in
 `~/.pi/agent/subagents-vflo_settings.json`, one block per agent under
@@ -336,12 +396,9 @@ Every field is optional; an omitted field keeps the bundled value.
 - `thinking`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
   `max` is model-specific; Pi clamps an unsupported level to one the selected
   model supports.
-- `tools`: replaces the bundled built-in tool list **and** its optional
-  tools. It is checked like an agent file's `tools:` list: each tool must be a
-  built-in tool or active in the parent session, or the spawn fails with an
-  error. An extension tool also needs its extension in `packages`. This does
-  not disable the built-in Build/Explore MCP inheritance policies described
-  above. `codemode` is still added when the parent has it.
+- `tools`: replaces the bundled tool list. It is checked like an agent
+  file's `tools:` list. See
+  [How subagents get their tools](#how-subagents-get-their-tools).
 
 Invalid or blank values are ignored one field at a time. These settings change
 only built-in defaults; a user or project agent named `explore` or `build`
@@ -430,7 +487,7 @@ The inspector shows:
 
 ## Model Resolution
 
-Models are resolved against the models that are actually available in the current pi session. Set built-in Explore and Build defaults with the `default_agents` object in `~/.pi/agent/subagents-vflo_settings.json`; this can be in the same file as `packages`, which lists provider or tool extensions loaded by child processes. For example, add `npm:opencode-pi` to `packages` when using the `opencode-cli` models. The `packages` list also decides which extension tools children can use — see [Allowed Tools](#allowed-tools).
+Models are resolved against the models that are actually available in the current pi session. Set built-in Explore and Build defaults with the `default_agents` object in `~/.pi/agent/subagents-vflo_settings.json`; this can be in the same file as `packages`, which lists provider or tool extensions loaded by child processes. For example, add `npm:opencode-pi` to `packages` when using the `opencode-cli` models. The `packages` list also decides which extension tools children can use — see [How subagents get their tools](#how-subagents-get-their-tools).
 
 Resolution order is:
 
@@ -460,7 +517,7 @@ Tasks beyond the concurrent limit are queued and spawned as earlier tasks comple
 ## Error Handling
 
 - **Invalid agent name** — Task fails immediately with clear error message
-- **Invalid tools** — Declared tools must be built-ins or parent-active extension tools; unknown names are rejected pre-spawn. Declared extension tools without a backing package in `subagents-vflo_settings.json` spawn with a warning and are absent in the child
+- **Invalid tools** — See [Checks before the child starts](#checks-before-the-child-starts)
 - **Invalid CWD** — Non-existent or non-directory paths rejected pre-spawn
 - **Non-zero exit** — Task marked as failed, stderr preview included
 - **Abort** — SIGTERM sent, SIGKILL after 5 seconds if not exited

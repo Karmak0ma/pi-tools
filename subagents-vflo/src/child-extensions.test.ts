@@ -6,7 +6,6 @@ import {
   getConfiguredAgentSettings,
   resolveExtensionEntryPoints,
   resetChildExtensionCache,
-  withRequiredChildExtensions,
   resolveChildExtensions,
   resolvePackageDir,
   warnOnUnresolvedChildExtensions,
@@ -196,35 +195,26 @@ describe("resolvePackageDir npm: resolution under the real module system", () =>
 describe("resolveChildExtensions builtin entries", () => {
   // `--no-extensions` also turns off pi's built-in extensions, so a
   // `builtin:<name>` entry must reach the child as `-e builtin:<name>`
-  // instead of being dropped as an unresolvable package path.
-  it("passes builtin:<name> through verbatim", () => {
+  // instead of being dropped as an unresolvable package path. codemode and
+  // mcp are always loaded, so listing them again must not duplicate them.
+  it("always loads codemode and mcp, and passes other builtin:<name> entries through", () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-home-"));
     fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
     fs.writeFileSync(
       path.join(home, ".pi", "agent", "subagents-vflo_settings.json"),
-      JSON.stringify({ packages: ["builtin:codemode"] }),
+      JSON.stringify({ packages: ["builtin:mcp", "builtin:tool-search"] }),
     );
     vi.stubEnv("HOME", home);
     resetChildExtensionCache();
     try {
-      expect(resolveChildExtensions()).toEqual({ paths: ["builtin:codemode"], unresolved: [] });
+      expect(resolveChildExtensions()).toEqual({
+        paths: ["builtin:codemode", "builtin:mcp", "builtin:tool-search"],
+        unresolved: [],
+      });
     } finally {
       vi.unstubAllEnvs();
       resetChildExtensionCache();
       fs.rmSync(home, { recursive: true, force: true });
     }
-  });
-});
-
-describe("withRequiredChildExtensions", () => {
-  // --no-extensions turns off builtin:codemode, so a child given the codemode
-  // tool must also get the extension, exactly once.
-  it("loads builtin:codemode only when the child has the codemode tool", () => {
-    expect(withRequiredChildExtensions(["/ext/a.ts"], ["read", "codemode"])).toEqual([
-      "/ext/a.ts",
-      "builtin:codemode",
-    ]);
-    expect(withRequiredChildExtensions(["builtin:codemode"], ["codemode"])).toEqual(["builtin:codemode"]);
-    expect(withRequiredChildExtensions(undefined, ["read"])).toEqual([]);
   });
 });
