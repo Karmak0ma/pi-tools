@@ -1,0 +1,71 @@
+# Herdr plugin: Ctrl+click a file link in a pane to open it in nvim.
+#
+# Why a Herdr plugin and not Pi extension code: Herdr catches Ctrl+click
+# BEFORE the pane app sees it (src/client/shell/mouse.rs, PaneLinkActivate)
+# and reads the OSC 8 hyperlink under the mouse. Pi never gets the click, so
+# a Pi extension cannot react to it. Herdr then runs the first plugin
+# `[[link_handlers]]` entry whose regex matches the raw link URI.
+#
+# Where the links come from (Pi already emits them when TERM_PROGRAM=herdr):
+#   - tool headers (read/edit/write/ls) -> "file:///abs/path"
+#   - Markdown links in agent replies   -> the raw href, usually a RELATIVE
+#     path such as "plans/x.md", sometimes with "#L42" or ":42".
+# Paths written only in backticks have no link, so they are not clickable.
+#
+# Requires `ui.mouse_capture = true` in Herdr config (the default).
+#
+# It is NOT loaded by Pi. Register it once with:
+#   herdr plugin link /path/to/herdr-open-in-nvim
+
+id = "vflo.open-in-nvim"
+name = "Open in nvim (vflo)"
+version = "0.1.0"
+# 0.9.0 is the first version that routes OSC 8 file:// clicks to link
+# handlers (Herdr CHANGELOG, #2941). Verified against 0.9.5.
+min_herdr_version = "0.9.0"
+description = "Ctrl+click a file link in a pane to open it in nvim in a split on the right."
+# Only tested on Linux. macOS should work but was not tried, so it is not
+# declared rather than declared and broken.
+platforms = ["linux"]
+
+# Step 1 of 2. Run by the link handler below. It has no TTY: it resolves the
+# clicked link to a file and a line, then opens the `nvim` pane entrypoint.
+[[actions]]
+id = "open-file"
+title = "Open clicked file in nvim"
+description = "Open the clicked file link in nvim in a new pane split to the right."
+command = ["node", "open-file.mjs"]
+
+# Step 2 of 2. The editor pane. The action opens it with --placement split,
+# --direction right, --focus and passes the target through --env.
+#
+# Why a plugin pane and not `herdr pane split` + `herdr pane run`: `pane run`
+# TYPES the command into the new shell. That needs shell quoting, depends on
+# the shell's PATH (herdr pane shells are non-login bash, so ~/bin/nvim is not
+# on PATH), and leaves a shell behind. Here Herdr starts nvim itself, and the
+# pane closes when nvim exits.
+#
+# `sh -c` only picks the argv: nvim has no "no line" value for `+N`, so the
+# flag is added only when a line is set. `exec` makes nvim the pane process.
+# The default placement is overridden by the action on every open.
+[[panes]]
+id = "nvim"
+title = "nvim"
+placement = "split"
+command = [
+  "sh",
+  "-c",
+  'if [ -n "$VFLO_NVIM_LINE" ]; then exec "$VFLO_NVIM_BIN" "+$VFLO_NVIM_LINE" -- "$VFLO_NVIM_FILE"; else exec "$VFLO_NVIM_BIN" -- "$VFLO_NVIM_FILE"; fi',
+]
+
+# Which URIs we take. Rust regex, no look-ahead, so we list what we ACCEPT:
+#   1. file://...                       tool-header links
+#   2. no colon at all                  relative/absolute paths, "#L42" too
+#   3. a colon only as ":LINE[:COL]"    "src/a.rs:42", "src/a.rs:42:7"
+# Everything else (https://, mailto:, ...) does not match, so Herdr keeps its
+# default behavior: open http(s) in the browser, ignore the rest.
+[[link_handlers]]
+id = "file-link"
+title = "Open file in nvim"
+pattern = '^(file://.*|[^:]*|[^:]*:[0-9]+(:[0-9]+)?)$'
+action = "open-file"
