@@ -212,12 +212,18 @@ error tells you what to fix:
 | --- | --- | --- |
 | `"X": no extension in the parent session registers this tool` | Nothing in the parent registers `X`. | Check the spelling. Install the extension in the parent too, or remove `X` from the list. |
 | `"X": its extension ... is not in "packages"` | The child does not load the extension that registers `X`. | Add the package to `packages`, then run `/reload`. Or remove `X` from the list. |
+| `"X": this session is a subagent and does not have this tool` | A subagent tries to start a child with `X`, but `X` is not in the subagent's own tool list. | Add `X` to the tool list of the agent that spawns the child. |
 
 ### Nested subagents
 
 An agent can start its own subagents when its tool list has `subagent` and
 `packages` lists this extension. For example, an orchestrator agent declares
 `tools: read, bash, edit, write, subagent`.
+
+**A child never gets more tools than the agent that spawns it.** pi gives a
+subagent only the tools in its own list. So if a reviewer needs `codemode`,
+the orchestrator that spawns the reviewer must list `codemode` too, even when
+the orchestrator does not use it.
 
 **Recursion is bounded.** An agent that declares `subagent` (like an orchestrator) can dispatch subagents of its own — including one named like itself, because every child discovers the same user/project agent files. runChild stamps each child with a generation counter (`PI_SUBAGENTS_VFLO_DEPTH` environment variable) and refuses to spawn at nesting level `MAX_NESTING_DEPTH` (2): one orchestrator layer with its specialists works, deeper self-dispatch chains return a child error instead of forking pi processes without bound.
 
@@ -430,7 +436,10 @@ You are a code review specialist. Analyze code for:
 ```
 
 ### Project Agents (per-project)
-Place `.md` files in `.pi/agents/` in your project root (or any ancestor directory):
+Place `.md` files in `.pi/agents/` in your project root (or any ancestor directory).
+The extension looks for them from the folder the task runs in: the task's
+`cwd` if it has one, else the parent's folder. So a task with `cwd` in another
+git worktree uses the agent files of that worktree.
 
 > **Security warning:** Project-local agents are always auto-loaded by this extension. They are repo-controlled prompt files and can influence tool usage and file access. Only use this extension in repositories you trust.
 

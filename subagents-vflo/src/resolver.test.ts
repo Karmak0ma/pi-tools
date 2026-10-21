@@ -71,6 +71,17 @@ describe("resolveTools with a tool list", () => {
     expect(result.error).not.toContain('"read"');
   });
 
+  // In a nested session pi registers only the tools in its own --tools list,
+  // so the useful fix is the spawning agent's list, not a missing extension.
+  it("names the spawning agent's tool list when this session is a subagent", () => {
+    const agent = makeAgent({ tools: ["read", "codemode"] });
+
+    const result = resolveTools(agent, ["read"], { ...options(), parentIsSubagent: true });
+
+    expect(result.error).toContain('"codemode": this session is a subagent and does not have this tool');
+    expect(result.error).toContain('add "codemode" to the tool list of the agent that spawned this session');
+  });
+
   it("matches a symlinked package path to the parent's real source path", () => {
     // Parent source paths and settings-derived child entries can name the same
     // file through different spellings. Without canonicalization the spawn

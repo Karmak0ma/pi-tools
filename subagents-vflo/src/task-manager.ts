@@ -56,7 +56,15 @@ import {
  * parent later switches model, tools, or cwd.
  */
 export interface TaskStartContext {
-  agents: AgentConfig[];
+  /**
+   * The agents visible from a folder. Called with each task's resolved cwd,
+   * not the parent's: project agents (`.pi/agents/`) must come from the
+   * folder where the child runs. The child's own nested spawns look up agents
+   * from that folder too, so the same agent name means the same file at every
+   * nesting level (a parent working in another git worktree used to read the
+   * agent files of its own folder instead).
+   */
+  agentsFor: (cwd: string) => AgentConfig[];
   registry: ModelRegistry;
   /** Models known to the parent registry; used for context-window metadata. */
   availableModels: ReadonlyArray<{ provider: string; id: string; contextWindow?: number }>;
@@ -143,7 +151,8 @@ export class SubagentTaskManager {
         id,
         batchId,
         agent: task.agent,
-        source: findAgent(context.agents, task.agent)?.source || "builtin",
+        // Display hint while queued; runTaskInSlot sets the final source.
+        source: findAgent(context.agentsFor(resolveCwd(task, context.cwd).cwd), task.agent)?.source || "builtin",
         task: task.task,
         cwd: context.cwd,
       });
@@ -321,9 +330,20 @@ export class SubagentTaskManager {
     // Cancelled in the same tick the slot was granted.
     if (signal.aborted) return this.makeCancelledSummary(instance);
 
-    const agent = findAgent(context.agents, task.agent);
+    // Resolve cwd first: the agent is looked up in the folder the child runs
+    // in (see TaskStartContext.agentsFor).
+    const cwdResult = resolveCwd(task, context.cwd);
+    if (cwdResult.error) {
+      this.transition(instance, "error", { lifecycle: "failed", errorMessage: cwdResult.error });
+      return makeErrorSummaryFromInstance(instance, cwdResult.error);
+    }
+    instance.cwd = cwdResult.cwd;
+    instance.summary.cwd = cwdResult.cwd;
+
+    const agents = context.agentsFor(cwdResult.cwd);
+    const agent = findAgent(agents, task.agent);
     if (!agent) {
-      const errorMsg = `Agent "${task.agent}" not found. Available agents:\n${formatAgentList(context.agents)}`;
+      const errorMsg = `Agent "${task.agent}" not found. Available agents:\n${formatAgentList(agents)}`;
       this.transition(instance, "error", { lifecycle: "failed", errorMessage: errorMsg });
       return makeErrorSummaryFromInstance(instance, errorMsg);
     }
@@ -357,14 +377,6 @@ export class SubagentTaskManager {
       return makeErrorSummaryFromInstance(instance, toolResult.error);
     }
 
-    // Resolve cwd
-    const cwdResult = resolveCwd(task, context.cwd);
-    if (cwdResult.error) {
-      this.transition(instance, "error", { lifecycle: "failed", errorMessage: cwdResult.error });
-      return makeErrorSummaryFromInstance(instance, cwdResult.error);
-    }
-    instance.cwd = cwdResult.cwd;
-    instance.summary.cwd = cwdResult.cwd;
     instance.thinking = task.thinking ?? agent.thinking;
     instance.tools = [...toolResult.tools];
 

@@ -16,7 +16,7 @@ import { Type } from "typebox";
 import { discoverAgents, findAgent, formatAgentList } from "./agents.js";
 import { renderCall, renderResult } from "./render.js";
 import { Container, Text } from "@earendil-works/pi-tui";
-import { type ModelRegistry, buildToolResolutionOptions } from "./resolver.js";
+import { type ModelRegistry, buildToolResolutionOptions, resolveCwd } from "./resolver.js";
 import { buildMultiTaskToolResult, buildSingleTaskToolResult } from "./multi-task-result.js";
 import { BackgroundDeliveries, type BackgroundResult } from "./background-deliveries.js";
 import { currentNestingDepth } from "./runner.js";
@@ -443,22 +443,26 @@ export default function (pi: ExtensionAPI) {
         );
       }
 
-      const agents = discoverAgents(ctx.cwd).agents;
+      // Agents are looked up in each task's own folder (see
+      // TaskStartContext.agentsFor), so a task with `cwd` in another worktree
+      // uses that worktree's `.pi/agents/`.
+      const agentsFor = (cwd: string) => discoverAgents(cwd).agents;
+      const agentsForTask = (task: TaskItem) => agentsFor(resolveCwd(task, ctx.cwd).cwd);
 
       // When no task names a known agent, nothing can run: answer at once and
       // create no tasks. (Partially valid batches run; the manager fails the
       // unknown ones individually with the same message.)
       const unknownAgentErrors = tasks
-        .map((task, index) => ({ task, index }))
-        .filter(({ task }) => !findAgent(agents, task.agent))
-        .map(({ task, index }) => `Task ${index + 1}: Agent "${task.agent}" not found. Available agents:\n${formatAgentList(agents)}`);
+        .map((task, index) => ({ task, index, agents: agentsForTask(task) }))
+        .filter(({ task, agents }) => !findAgent(agents, task.agent))
+        .map(({ task, index, agents }) => `Task ${index + 1}: Agent "${task.agent}" not found. Available agents:\n${formatAgentList(agents)}`);
       if (unknownAgentErrors.length === tasks.length) {
         return failedToolResult(unknownAgentErrors.join("\n\n"), tasks.length);
       }
 
       const availableModels = await ctx.modelRegistry.getAvailable();
       const taskIds = manager.start(tasks, {
-        agents,
+        agentsFor,
         registry: createModelRegistry(availableModels, ctx.model),
         availableModels,
         // Parent active tool names, for inheritance.

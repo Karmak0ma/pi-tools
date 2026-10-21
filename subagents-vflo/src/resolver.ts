@@ -16,6 +16,7 @@ import {
   type ToolResolutionResult,
 } from "./types.js";
 import { canonicalEntryPath } from "./path-utils.js";
+import { currentNestingDepth } from "./runner.js";
 
 // ─── Model Resolution ────────────────────────────────────────────────────────
 
@@ -111,6 +112,18 @@ export interface ToolResolutionOptions {
   parentToolSources: Map<string, string>;
   /** Extension entry points (or `builtin:<name>`) loaded into the child. */
   childExtensionPaths: string[];
+  /**
+   * True when this session is itself a subagent. Only changes the error text.
+   *
+   * Why it matters: a subagent's own tool list is its `--tools` allowlist,
+   * and pi registers only allowlisted tools. So a subagent can give its
+   * children only tools that are in its own list, even when the extension is
+   * loaded (builtin:codemode always is). This ceiling is kept on purpose: a
+   * child never gets more than the agent that spawns it. But "no extension
+   * registers this tool" is misleading there; the fix is in the spawning
+   * agent's tool list.
+   */
+  parentIsSubagent?: boolean;
 }
 
 /**
@@ -149,7 +162,13 @@ export function resolveTools(
     if (name.includes("*")) continue;
     const check = canChildHave(name, options, childPaths);
     if (check === "unknown") {
-      problems.push(`"${name}": no extension in the parent session registers this tool`);
+      problems.push(
+        options.parentIsSubagent
+          ? `"${name}": this session is a subagent and does not have this tool. A subagent can only give its ` +
+              `children tools from its own tool list: add "${name}" to the tool list of the agent that ` +
+              `spawned this session (or check the spelling)`
+          : `"${name}": no extension in the parent session registers this tool`,
+      );
     } else if (check !== "ok") {
       problems.push(
         `"${name}": its extension ${check.missingExtension} is not in "packages" of ${getChildExtensionConfigPath()}`,
@@ -192,7 +211,11 @@ export function buildToolResolutionOptions(pi: ExtensionAPI): ToolResolutionOpti
   for (const tool of pi.getAllTools()) {
     parentToolSources.set(tool.name, tool.sourceInfo.path);
   }
-  return { parentToolSources, childExtensionPaths: resolveChildExtensions().paths };
+  return {
+    parentToolSources,
+    childExtensionPaths: resolveChildExtensions().paths,
+    parentIsSubagent: currentNestingDepth() > 0,
+  };
 }
 
 // ─── Cwd Resolution ──────────────────────────────────────────────────────────

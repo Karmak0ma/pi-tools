@@ -45,7 +45,7 @@ const agent: AgentConfig = { name: "explore", description: "", tools: ["read"], 
 
 function context(): TaskStartContext {
   return {
-    agents: [agent],
+    agentsFor: () => [agent],
     registry: { resolve: () => undefined, getParentModel: () => ({ provider: "p", id: "m" }) },
     availableModels: [],
     parentActiveToolNames: ["read"],
@@ -151,6 +151,25 @@ describe("SubagentTaskManager", () => {
     expect(unknown.failed).toBe(true);
     expect(unknown.errorMessage).toContain('Agent "nope" not found');
     expect(known.finalOutput).toBe("A");
+  });
+
+  // Regression: a parent in one git worktree delegating with `cwd` set to
+  // another worktree read the agent file of its own folder, so a fixed agent
+  // file in the task's worktree had no effect.
+  it("looks up the agent in the task's cwd, not the parent's", async () => {
+    const { manager, children } = setup();
+    const taskDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-task-cwd-"));
+    const fromTaskDir: AgentConfig = { ...agent, tools: ["read", "bash"] };
+    try {
+      const ctx = { ...context(), agentsFor: (cwd: string) => (cwd === taskDir ? [fromTaskDir] : [agent]) };
+      const [id] = manager.start([{ ...task("a"), cwd: taskDir }], ctx);
+      await settle();
+      expect(children[0].spec.resolvedTools).toEqual(["read", "bash"]);
+      children[0].finish("A");
+      await manager.wait([id]);
+    } finally {
+      fs.rmSync(taskDir, { recursive: true, force: true });
+    }
   });
 
   // A follow-up must inherit the child's resolved configuration and frozen
