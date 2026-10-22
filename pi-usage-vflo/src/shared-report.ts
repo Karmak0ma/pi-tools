@@ -30,7 +30,15 @@ export interface SharedProviderEntry {
 	/** Epoch ms when `report` was fetched. */
 	capturedAt?: number;
 	/** Last failure observed after the last success, if any. */
-	failure?: { at: number; message: string };
+	failure?: {
+		/** Epoch ms when the failure was observed. */
+		at: number;
+		message: string;
+		/** HTTP status, when the provider returned one. */
+		status?: number;
+		/** Absolute retry deadline shared by all processes. Old entries omit it. */
+		until?: number;
+	};
 }
 
 export interface SharedReportFile {
@@ -112,16 +120,29 @@ export async function publishSharedReport(
 	await publish(report.providerId, () => ({ report, capturedAt: now }), path);
 }
 
-/** Records a failed fetch, keeping the last successful report untouched. */
+/**
+ * Records a failed fetch, keeping the last successful report untouched.
+ * `details.until` is an absolute epoch-ms deadline so every process observes
+ * the same cooldown; omitted details keep older callers and files compatible.
+ */
 export async function publishSharedFailure(
 	providerId: string,
 	message: string,
 	now = Date.now(),
 	path = SHARED_REPORT_PATH,
+	details: { status?: number; until?: number } = {},
 ): Promise<void> {
 	await publish(
 		providerId,
-		(previous) => ({ ...previous, failure: { at: now, message } }),
+		(previous) => ({
+			...previous,
+			failure: {
+				at: now,
+				message,
+				...(details.status !== undefined ? { status: details.status } : {}),
+				...(details.until !== undefined ? { until: details.until } : {}),
+			},
+		}),
 		path,
 	);
 }

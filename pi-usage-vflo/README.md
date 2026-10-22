@@ -24,7 +24,7 @@ An environment-only `COPILOT_GITHUB_TOKEN` can authenticate model requests but c
 | `openai-codex` | `GET https://chatgpt.com/backend-api/wham/usage` (undocumented) | ChatGPT OAuth access token |
 | `github-copilot` | `GET https://api.github.com/copilot_internal/user` (undocumented; enterprise uses the matching `api.<domain>` origin) | GitHub OAuth token from Pi's `/login` flow (select GitHub Copilot) |
 
-Each endpoint is queried only when Pi resolves the matching provider through its official origin; custom/proxy origins fail closed. Copilot API-token-only configuration through `COPILOT_GITHUB_TOKEN` cannot report subscription quota because the quota endpoint requires the original GitHub OAuth token. Responses are cached 5 minutes per account fingerprint; errors are redacted and back off 30 seconds.
+Each endpoint is queried only when Pi resolves the matching provider through its official origin; custom/proxy origins fail closed. Copilot API-token-only configuration through `COPILOT_GITHUB_TOKEN` cannot report subscription quota because the quota endpoint requires the original GitHub OAuth token. Responses are cached 5 minutes per account fingerprint. Errors are redacted; ordinary failures back off 30 seconds. HTTP 429 responses use at least a 5-minute backoff, honor `Retry-After`, and cap the backoff at one hour.
 
 ## Shared result file
 
@@ -34,11 +34,11 @@ These endpoints rate limit hard: a second call a few seconds after the first ans
 ~/.pi/agent/usage-vflo-shared.json
 ```
 
-Shape: `{ version: 1, providers: { <providerId>: { report?, capturedAt?, failure? } } }`. Successes replace the entry; failures are stored next to the last good report, so a reader can keep showing the last known numbers while telling the user that the newest refresh failed. Writes are atomic (temp file + rename) and merge per provider, so several pi processes can publish concurrently. Publication failures are ignored on purpose — the file is a cache, never a source of truth.
+Shape: `{ version: 1, providers: { <providerId>: { report?, capturedAt?, failure?: { at, message, status?, until? } } } }`. Successes replace the entry; failures are stored next to the last good report, so a reader can keep showing the last known numbers while telling the user that the newest refresh failed. `failure.until` is an absolute retry deadline shared by all pi processes; `status` stores the HTTP status when one is available. Writes are atomic (temp file + rename) and merge per provider, so several pi processes can publish concurrently. Publication failures are ignored on purpose — the file is a cache, never a source of truth.
 
 Other extensions (for example `sidebar-vflo`) must read this file instead of querying the provider again.
 
-This extension also reads its own file before calling the network: if the file already has a report or a failure for this provider from the last 5 minutes (respectively 30 seconds), it reuses that instead of making its own call. This is what keeps several concurrently running pi sessions from each polling the endpoint on their own schedule — without it, a 5-minute per-process cache still lets N sessions make N calls. It is a best-effort guard, not a lock: two sessions can still race if they check the file in the same instant (e.g. several sessions launched together); when that happens one call still succeeds and republishes fresh data for everyone, so the race is rare and cheap rather than a lock file's added complexity (acquisition, staleness timeout, crash cleanup).
+This extension also reads its shared file before calling the network. It reuses reports captured in the last 5 minutes and respects active failure deadlines, so concurrent pi sessions do not each poll on their own schedule. Old failure entries without a deadline use the original 30-second fallback. An active 429 lockout is never bypassed, including by the `/usage` menu's forced Refresh; forced refresh still bypasses the report cache and ordinary failure cooldowns. This is a best-effort guard, not a lock: two sessions can still race if they check the file in the same instant (e.g. several sessions launched together); when that happens one call still succeeds and republishes fresh data for everyone, so the race is rare and cheap rather than a lock file's added complexity (acquisition, staleness timeout, crash cleanup).
 
 ## Library API
 

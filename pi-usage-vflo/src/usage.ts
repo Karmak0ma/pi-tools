@@ -11,6 +11,7 @@ import {
 	queryProviderUsage,
 	resolveUsageAuth,
 	SUPPORTED_ADAPTERS,
+	UsageHttpError,
 } from "./query.js";
 import type {
 	PiModel,
@@ -19,7 +20,12 @@ import type {
 	UsageDisplayState,
 	UsageProviderAdapter,
 } from "./types.js";
-import { publishSharedFailure, publishSharedReport, readSharedProviderEntry } from "./shared-report.js";
+import {
+	publishSharedFailure,
+	publishSharedReport,
+	readSharedProviderEntry,
+	SHARED_REPORT_PATH,
+} from "./shared-report.js";
 import {
 	isTimeoutError,
 	modelIdentity,
@@ -31,6 +37,8 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const ALL_PROVIDER_CONCURRENCY = 2;
 const FAILURE_BACKOFF_MS = 30_000;
+const RATE_LIMIT_BACKOFF_MS = 5 * 60 * 1000;
+const MAX_RATE_LIMIT_BACKOFF_MS = 60 * 60 * 1000;
 const MAX_ACCOUNT_STATES = 32;
 const STATUS_KEY = "usage";
 
@@ -41,11 +49,12 @@ type QueryOutcome = {
 	state: ProviderUsageState;
 	fingerprint?: string;
 	authState?: "unavailable";
+	retryAt?: number;
 };
 
 export default function usageExtension(pi: ExtensionAPI): void {
 	const cache = new UsageCache(CACHE_TTL_MS);
-	const failureBackoff = new Map<string, { until: number; message: string }>();
+	const failureBackoff = new Map<string, { until: number; message: string; status?: number }>();
 	const latestQueries = new Map<string, number>();
 	const activeControllers = new Set<AbortController>();
 	let querySequence = 0;
@@ -84,7 +93,7 @@ export default function usageExtension(pi: ExtensionAPI): void {
 		statusRefreshTimer = setTimeout(() => {
 			statusRefreshTimer = undefined;
 			if (!sessionActive || generation !== statusGeneration) return;
-			startStatusRefresh(ctx, model, true);
+			startStatusRefresh(ctx, model, false);
 		}, delayMs);
 		statusRefreshTimer.unref?.();
 	};
@@ -104,7 +113,10 @@ export default function usageExtension(pi: ExtensionAPI): void {
 			if (outcome.state.status === "query-failed") {
 				if (safeSetStatus(ctx, undefined)) {
 					if (shouldSchedule && sessionActive) {
-						scheduleStatusRefresh(ctx, model, FAILURE_BACKOFF_MS);
+						const delayMs = outcome.retryAt === undefined
+							? FAILURE_BACKOFF_MS
+							: Math.max(0, outcome.retryAt - Date.now());
+						scheduleStatusRefresh(ctx, model, delayMs);
 					}
 				}
 				return;
@@ -236,39 +248,59 @@ export default function usageExtension(pi: ExtensionAPI): void {
 		// instead of hiding it — and closing it completely would add real
 		// complexity (lock acquisition, staleness timeout, cleanup on crash) for
 		// a rare, already-cheap-to-recover-from case.
-		if (!force) {
-			const shared = await readSharedProviderEntry(adapter.id);
-			const now = Date.now();
-			if (shared?.report && shared.capturedAt !== undefined && now - shared.capturedAt < CACHE_TTL_MS) {
-				cache.set(adapter.id, auth.fingerprint, shared.report, shared.capturedAt);
-				return {
-					state: {
-						providerId: adapter.id,
-						providerName: adapter.displayName,
-						displayState,
-						status: "ready",
-						report: shared.report,
-					},
-					fingerprint: auth.fingerprint,
-				};
-			}
-			if (shared?.failure && now - shared.failure.at < FAILURE_BACKOFF_MS) {
-				return {
-					state: {
-						providerId: adapter.id,
-						providerName: adapter.displayName,
-						displayState,
-						status: "query-failed",
-						message: shared.failure.message,
-					},
-					fingerprint: auth.fingerprint,
-				};
-			}
+		const shared = await readSharedProviderEntry(adapter.id);
+		const now = Date.now();
+		if (
+			!force &&
+			shared?.report &&
+			shared.capturedAt !== undefined &&
+			now - shared.capturedAt < CACHE_TTL_MS
+		) {
+			cache.set(adapter.id, auth.fingerprint, shared.report, shared.capturedAt);
+			return {
+				state: {
+					providerId: adapter.id,
+					providerName: adapter.displayName,
+					displayState,
+					status: "ready",
+					report: shared.report,
+				},
+				fingerprint: auth.fingerprint,
+			};
+		}
+		const sharedFailure = shared?.failure;
+		const sharedFailureUntil = sharedFailure
+			? Number.isFinite(sharedFailure.until)
+				? sharedFailure.until
+				: sharedFailure.at + FAILURE_BACKOFF_MS
+			: undefined;
+		if (
+			sharedFailure &&
+			sharedFailureUntil !== undefined &&
+			sharedFailureUntil > now &&
+			(sharedFailure.status === 429 || !force)
+		) {
+			return {
+				state: {
+					providerId: adapter.id,
+					providerName: adapter.displayName,
+					displayState,
+					status: "query-failed",
+					message: sharedFailure.message,
+				},
+				fingerprint: auth.fingerprint,
+				retryAt: sharedFailureUntil,
+			};
 		}
 
 		const failureKey = `${adapter.id}:${auth.fingerprint}`;
 		const previousFailure = failureBackoff.get(failureKey);
-		if (!force && previousFailure && previousFailure.until > Date.now()) {
+		const failureNow = Date.now();
+		if (
+			previousFailure &&
+			previousFailure.until > failureNow &&
+			(previousFailure.status === 429 || !force)
+		) {
 			return {
 				state: {
 					providerId: adapter.id,
@@ -278,6 +310,7 @@ export default function usageExtension(pi: ExtensionAPI): void {
 					message: previousFailure.message,
 				},
 				fingerprint: auth.fingerprint,
+				retryAt: previousFailure.until,
 			};
 		}
 		failureBackoff.delete(failureKey);
@@ -310,6 +343,16 @@ export default function usageExtension(pi: ExtensionAPI): void {
 			if (isStaleExtensionContextError(error) || isAbortError(error)) throw error;
 			const message = errorMessage(error);
 			const now = Date.now();
+			const httpError = error instanceof UsageHttpError ? error : undefined;
+			const status = httpError?.status;
+			const backoffMs =
+				status === 429
+					? Math.min(
+							MAX_RATE_LIMIT_BACKOFF_MS,
+							Math.max(RATE_LIMIT_BACKOFF_MS, httpError?.retryAfterMs ?? 0),
+						)
+					: FAILURE_BACKOFF_MS;
+			const retryAt = now + backoffMs;
 			for (const [key, failure] of failureBackoff) {
 				if (failure.until <= now) failureBackoff.delete(key);
 			}
@@ -317,12 +360,15 @@ export default function usageExtension(pi: ExtensionAPI): void {
 				setBoundedMap(
 					failureBackoff,
 					failureKey,
-					{ until: now + FAILURE_BACKOFF_MS, message },
+					{ until: retryAt, message, ...(status !== undefined ? { status } : {}) },
 					MAX_ACCOUNT_STATES,
 				);
-				// Failures are published too, so readers can explain WHY the
-				// numbers are missing or stale instead of showing nothing.
-				void publishSharedFailure(adapter.id, message);
+				// Persist the deadline so every pi process, including one that
+				// starts during a 429 lockout, waits for the same retry window.
+				void publishSharedFailure(adapter.id, message, now, SHARED_REPORT_PATH, {
+					...(status !== undefined ? { status } : {}),
+					until: retryAt,
+				});
 			}
 			return {
 				state: {
@@ -333,6 +379,7 @@ export default function usageExtension(pi: ExtensionAPI): void {
 					message,
 				},
 				fingerprint: auth.fingerprint,
+				retryAt,
 			};
 		}
 	};
@@ -489,7 +536,7 @@ export default function usageExtension(pi: ExtensionAPI): void {
 		ctx: ExtensionCommandContext,
 		force: boolean,
 		controller: AbortController,
-	): Promise<ProviderUsageState[] | undefined> => {
+	): Promise<QueryOutcome[] | undefined> => {
 		const currentProviderId = ctx.model?.provider;
 		const settled = await runMenuOperation(ctx, "Checking usage…", controller.signal, (signal) =>
 			runWithConcurrency(
@@ -507,32 +554,34 @@ export default function usageExtension(pi: ExtensionAPI): void {
 			),
 		);
 		if (!settled) return undefined;
-		const states = settled.map((result, index) => {
-			if (result.status === "fulfilled") return result.value.state;
+		const outcomes = settled.map((result, index): QueryOutcome => {
+			if (result.status === "fulfilled") return result.value;
 			const adapter = SUPPORTED_ADAPTERS[index] as UsageProviderAdapter;
 			return {
-				providerId: adapter.id,
-				providerName: adapter.displayName,
-				displayState: adapter.id === currentProviderId ? ("current" as const) : ("configured" as const),
-				status: "query-failed" as const,
-				message: errorMessage(result.reason),
+				state: {
+					providerId: adapter.id,
+					providerName: adapter.displayName,
+					displayState: adapter.id === currentProviderId ? "current" : "configured",
+					status: "query-failed",
+					message: errorMessage(result.reason),
+				},
 			};
 		});
-		return states.sort((left, right) => {
-			if (left.providerId === currentProviderId) return -1;
-			if (right.providerId === currentProviderId) return 1;
-			return left.providerId.localeCompare(right.providerId);
+		return outcomes.sort((left, right) => {
+			if (left.state.providerId === currentProviderId) return -1;
+			if (right.state.providerId === currentProviderId) return 1;
+			return left.state.providerId.localeCompare(right.state.providerId);
 		});
 	};
 
 	const publishCurrentState = (
 		ctx: ExtensionCommandContext,
-		states: readonly ProviderUsageState[],
+		outcomes: readonly QueryOutcome[],
 	) => {
 		const currentProviderId = ctx.model?.provider;
-		const currentState = states.find((state) => state.providerId === currentProviderId);
-		if (currentState && ctx.model) {
-			publishStatus(ctx, { state: currentState }, ctx.model, sessionActive);
+		const currentOutcome = outcomes.find((outcome) => outcome.state.providerId === currentProviderId);
+		if (currentOutcome && ctx.model) {
+			publishStatus(ctx, currentOutcome, ctx.model, sessionActive);
 		} else {
 			safeSetStatus(ctx, undefined);
 		}
@@ -550,8 +599,8 @@ export default function usageExtension(pi: ExtensionAPI): void {
 		try {
 			const initialStates = await queryAllProviders(ctx, false, controller);
 			if (!initialStates) return;
-			let visibleStates = initialStates;
-			publishCurrentState(ctx, visibleStates);
+			let visibleOutcomes = initialStates;
+			publishCurrentState(ctx, visibleOutcomes);
 			const { defineMenu, runMenu } = await import("@narumitw/pi-tui-kit");
 			if (controller.signal.aborted || statusGeneration !== menuGeneration) return;
 			type Screen = "main";
@@ -562,7 +611,7 @@ export default function usageExtension(pi: ExtensionAPI): void {
 					main: () => ({
 						kind: "actions",
 						title: "Provider usage",
-						lines: formatProviderStates(visibleStates).split("\n"),
+						lines: formatProviderStates(visibleOutcomes.map((outcome) => outcome.state)).split("\n"),
 						items: [
 							{ id: "refresh", label: REFRESH_ALL, action: "refresh" },
 							{ id: "close", label: CLOSE, close: true },
@@ -574,8 +623,8 @@ export default function usageExtension(pi: ExtensionAPI): void {
 					refresh: async () => {
 						const refreshed = await queryAllProviders(ctx, true, controller);
 						if (!refreshed) return { kind: "stay" };
-						visibleStates = refreshed;
-						publishCurrentState(ctx, visibleStates);
+						visibleOutcomes = refreshed;
+						publishCurrentState(ctx, visibleOutcomes);
 						return { kind: "stay" };
 					},
 					close: () => ({ kind: "close" }),

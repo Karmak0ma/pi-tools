@@ -19,6 +19,18 @@ const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const GITHUB_COPILOT_USAGE_URL = "https://api.github.com/copilot_internal/user";
 const MAX_SUCCESS_BODY_BYTES = 64 * 1024;
 const MAX_ERROR_BODY_BYTES = 4 * 1024;
+const MAX_RETRY_AFTER_MS = 60 * 60 * 1000;
+
+export class UsageHttpError extends Error {
+	constructor(
+		message: string,
+		readonly status: number,
+		readonly retryAfterMs?: number,
+	) {
+		super(message);
+		this.name = "UsageHttpError";
+	}
+}
 
 export const AUTH_FINGERPRINT_SALT = randomBytes(32);
 
@@ -210,7 +222,11 @@ export async function queryProviderUsage(
 		return await adapter.query(auth, signal, timeoutMs);
 	} catch (error) {
 		if (isStaleExtensionContextError(error) || isAbortError(error)) throw error;
-		throw new Error(redactUsageError(errorMessage(error), auth.secrets));
+		const message = redactUsageError(errorMessage(error), auth.secrets);
+		if (error instanceof UsageHttpError) {
+			throw new UsageHttpError(message, error.status, error.retryAfterMs);
+		}
+		throw new Error(message);
 	}
 }
 
@@ -281,8 +297,10 @@ export async function fetchProviderJson(
 		if (controller.signal.aborted)
 			throw Object.assign(new Error("Usage query aborted."), { name: "AbortError" });
 		if (!response.ok) {
-			throw new Error(
+			throw new UsageHttpError(
 				`${description} returned ${response.status} ${response.statusText}: ${redactUsageError(text, auth.secrets)}`,
+				response.status,
+				parseRetryAfter(response.headers.get("Retry-After")),
 			);
 		}
 		let parsed: unknown;
@@ -306,6 +324,24 @@ export async function fetchProviderJson(
 		clearTimeout(timeout);
 		signal.removeEventListener("abort", abortFromCaller);
 	}
+}
+
+function parseRetryAfter(value: string | null): number | undefined {
+	const header = value?.trim();
+	if (!header) return undefined;
+
+	let delayMs: number;
+	if (/^\d+$/u.test(header)) {
+		const seconds = Number(header);
+		if (!Number.isFinite(seconds)) return MAX_RETRY_AFTER_MS;
+		delayMs = seconds * 1000;
+	} else {
+		const retryAt = Date.parse(header);
+		if (!Number.isFinite(retryAt)) return undefined;
+		delayMs = retryAt - Date.now();
+	}
+	if (!Number.isFinite(delayMs) || delayMs < 0) return undefined;
+	return Math.min(delayMs, MAX_RETRY_AFTER_MS);
 }
 
 async function readBoundedResponse(

@@ -5,6 +5,7 @@ import {
 	providerIsConfigured,
 	queryProviderUsage,
 	resolveUsageAuth,
+	UsageHttpError,
 } from "../src/query.js";
 import { normalizeAnthropicOauthUsagePayload } from "../src/providers/anthropic.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -562,24 +563,64 @@ describe("fetchProviderJson", () => {
 		).rejects.toThrow(/Claude usage endpoint returned 500 Nope: .*…$/);
 	});
 
-	it("redacts secrets from query errors", async () => {
+	it("preserves rate-limit metadata while redacting provider response text", async () => {
+		vi.useFakeTimers();
+		const now = Date.parse("2025-03-01T00:00:00.000Z");
+		vi.setSystemTime(now);
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async () =>
 				new Response(JSON.stringify({ error: "bad token sk-ant-oat01-abc" }), {
-					status: 403,
-					statusText: "Forbidden",
+					status: 429,
+					statusText: "Too Many Requests",
+					headers: { "Retry-After": "600" },
 				}),
 			),
 		);
-		await expect(
-			queryProviderUsage(
+
+		let caught: unknown;
+		try {
+			await queryProviderUsage(
 				adapterForProvider("anthropic")!,
 				mockAuth(),
 				new AbortController().signal,
 				15_000,
+			);
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(caught).toBeInstanceOf(UsageHttpError);
+		expect(caught).toMatchObject({ status: 429, retryAfterMs: 600_000 });
+		expect((caught as Error).message).toContain("<redacted>");
+		expect((caught as Error).message).not.toContain("sk-ant-oat01-abc");
+	});
+
+	it.each([
+		["HTTP date", "Sat, 01 Mar 2025 00:02:00 GMT", 120_000],
+		["oversized delta-seconds", "7200", 60 * 60 * 1000],
+	])("parses Retry-After %s and caps it at one hour", async (_label, retryAfter, expectedMs) => {
+		vi.useFakeTimers();
+		vi.setSystemTime(Date.parse("2025-03-01T00:00:00.000Z"));
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				new Response("{}", {
+					status: 429,
+					headers: { "Retry-After": retryAfter as string },
+				}),
 			),
-		).rejects.toThrow(/<redacted>/);
+		);
+
+		await expect(
+			fetchProviderJson(
+				"https://api.anthropic.com/api/oauth/usage",
+				mockAuth(),
+				new AbortController().signal,
+				15_000,
+				"Claude usage endpoint",
+			),
+		).rejects.toMatchObject({ status: 429, retryAfterMs: expectedMs });
 	});
 });
 

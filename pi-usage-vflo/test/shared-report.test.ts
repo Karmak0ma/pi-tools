@@ -55,10 +55,18 @@ describe("shared usage report file", () => {
 	it("keeps the last good report next to a newer failure", async () => {
 		const path = await scratchFile();
 		await publishSharedReport(report("anthropic"), 5000, path);
-		await publishSharedFailure("anthropic", "429 rate limited", 7000, path);
+		await publishSharedFailure("anthropic", "429 rate limited", 7000, path, {
+			status: 429,
+			until: 307000,
+		});
 		const entry = await readSharedProviderEntry("anthropic", path);
 		expect(entry?.capturedAt).toBe(5000);
-		expect(entry?.failure).toEqual({ at: 7000, message: "429 rate limited" });
+		expect(entry?.failure).toEqual({
+			at: 7000,
+			message: "429 rate limited",
+			status: 429,
+			until: 307000,
+		});
 	});
 
 	it("clears a stale failure once a fresh report arrives", async () => {
