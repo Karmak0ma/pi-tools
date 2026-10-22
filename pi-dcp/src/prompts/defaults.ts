@@ -45,7 +45,7 @@ export type GuidanceConfig = Pick<EffectiveConfig, "turnProtection"> & {
  */
 export function selectionRules(config: GuidanceConfig): string {
   const lines = [
-    "- Select only whole protocol units, contiguous, by their mNNNN labels. A unit tagged BLOCKED can never be selected: its exchange is not complete and settled.",
+    "- Select only whole protocol units, contiguous, by their mNNNN labels. A unit tagged BLOCKED can never be selected: it is an unfinished tool exchange or a protected message. If compress rejects a range, retry immediately with the replacement ranges the error lists.",
   ];
   if (config.compress.protectUserMessages) {
     // protectUserMessages makes every user unit ineligible, but labels.ts

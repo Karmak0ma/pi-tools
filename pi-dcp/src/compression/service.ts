@@ -9,7 +9,7 @@ import { validateSummary, type SummaryValidation } from "./validate.ts";
 import { normalizeCompressionParams, type CompressionParams } from "./schema.ts";
 import type { CanonicalIndex } from "../identity/types.ts";
 import { appendProtectedToolContent, type ProtectionOptions } from "./protected.ts";
-import { buildEligibility, unitBlockReason, type UnitBlockReason } from "./eligibility.ts";
+import { buildEligibility, compressibleSegments, unitBlockReason, type UnitBlockReason } from "./eligibility.ts";
 import { unitAlias } from "../identity/snapshot.ts";
 import { estimateTokens } from "../tokens/estimate.ts";
 
@@ -23,7 +23,13 @@ export type CompressionBuildFailure = {
   byPattern?: string;
   hint?: string;
   cause?: UnitBlockReason;
+  /** Every blocked unit across all requested ranges (content_protected). */
+  blocked?: BlockedUnit[];
+  /** Per offending range: the valid sub-ranges that split around its blockers. */
+  splits?: RangeSplit[];
 };
+export interface BlockedUnit { id: string; rangeIndex: number; cause: UnitBlockReason; }
+export interface RangeSplit { rangeIndex: number; requested: string; segments: string[]; }
 export type CompressionBuildResult = { ok: true; envelope: ReturnType<typeof createEnvelope>; blocks: CreatedBlock[]; } | CompressionBuildFailure;
 export function buildCompressionEnvelope(options: CompressionBuildOptions): CompressionBuildResult {
   const params = normalizeCompressionParams(options.params);
@@ -35,14 +41,24 @@ export function buildCompressionEnvelope(options: CompressionBuildOptions): Comp
   // verbatim below instead (appendProtectedToolContent). The only remaining
   // hard blockers are settledness and the user-turn protection rules.
   const eligibility = buildEligibility(options.snapshot.units, { turnProtection: options.turnProtection, protectUserMessages: options.protectUserMessages });
+  // Collect EVERY blocker instead of failing on the first one. Reporting a
+  // single unit ("drop m0572") hid that the range had seven blockers, so the
+  // fix looked trivial but was not, and the model abandoned the retry. The
+  // complete list plus ready-made split ranges makes the retry mechanical.
+  const blocked: BlockedUnit[] = [];
+  const splits: RangeSplit[] = [];
   for (const range of ranges.ranges) {
-    const selectedUnits = options.snapshot.units.slice(range.start, range.end + 1);
-    for (let offset = 0; offset < selectedUnits.length; offset++) {
-      const unitIndex = range.start + offset;
-      const cause = unitBlockReason(selectedUnits[offset], unitIndex, eligibility);
-      if (cause) return { ok: false, reason: "content_protected", rangeIndex: range.rangeIndex, id: unitAlias(unitIndex), cause };
+    const before = blocked.length;
+    for (let unitIndex = range.start; unitIndex <= range.end; unitIndex++) {
+      const cause = unitBlockReason(options.snapshot.units[unitIndex], unitIndex, eligibility);
+      if (cause) blocked.push({ id: unitAlias(unitIndex), rangeIndex: range.rangeIndex, cause });
+    }
+    if (blocked.length > before) {
+      const requested = `${unitAlias(range.start)}-${unitAlias(range.end)}`;
+      splits.push({ rangeIndex: range.rangeIndex, requested, segments: compressibleSegments(options.snapshot.units, eligibility, range.start, range.end) });
     }
   }
+  if (blocked.length) return { ok: false, reason: "content_protected", rangeIndex: blocked[0].rangeIndex, id: blocked[0].id, cause: blocked[0].cause, blocked, splits };
   const blocks: CreatedBlock[] = [];
   for (let index = 0; index < ranges.ranges.length; index++) {
     const range = ranges.ranges[index]; const authored = params.content[index].summary;

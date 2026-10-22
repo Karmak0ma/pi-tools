@@ -39,6 +39,16 @@ export function buildProtocolUnits(projected: readonly ProjectedMessage[]): Cano
   return { entries: [...projected], units, messageToUnit };
 }
 
+/**
+ * Custom message types that must never be selected by a compress range.
+ * Blocklist rather than allowlist on purpose: an extension message is normal
+ * history by default; content that must persist verbatim belongs in the
+ * system prompt, not in a transcript message.
+ * - pi-dcp.v2.summary: pi-dcp's own rendered block. Blocks are selected via
+ *   their bNNNN alias and nested-placeholder rules, never as a raw unit.
+ */
+export const PROTECTED_CUSTOM_TYPES: ReadonlySet<string> = new Set(["pi-dcp.v2.summary"]);
+
 function makeUnit(items: readonly ProjectedMessage[], start: number, end: number, settled: boolean): ProtocolUnit {
   const messageKeys = items.map((item) => item.key);
   const entryIds = [...new Set(items.map((item) => item.key.entryId))];
@@ -47,8 +57,14 @@ function makeUnit(items: readonly ProjectedMessage[], start: number, end: number
   // A bashExecution message has no content array where DCP can attach a stable
   // model-facing alias. Keep it canonical for exact joining, but do not let a
   // caller select an invisible alias or remove shell provenance via a block.
+  //
+  // `custom` messages are extension-injected history (pi.sendMessage), e.g. a
+  // background subagent result. Once delivered they are ordinary, settled
+  // conversation content, so they are compressible. Blocking them made every
+  // async subagent result a permanent hole in history that split compress
+  // ranges (see PROTECTED_CUSTOM_TYPES for the narrow exceptions).
   const permanentlyBlocked = first?.role === "system"
-    || first?.role === "custom"
+    || (first?.role === "custom" && PROTECTED_CUSTOM_TYPES.has(first.customType))
     || first?.role === "compactionSummary"
     || first?.role === "branchSummary"
     || first?.role === "bashExecution";

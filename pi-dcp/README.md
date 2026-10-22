@@ -78,6 +78,17 @@ The editable file uses the same shape as the menu. For example:
 
 Compression summaries are authored by the model through the v2 `compress` tool. The schema contains no model-supplied snapshot ID. Deterministic `m0001` and `b0001` aliases are attached locally to protocol units and active summaries; they are resolved against the producing assistant response's retained internal baseline. A missing or changed baseline fails closed and writes no operation. Version-1 operation entries remain in raw history but are ignored by v2 so raw context can be restored safely.
 
+## Compressible and blocked units
+
+Every message in the provider request carries a label: `mNNNN` for a unit the model may compress, `bNNNN` for an active summary block, or `BLOCKED` for a unit that can never be part of a compress range. A unit is `BLOCKED` for one of two reasons:
+
+- **Unfinished tool exchange**: an assistant tool call that does not yet have all its results directly after it.
+- **Protected message**: a `system` message (pi records one when the system prompt, rules, or tool list change mid-session; summarizing it could make the model call a tool that no longer exists), a `bashExecution` message (a command the user ran with `!`; it has no content array to carry a label), or a `custom` message whose `customType` is in the blocklist. The blocklist currently contains only `pi-dcp.v2.summary`, pi-dcp's own rendered block.
+
+All other extension `custom` messages (sent with `pi.sendMessage`, for example `subagent-background-result`) are ordinary, compressible history. A blocklist is used instead of an allowlist because extension messages are normal transcript content; content that must persist verbatim belongs in the system prompt.
+
+When a compress call is rejected with `content_protected`, the error lists every blocked unit in the request with its reason, and gives the exact replacement ranges that split each rejected range around its blockers (for example `range 0 (m0001-m0005) -> m0001, m0003, m0005`). The model is instructed to retry immediately with those ranges. Nothing is compressed by a rejected call.
+
 ## Configuration
 
 Configuration is read from trusted global and project `dcp.jsonc`/`dcp.json` layers, followed by the personal `~/.pi/agent/dcp_settings.json` file. The personal settings file is the menu's editable source and takes precedence for overlapping keys; untrusted project files are not opened. The complete supported schema is implemented in `src/config`; unknown and excluded settings are rejected or warned. Arrays extend protection baselines. See `IMPLEMENTATION_PLAN.md` for the frozen behavior contract.

@@ -11,6 +11,8 @@ export interface CompressionErrorExtra {
   hint?: string;
   baseline?: BaselineSnapshot;
   cause?: UnitBlockReason;
+  blocked?: readonly { id: string; rangeIndex: number; cause: UnitBlockReason }[];
+  splits?: readonly { rangeIndex: number; requested: string; segments: readonly string[] }[];
 }
 
 /**
@@ -44,7 +46,18 @@ export function buildErrorText(runtime: DcpRuntime, reason: string, extra: Compr
     return lines.join("\n");
   }
   if (reason === "content_protected") {
-    lines.push(extra.id ? `Drop ${extra.id} from the range, or split around it; it is marked BLOCKED inline.` : "Choose a range excluding protected units; protected units are marked BLOCKED inline.");
+    if (extra.blocked?.length) {
+      lines.push("Blocked units in your request:");
+      for (const unit of extra.blocked) lines.push(`- ${unit.id} (range ${unit.rangeIndex}) ${blockReasonText(unit.cause)}.`);
+    }
+    if (extra.splits?.length) {
+      // Give the exact replacement ranges: the retry then only needs one
+      // summary per segment, with no label arithmetic by the model.
+      lines.push("Retry now with the blocked units left out. Replace each rejected range with these ranges (one summary each; nothing else in the request changes):");
+      for (const split of extra.splits) lines.push(`- range ${split.rangeIndex} (${split.requested}) -> ${split.segments.length ? split.segments.join(", ") : "no compressible units; remove this range"}`);
+    } else {
+      lines.push(extra.id ? `Drop ${extra.id} from the range, or split around it, and retry now.` : "Choose ranges that exclude blocked units and retry now.");
+    }
     appendInventory(lines, baseline, runtime);
     return lines.join("\n");
   }
@@ -69,9 +82,10 @@ function diagnosisFor(reason: string, extra: CompressionErrorExtra, runtime: Dcp
     case "range_overlap": return `Range ${extra.rangeIndex ?? "unknown"} overlaps an earlier range.`;
     case "block_partial": return `Range ${extra.rangeIndex ?? "unknown"} intersects block ${extra.id || "unknown"} partially.`;
     case "content_protected": {
+      if (extra.blocked && extra.blocked.length > 1) return `${extra.blocked.length} units in the requested range(s) cannot be compressed. Nothing was compressed.`;
       const unit = extra.id || `at range ${extra.rangeIndex ?? "unknown"}`;
       const why = extra.cause ? blockReasonText(extra.cause) : "is protected";
-      return `Unit ${unit} ${why}.`;
+      return `Unit ${unit} ${why}. Nothing was compressed.`;
     }
     case "placeholder_invalid": return "The summary has an invalid nested block placeholder.";
     case "summary_invalid": return "The summary is invalid.";
