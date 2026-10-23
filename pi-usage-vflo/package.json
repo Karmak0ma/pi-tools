@@ -21,12 +21,12 @@
     "@narumitw/pi-tui-kit": "^0.49.1"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.84.1 <0.85.0",
-    "@earendil-works/pi-tui": ">=0.84.1 <0.85.0"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.1",
-    "@earendil-works/pi-tui": "0.84.1",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
     "@types/node": "^22.0.0",
     "typescript": "^5.9.0",
     "vitest": "^3.0.0"
