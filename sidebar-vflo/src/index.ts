@@ -8,7 +8,7 @@ import { closeOverlayCustomUi } from "./overlay-close.js";
 import { loadDiff } from "./diff.js";
 import { createDiffRefreshController } from "./diff-refresh.js";
 import { limitsFromEntry } from "./limits.js";
-import { renderSidebar, sidebarHeightForTerminal, type SidebarTheme } from "./render.js";
+import { formatResetCountdown, renderSidebar, sidebarHeightForTerminal, type SidebarTheme } from "./render.js";
 import {
 	applySubagentDetails,
 	finishSubagents,
@@ -55,6 +55,9 @@ interface Runtime {
 	subagents: SubagentItem[];
 	subagentBatches: Map<string, SubagentItem[]>;
 	limits: LimitsState;
+	// The displayed buckets belong to this provider, not necessarily the
+	// current model while an asynchronous cache read is still pending.
+	limitsProvider?: string;
 	subscriptionPollTimer?: NodeJS.Timeout;
 	// Latest git diff summary; undefined hides the Diff panel (see types.ts).
 	diff: DiffSummary | undefined;
@@ -133,18 +136,28 @@ function syncDiffRefresh(runtime: Runtime): void {
 // This performs no network I/O on purpose: see src/limits.ts for why the
 // sidebar must not query the provider itself.
 async function refreshSubscription(runtime: Runtime): Promise<boolean> {
+	if (runtime.disposed) return false;
 	const model = runtime.ctx.model;
 	const adapter = adapterForProvider(model?.provider);
 	const isSubscriptionModel = !!model && !!adapter && adapter.semantics.kind === "consumer-subscription";
 	if (!isSubscriptionModel) {
+		runtime.limitsProvider = model?.provider;
 		runtime.limits = { buckets: [] };
 		requestRender(runtime);
 		return false;
 	}
+	if (runtime.limitsProvider !== model.provider) {
+		// Clear the previous provider synchronously: a render can happen before
+		// the file read resolves, and showing its quota under the new model is
+		// misleading. Same-provider refreshes retain their last known numbers.
+		runtime.limitsProvider = model.provider;
+		runtime.limits = limitsFromEntry(undefined, true, Date.now());
+		requestRender(runtime);
+	}
 	const entry = await readSharedProviderEntry(model.provider);
 	// The model may have been switched while we were reading the file; in that
 	// case the newer refresh owns the state and this result is discarded.
-	if (runtime.ctx.model !== model) return true;
+	if (runtime.disposed || runtime.ctx.model !== model) return true;
 	runtime.limits = limitsFromEntry(entry, true, Date.now());
 	requestRender(runtime);
 	return true;
@@ -318,7 +331,12 @@ function startOverlay(runtime: Runtime): void {
 						// cheaper than rendering, and it compares by value: no missed update
 						// when a nested field (todo status, limit bucket, token counts) moves.
 						// Theme changes do not appear here; Pi calls invalidate() for those.
-						const key = JSON.stringify([width, rows, runtime.expanded, runtime.config, state]);
+						// Timestamps in the snapshot stay fixed while time passes. Include
+						// the displayed countdowns so a cached frame cannot freeze them.
+						// Using text rather than the clock preserves per-keystroke caching.
+						const now = Date.now();
+						const countdowns = state.limits.buckets.map((bucket) => formatResetCountdown(bucket.resetsAt, now));
+						const key = JSON.stringify([width, rows, runtime.expanded, runtime.config, state, countdowns]);
 						if (frame?.key !== key) {
 							const { lines, panelRanges } = renderSidebar(state, runtime.config, sidebarTheme, width, rows, runtime.expanded);
 							frame = { key, lines, panelRanges };

@@ -133,6 +133,23 @@ function modelRows(snapshot: SidebarSnapshot, theme: SidebarTheme, width: number
 	];
 }
 
+/**
+ * Read the current clock at render time, not when the cached report arrived:
+ * the countdown must keep moving even when a provider refresh fails.
+ * Round up to whole hours so a future reset never appears to have passed.
+ * Missing or invalid timestamps are omitted rather than guessed.
+ */
+export function formatResetCountdown(resetsAt: number | undefined, now: number): string | undefined {
+	if (resetsAt === undefined || !Number.isFinite(resetsAt)) return undefined;
+	const secondsLeft = resetsAt - now / 1000;
+	if (secondsLeft <= 0) return "reset pending";
+	const hours = Math.ceil(secondsLeft / 3600);
+	const days = Math.floor(hours / 24);
+	const remainder = hours % 24;
+	const duration = days === 0 ? `${hours}h` : `${days}d${remainder > 0 ? ` ${remainder}h` : ""}`;
+	return `${duration} until reset`;
+}
+
 // Subscription rate-limit meters (e.g. Anthropic's 5-hour and weekly windows).
 // Each bucket gets its own label/percentage pair plus a bar that EMPTIES as
 // the remaining allowance shrinks — the opposite direction of the context
@@ -146,13 +163,20 @@ function limitsRows(limits: LimitsState, theme: SidebarTheme, width: number): st
 	const noteRows = note === undefined ? [] : [paint(theme, "dim", fit(note, width))];
 	if (buckets.length === 0) return noteRows.length > 0 ? noteRows : [paint(theme, "dim", "No subscription data")];
 	const meterWidth = Math.max(4, Math.min(18, width - 4));
+	const now = Date.now();
 	return buckets.flatMap((bucket) => {
 		const remaining = Math.max(0, Math.min(100, bucket.remaining));
 		const role: Role = remaining < 20 ? "error" : remaining < 40 ? "warning" : "accent";
 		const filled = Math.round((remaining / 100) * meterWidth);
+		const label = safe(bucket.label);
+		const percent = `${remaining.toFixed(1)}%`;
+		const countdown = formatResetCountdown(bucket.resetsAt, now);
+		// Keep a consistent layout across windows and sidebar widths: each
+		// countdown belongs below its own bar, never beside the label.
 		return [
-			pair(paint(theme, "muted", safe(bucket.label)), paint(theme, role, `${remaining.toFixed(1)}%`), width),
+			pair(paint(theme, "muted", label), paint(theme, role, percent), width),
 			paint(theme, "dim", "[") + paint(theme, role, "■".repeat(filled)) + paint(theme, "dim", "·".repeat(meterWidth - filled) + "]"),
+			...(countdown !== undefined ? [paint(theme, "dim", fit(`(${countdown})`, width))] : []),
 		];
 	}).concat(noteRows);
 }

@@ -53,6 +53,8 @@ export interface SubscriptionBucket {
 	label: string;
 	remaining: number;
 	windowMinutes?: number;
+	// Provider reset timestamp in Unix seconds, not the cache's milliseconds.
+	resetsAt?: number;
 }
 
 // What the Limits panel should display right now.

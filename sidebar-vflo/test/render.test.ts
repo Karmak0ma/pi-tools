@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { renderSidebar, sidebarHeightForTerminal } from "../src/render.js";
+import { formatResetCountdown, renderSidebar, sidebarHeightForTerminal } from "../src/render.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
 const theme = {
@@ -11,6 +11,80 @@ const theme = {
 const monokaiTheme = { ...theme, preset: "monokai" as const };
 
 describe("Sidebar VFLO renderer", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	it.each([
+		[undefined, undefined],
+		[Number.NaN, undefined],
+		[Number.POSITIVE_INFINITY, undefined],
+		[-1, "reset pending"],
+		[0, "reset pending"],
+		[1, "1h until reset"],
+		[3600, "1h until reset"],
+		[3601, "2h until reset"],
+		[24 * 3600, "1d until reset"],
+		[50 * 3600, "2d 2h until reset"],
+	])("formats reset offset %s seconds as %s", (offset, expected) => {
+		const now = 1_800_000_000_000;
+		const resetsAt = offset === undefined ? undefined : now / 1000 + offset;
+		expect(formatResetCountdown(resetsAt, now)).toBe(expected);
+	});
+
+	it("keeps reset times below each bar at every sidebar width", () => {
+		const now = 1_800_000_000_000;
+		const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+		const snapshot = {
+			model: undefined,
+			thinkingLevel: undefined,
+			context: undefined,
+			limits: {
+				buckets: [
+					{ id: "5h", label: "5-hour window", remaining: 80, resetsAt: now / 1000 + 3 * 3600 },
+					{ id: "weekly", label: "Weekly window", remaining: 55, resetsAt: now / 1000 + 50 * 3600 },
+				],
+			},
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			todos: [],
+			subagents: [],
+			diff: undefined,
+		};
+		for (const width of [28, 44, 72]) {
+			const lines = renderSidebar(snapshot, DEFAULT_CONFIG, theme, width, 80).lines;
+			const firstLabel = lines.findIndex((line) => line.includes("5-hour window"));
+			const secondLabel = lines.findIndex((line) => line.includes("Weekly window"));
+			expect(lines[firstLabel]).toContain("80.0%");
+			expect(lines[firstLabel + 1]).toContain("[");
+			expect(lines[firstLabel]).not.toContain("until reset");
+			expect(lines[secondLabel]).not.toContain("until reset");
+			expect(lines[secondLabel]).toContain("55.0%");
+			expect(lines[firstLabel + 2]).toContain("(3h until reset)");
+			expect(lines[secondLabel + 1]).toContain("[");
+			expect(lines[secondLabel + 2]).toContain("(2d 2h until reset)");
+			expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+		}
+
+		// An unchanged report still counts down, without another provider call.
+		clock.mockReturnValue(now + 3600_000);
+		expect(renderSidebar(snapshot, DEFAULT_CONFIG, theme, 72, 80).lines.join("\n")).toContain("(2h until reset)");
+	});
+
+	it("omits missing reset times and marks elapsed ones without negative durations", () => {
+		vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+		const { lines } = renderSidebar({
+			model: undefined, thinkingLevel: undefined, context: undefined, diff: undefined,
+			limits: { buckets: [
+				{ id: "unknown", label: "Unknown reset", remaining: 50 },
+				{ id: "elapsed", label: "Elapsed reset", remaining: 0, resetsAt: 1_799_999_999 },
+			] },
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			todos: [], subagents: [],
+		}, DEFAULT_CONFIG, theme, 72, 80);
+		expect(lines.find((line) => line.includes("Unknown reset"))).not.toContain("(");
+		const elapsedLabel = lines.findIndex((line) => line.includes("Elapsed reset"));
+		expect(lines[elapsedLabel]).not.toContain("(reset pending)");
+		expect(lines[elapsedLabel + 2]).toContain("(reset pending)");
+	});
+
 	it("reserves the normal prompt and footer rows at the bottom", () => {
 		expect(sidebarHeightForTerminal(40)).toBe(35);
 		expect(sidebarHeightForTerminal(5)).toBe(0);

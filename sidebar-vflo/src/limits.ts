@@ -31,6 +31,7 @@ export function bucketsFromReport(report: SharedProviderEntry["report"]): Subscr
 			label: bucket.label,
 			remaining: Math.max(0, Math.min(100, bucket.remaining as number)),
 			...(bucket.windowMinutes !== undefined ? { windowMinutes: bucket.windowMinutes } : {}),
+			...(bucket.resetsAt !== undefined ? { resetsAt: bucket.resetsAt } : {}),
 		}));
 }
 

@@ -44,6 +44,15 @@ describe("limitsFromEntry", () => {
 		expect(state.buckets[0]?.remaining).toBe(80);
 	});
 
+	it("preserves provider reset times in Unix seconds, including stale reports", () => {
+		const cached = entry(NOW - 12 * MINUTE);
+		const resetsAt = NOW / 1000 + 3600;
+		cached.report!.buckets[0]!.resetsAt = resetsAt;
+		const state = limitsFromEntry(cached, true, NOW);
+		expect(state.buckets[0]?.resetsAt).toBe(resetsAt);
+		expect(state.note).toBe("12m ago");
+	});
+
 	it("keeps GitHub Copilot premium-request quota for the sidebar", () => {
 		const copilotEntry: SharedProviderEntry = {
 			capturedAt: NOW,
