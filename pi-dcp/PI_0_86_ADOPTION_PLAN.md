@@ -1,5 +1,7 @@
 # Pi 0.86 capability investigation and pi-dcp adoption plan
 
+> **Dependency policy update:** Pi version pins described below are historical and superseded by the [repository dependency policy](../README.md#pi-dependency-policy). All Pi package ranges now use `"*"`; exact lockfile versions describe development installs, not a required host version. Required API capability checks still apply.
+
 **Status:** historical Pi 0.86 roadmap; structured-prompt Phase 1 and Pi 0.87 compatibility repair implemented, later capability phases remain open
 **Host version investigated:** `@earendil-works/pi-coding-agent` 0.86.1
 **Current lockfile host:** `@earendil-works/pi-coding-agent` 0.87.1
@@ -454,6 +456,8 @@ An extension may:
 `session_compact_failed` reports failure or abort outcome, reason, retry intent, and whether extension-provided compaction content was in use.
 
 ### 8.2 Current product contract
+
+> Historical contract below is superseded by [IMPLEMENTATION_PLAN.md §1.3](IMPLEMENTATION_PLAN.md#13-pi-compaction-prerequisite) and [DESIGN.md §16](DESIGN.md#16-pi-native-compaction-interaction): keep native auto-compaction enabled; DCP cancels only threshold attempts for healthy, enabled models and always allows manual/overflow recovery. The historical Phase 4 proposal is not the implemented routing policy.
 
 `IMPLEMENTATION_PLAN.md` currently requires the user to disable automatic threshold compaction and states that DCP:
 

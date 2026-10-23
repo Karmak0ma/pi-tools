@@ -1,5 +1,7 @@
 # Pi 0.87.0 adoption analysis for pi-dcp
 
+> **Dependency policy update:** Pi version pins described below are historical and superseded by the [repository dependency policy](../README.md#pi-dependency-policy). All Pi package ranges now use `"*"`; exact lockfile versions describe development installs, not a required host version. Required API capability checks still apply.
+
 **Date:** 2026-09-21
 **Pi host inspected:** `@earendil-works/pi-coding-agent` 0.87.0
 **pi-dcp development dependency:** 0.87.1

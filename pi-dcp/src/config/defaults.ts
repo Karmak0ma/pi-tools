@@ -1,5 +1,6 @@
 export const defaults = {
   enabled: true,
+  disabledModels: [] as string[],
   debug: false,
   pruneNotification: "detailed",
   pruneNotificationType: "chat",
@@ -42,6 +43,7 @@ export const defaults = {
 
 export type EffectiveConfig = {
   enabled: boolean;
+  disabledModels: string[];
   debug: boolean;
   pruneNotification: "off" | "minimal" | "summary" | "detailed";
   pruneNotificationType: "chat" | "toast" | "both";

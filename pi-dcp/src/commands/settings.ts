@@ -1,5 +1,6 @@
 import type { ExtensionCommandContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { clearBaselines, resetSemanticNudges, setDcpToolActive, type DcpRuntime } from "../runtime.ts";
+import { isEnabledForModel } from "../config/models.ts";
 import { defaults, type EffectiveConfig } from "../config/defaults.ts";
 import { settingsPath, writeSettings } from "../config/settings.ts";
 
@@ -15,7 +16,7 @@ export async function settingsCommand(ctx: ExtensionCommandContext, pi: Extensio
     if (choice === SAVE) {
       try { await writeSettings(draft, settingsPath()); }
       catch (error) { ctx.ui.notify(`Could not save ${settingsPath()}: ${error instanceof Error ? error.message : String(error)}`, "error"); continue; }
-      await runtime.mutex.runExclusive(() => applyConfig(runtime, pi, draft));
+      await runtime.mutex.runExclusive(() => applyConfig(runtime, pi, draft, ctx));
       ctx.ui.notify(`pi-dcp settings saved to ${settingsPath()}.`, "info");
       return;
     }
@@ -36,7 +37,7 @@ export async function settingsCommand(ctx: ExtensionCommandContext, pi: Extensio
     if (choice.startsWith("Notification channel: ")) { const value = await ctx.ui.select("Notification channel", ["chat — transcript message", "toast — popup notification", "both — transcript and popup", "Back"]); if (value?.startsWith("chat")) draft.pruneNotificationType = "chat"; else if (value?.startsWith("toast")) draft.pruneNotificationType = "toast"; else if (value?.startsWith("both")) draft.pruneNotificationType = "both"; continue; }
     if (choice.startsWith("Protected tools: ")) { const value = await listInput(ctx, "Protected tool names", draft.compress.protectedTools); if (value !== undefined) draft.compress.protectedTools = value; continue; }
     if (choice.startsWith("Protected paths: ")) { const value = await listInput(ctx, "Protected file glob patterns", draft.protectedFilePatterns); if (value !== undefined) draft.protectedFilePatterns = value; continue; }
-    if (choice === "Reset visible settings to defaults") { const confirmed = await ctx.ui.confirm("Reset pi-dcp settings?", "This resets the settings shown in this menu. Save and close to persist the reset."); if (confirmed) draft = visibleDefaults(); }
+    if (choice === "Reset visible settings to defaults") { const confirmed = await ctx.ui.confirm("Reset pi-dcp settings?", "This resets the settings shown in this menu. Save and close to persist the reset."); if (confirmed) draft = { ...visibleDefaults(), disabledModels: draft.disabledModels }; }
   }
 }
 
@@ -68,4 +69,4 @@ async function chooseTurns(ctx: ExtensionCommandContext, current: number): Promi
 async function numberInput(ctx: ExtensionCommandContext, title: string, current: string, minimum: number, maximum: number): Promise<number | undefined> { while (true) { const raw = await ctx.ui.input(title, current); if (raw === undefined) return undefined; const value = Number(raw.trim().replace(/%$/, "")); if (Number.isInteger(value) && value >= minimum && value <= maximum) return value; ctx.ui.notify(`Enter a whole number from ${minimum} to ${maximum}.`, "error"); } }
 async function listInput(ctx: ExtensionCommandContext, title: string, current: string[]): Promise<string[] | undefined> { const raw = await ctx.ui.input(`${title} (comma-separated; blank clears)`, current.join(", ")); if (raw === undefined) return undefined; return [...new Set(raw.split(",").map((item) => item.trim()).filter(Boolean))]; }
 function visibleDefaults(): EffectiveConfig { const config = structuredClone(defaults) as unknown as EffectiveConfig; return config; }
-function applyConfig(runtime: DcpRuntime, pi: ExtensionAPI, config: EffectiveConfig): void { runtime.config = config; runtime.configPaths = [...new Set([...runtime.configPaths, settingsPath()])]; runtime.generation++; clearBaselines(runtime); runtime.lastNudgeTurn = undefined; resetSemanticNudges(runtime); const blocked = runtime.warnedReasonCodes.has("capability_missing") || runtime.warnedReasonCodes.has("tool_collision") || runtime.warnedReasonCodes.has("startup_error"); runtime.valid = !blocked && !runtime.reduced.corruptReason && config.enabled; runtime.lastReadiness = runtime.valid ? { ready: false, reason: "state_invalidated", generation: runtime.generation } : { ready: false, reason: "extension_disabled", generation: runtime.generation }; try { setDcpToolActive(pi, runtime.valid && config.compress.permission !== "deny"); } catch { /* best effort */ } }
+function applyConfig(runtime: DcpRuntime, pi: ExtensionAPI, config: EffectiveConfig, ctx: ExtensionCommandContext): void { runtime.config = config; runtime.configPaths = [...new Set([...runtime.configPaths, settingsPath()])]; runtime.generation++; clearBaselines(runtime); runtime.lastNudgeTurn = undefined; resetSemanticNudges(runtime); const blocked = runtime.warnedReasonCodes.has("capability_missing") || runtime.warnedReasonCodes.has("tool_collision") || runtime.warnedReasonCodes.has("startup_error"); runtime.valid = !blocked && !runtime.reduced.corruptReason && config.enabled; runtime.lastReadiness = runtime.valid ? { ready: false, reason: "state_invalidated", generation: runtime.generation } : { ready: false, reason: "extension_disabled", generation: runtime.generation }; try { setDcpToolActive(pi, runtime.valid && isEnabledForModel(config, ctx.model) && config.compress.permission !== "deny"); } catch { /* best effort */ } }

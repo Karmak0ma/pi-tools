@@ -25,6 +25,12 @@ export function mergeConfig(base: EffectiveConfig, patch: Record<string, unknown
   const result: EffectiveConfig = JSON.parse(JSON.stringify(base)) as EffectiveConfig;
   for (const [key, raw] of Object.entries(patch)) {
     if (!known.has(key)) continue;
+    if (key === "disabledModels") {
+      const models = stringArray(raw, key);
+      if (models.some((model) => !/^[^/\s]+\/\S+$/.test(model))) throw new Error("disabledModels entries must use provider/model-id");
+      result.disabledModels = [...new Set(models)];
+      continue;
+    }
     if (key === "protectedFilePatterns") { result.protectedFilePatterns = stringArray(raw, key); continue; }
     if (key === "enabled" || key === "debug") { result[key] = booleanValue(raw, key) as never; continue; }
     if (key === "nudge") { mergeNudge(result.nudge, raw, warnings); continue; }

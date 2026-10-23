@@ -13,6 +13,7 @@ import { hashJson } from "../util/hash.ts";
 import { clearBaselines, findBaselineForParent, latestBaseline, noteSuccessfulCompression, pinBaseline, unpinBaseline, type DcpRuntime } from "../runtime.ts";
 import { persistSavingsBestEffort } from "../stats.ts";
 import { buildErrorText } from "./errors.ts";
+import { isEnabledForModel } from "../config/models.ts";
 import { selectionRules } from "../prompts/defaults.ts";
 
 export interface CompressionToolResultDetails extends Record<string, unknown> {
@@ -93,7 +94,7 @@ Validation
  */
 export async function bindCompressionProvenance(toolCallId: string, ctx: ExtensionContext, runtime: DcpRuntime): Promise<void> {
   await runtime.mutex.runExclusive(() => {
-    if (!runtime.valid || runtime.mutationBlocked) return;
+    if (!runtime.valid || runtime.mutationBlocked || !isEnabledForModel(runtime.config, ctx.model)) return;
     const currentModel = modelKey(ctx.model, ctx.getContextUsage()?.contextWindow || 0);
     const current = { model: currentModel, generation: runtime.generation, configHash: hashJson(runtime.config) };
     const persisted = findAssistantToolEntry(ctx, toolCallId);
@@ -112,6 +113,7 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
     // cannot revive a deprecated singleton snapshot by echoing snapshotId.
     if (!isCompressionParams(rawParams)) return failure("protocol_version", { stage: "v1_schema_rejected" }, runtime);
     const params = normalizeCompressionParams(rawParams);
+    if (!isEnabledForModel(runtime.config, ctx.model)) return failure("compression_unavailable", { stage: "extension_disabled" }, runtime);
     if (!runtime.valid || runtime.mutationBlocked) return failure("compression_unavailable", { stage: runtime.lastReadiness?.reason || (runtime.valid ? "state_invalidated" : "extension_disabled") }, runtime);
     if (runtime.config.compress.permission === "deny") return failure("permission_denied", {}, runtime);
 
@@ -143,6 +145,9 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
 
     return await runtime.mutex.runExclusive(async () => {
       try {
+        // Recheck after a possible confirmation dialog: model/config can change
+        // while the UI waits, and an inactive tool must not persist an operation.
+        if (!isEnabledForModel(runtime.config, ctx.model)) return failure("compression_unavailable", { stage: "extension_disabled" }, runtime);
         const baseline = producingBaseline(toolCallId, ctx, runtime);
     const currentModel = modelKey(ctx.model, ctx.getContextUsage()?.contextWindow || 0);
     if (!baseline) {

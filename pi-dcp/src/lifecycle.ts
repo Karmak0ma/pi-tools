@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, ContextEvent, BeforeAgentStartEvent, CacheWarmingDecisionEvent, SessionStartEvent, SessionBeforeCompactEvent, AgentSettledEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { checkContextCapabilities } from "./capabilities.ts";
+import { isEnabledForModel } from "./config/models.ts";
 import { loadConfig } from "./config/load.ts";
 import { reconstructFromBranch } from "./state/reconstruct.ts";
 import { projectSessionManager } from "./identity/project.ts";
@@ -33,9 +34,27 @@ export function registerLifecycle(pi: ExtensionAPI, runtime: DcpRuntime): void {
   pi.on("session_before_switch", () => { runtime.mutationBlocked = true; invalidateSnapshot(runtime); });
   pi.on("session_tree", async (_event, ctx) => { await rebase(ctx, runtime, pi); });
   pi.on("session_compact", async (_event, ctx) => { await rebase(ctx, runtime, pi); });
-  pi.on("session_before_compact", (_event: SessionBeforeCompactEvent) => { invalidateSnapshot(runtime); return undefined; });
+  pi.on("session_before_compact", (event: SessionBeforeCompactEvent, ctx) => {
+    // Pi counts persisted history, not DCP's smaller outgoing request. Let DCP
+    // own routine context pressure only while it can safely serve this model.
+    // Check live policy here, not at model_select: config or health may change
+    // between a model switch and the host's compaction decision.
+    const cancelThreshold = event.reason === "threshold"
+      && runtime.valid && !runtime.mutationBlocked
+      && !!ctx.model && isEnabledForModel(runtime.config, ctx.model);
+    // Even a cancelled attempt invalidates request aliases and pending nudges.
+    // Manual intent and overflow recovery must always reach native compaction;
+    // unknown reasons/models also fall through rather than block host recovery.
+    invalidateSnapshot(runtime);
+    return cancelThreshold ? { cancel: true } : undefined;
+  });
   pi.on("session_shutdown", () => { runtime.valid = false; clearBaselines(runtime); runtime.pendingManual = undefined; runtime.mutationBlocked = true; });
-  pi.on("model_select", () => { invalidateSnapshot(runtime); });
+  pi.on("model_select", (event) => {
+    invalidateSnapshot(runtime);
+    // Invalidate old aliases even when switching back to an enabled model.
+    // The next context request must publish its own fresh authorization.
+    setConfiguredCompressionTool(runtime, runtime.valid && isEnabledForModel(runtime.config, event.model));
+  });
   // Ordinary turns append a new baseline leaf; they do not invalidate the
   // retained baseline for a tool call already in flight.
   pi.on("turn_start", (_event, ctx) => {
@@ -49,14 +68,15 @@ export function registerLifecycle(pi: ExtensionAPI, runtime: DcpRuntime): void {
   pi.on("context", async (event: ContextEvent, ctx) => transformContext(event, ctx, runtime));
   // The nudge suffix would otherwise carry the provider's rolling prompt-cache
   // breakpoint, which no later request can ever read back.
-  pi.on("before_provider_request", (event) => relocateCacheBreakpoint(event.payload));
-  pi.on("cache_warming_decision", (event) => decideCacheWarming(event, runtime));
+  pi.on("before_provider_request", (event, ctx) => isEnabledForModel(runtime.config, ctx.model) ? relocateCacheBreakpoint(event.payload) : undefined);
+  pi.on("cache_warming_decision", (event, ctx) => decideCacheWarming(event, runtime, ctx));
   // Strip label tags the model wrote into its own reply, before that reply is
   // persisted and becomes context. An echoed tag is indistinguishable from a
   // real label on the next request and is usually wrong (see transform/echo.ts),
   // so leaving it in place can steer a later compress range onto the wrong
   // units. Returning undefined leaves the finalized message untouched.
-  pi.on("message_end", (event) => {
+  pi.on("message_end", (event, ctx) => {
+    if (!isEnabledForModel(runtime.config, ctx.model)) return undefined;
     const cleaned = stripEchoedLabels(event.message);
     return cleaned ? { message: cleaned } : undefined;
   });
@@ -123,7 +143,7 @@ async function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext, r
   // only auto-activates a genuinely new tool name on its registry rebuild, so
   // a name that was ever deactivated (e.g. a prior `deny`/invalid session)
   // stays inactive across `/reload` unless explicitly re-added here.
-  setConfiguredCompressionTool(runtime, runtime.valid);
+  setConfiguredCompressionTool(runtime, runtime.valid && isEnabledForModel(runtime.config, ctx.model));
   if (loaded.error) runtime.logger.diagnostic({ reason: "config_layer_invalid" });
   void event;
 }
@@ -156,7 +176,13 @@ async function rebase(ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionA
   });
 }
 
-function beforeAgentStart(event: BeforeAgentStartEvent, _ctx: ExtensionContext, runtime: DcpRuntime): undefined {
+function beforeAgentStart(event: BeforeAgentStartEvent, ctx: ExtensionContext, runtime: DcpRuntime): undefined {
+  if (!isEnabledForModel(runtime.config, ctx.model)) {
+    if (event.systemPromptOptions?.sections) delete event.systemPromptOptions.sections[DCP_SYSTEM_SECTION];
+    runtime.pendingNudge = undefined;
+    setConfiguredCompressionTool(runtime, false);
+    return undefined;
+  }
   // Pi 0.87 owns the rendered system prompt and persists named sections as
   // system-message patches. Mutate the normalized options in place so Pi can
   // diff this section against the replayed transcript. Returning a complete
@@ -253,17 +279,26 @@ function setConfiguredCompressionTool(runtime: DcpRuntime, active: boolean): voi
  */
 async function transformContext(event: ContextEvent, ctx: ExtensionContext, runtime: DcpRuntime): Promise<{ messages: AgentMessage[] }> {
   const fallback = [...event.messages];
+  if (!isEnabledForModel(runtime.config, ctx.model)) {
+    // No aliases, summaries, pruning, or pending nudge may leak into this model.
+    clearBaselines(runtime);
+    runtime.pendingNudge = undefined;
+    runtime.lastReadiness = { ready: false, reason: "extension_disabled", generation: runtime.generation };
+    recordContextOutcome(runtime, "extension_disabled");
+    recordOutgoingContextState(runtime, ctx);
+    return { messages: fallback };
+  }
   if (!runtime.valid) {
     const nudge = buildNudgeMessage(runtime);
     recordContextOutcome(runtime, runtime.lastReadiness?.reason || "extension_disabled");
-    recordOutgoingContextState(runtime);
+    recordOutgoingContextState(runtime, ctx);
     return { messages: nudge ? [...fallback, nudge] : fallback };
   }
   if (runtime.mutationBlocked) {
     runtime.lastReadiness = { ready: false, reason: "state_invalidated", generation: runtime.generation };
     const nudge = buildNudgeMessage(runtime);
     recordContextOutcome(runtime, "state_invalidated");
-    recordOutgoingContextState(runtime);
+    recordOutgoingContextState(runtime, ctx);
     return { messages: nudge ? [...fallback, nudge] : fallback };
   }
   return runtime.mutex.runExclusive(() => {
@@ -317,7 +352,7 @@ async function transformContext(event: ContextEvent, ctx: ExtensionContext, runt
     };
     const nudge = buildNudgeMessage(runtime);
     recordContextOutcome(runtime, result.reason, result.join);
-    recordOutgoingContextState(runtime);
+    recordOutgoingContextState(runtime, ctx);
     return { messages: nudge ? [...result.messages, nudge] : result.messages };
   });
 }
@@ -346,22 +381,22 @@ function fallbackHint(join: { missingExpected: number } | undefined): string {
   return "Restarting the session usually clears this. See /dcp debug.";
 }
 
-function recordOutgoingContextState(runtime: DcpRuntime): void {
+function recordOutgoingContextState(runtime: DcpRuntime, ctx: ExtensionContext): void {
   // Cache warming replays the last request without running DCP's context hook.
   // Capture the exact DCP state associated with that request so an operation
   // appended later cannot make Pi mistake the old transformed prefix as current.
   runtime.lastOutgoingContext = {
     generation: runtime.generation,
-    dcpEnabled: runtime.valid && runtime.config.enabled && !runtime.mutationBlocked,
+    dcpEnabled: runtime.valid && isEnabledForModel(runtime.config, ctx.model) && !runtime.mutationBlocked,
   };
 }
 
-function decideCacheWarming(event: CacheWarmingDecisionEvent, runtime: DcpRuntime): { action: "stop" } | undefined {
+function decideCacheWarming(event: CacheWarmingDecisionEvent, runtime: DcpRuntime, ctx: ExtensionContext): { action: "stop" } | undefined {
   // Pi owns cache economics. Never override its stop decision, and do not stop
   // for transient nudges: they are request-tail additions, not stale DCP state.
   if (event.action !== "warm") return undefined;
   const previous = runtime.lastOutgoingContext;
-  const dcpEnabled = runtime.valid && runtime.config.enabled && !runtime.mutationBlocked;
+  const dcpEnabled = runtime.valid && isEnabledForModel(runtime.config, ctx.model) && !runtime.mutationBlocked;
   const reason: Extract<ReasonCode, `cache_warming_${string}`> | undefined = runtime.mutationBlocked
     ? "cache_warming_mutation_blocked"
     : previous && previous.generation !== runtime.generation
@@ -457,6 +492,7 @@ function lastAssistantContainsCompress(ctx: ExtensionContext | undefined): boole
 }
 
 async function onSettled(ctx: ExtensionContext, runtime: DcpRuntime, pi: ExtensionAPI): Promise<void> {
+  if (!isEnabledForModel(runtime.config, ctx.model)) return;
   flushFallbackNotice(runtime, pi);
   if (!runtime.valid) return;
   await runtime.mutex.runExclusive(async () => {

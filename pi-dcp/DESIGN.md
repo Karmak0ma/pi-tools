@@ -869,27 +869,20 @@ Pi emits `session_before_compact` and `session_compact` for exact reasons `manua
 ### 16.2 Cancellation policy
 
 ```ts
-onSessionBeforeCompact(event):
-  invalidateSnapshot()
-  if event.reason in {"manual", "overflow"}: return undefined // never cancel
-  if event.signal.aborted: return undefined
-  transformed = safelyBuildFreshTransformedEstimate({
-    branchEntries: event.branchEntries,
-    preparation: event.preparation, // messagesToSummarize + turnPrefixMessages + retained boundary
-    currentBuiltContext: sessionManager.buildContextEntries()
-  })
-  if transformed.failed || preparationNoLongerMatchesBranch: return undefined
-  safeLimit = contextWindow - event.preparation.settings.reserveTokens - configuredSafetyMargin
-  if transformed.fullWouldSendContextTokens < safeLimit
-     && transformed.includesRetainedTailAndTurnPrefix
-     && transformed.confidence === "high"
-     && noPendingProtocol
-     && snapshot/reducer are current:
-       return { cancel: true }
-  return undefined
+onSessionBeforeCompact(event, ctx):
+  cancelThreshold = event.reason == "threshold"
+    && runtime.valid && !runtime.mutationBlocked
+    && ctx.model != undefined
+    && isEnabledForModel(runtime.config, ctx.model)
+  invalidateSnapshot() // also discard pending nudges on cancelled attempts
+  return cancelThreshold ? { cancel: true } : undefined
 ```
 
-Threshold is the only cancellable reason, and cancellation is advisory. It requires a **fresh**, high-confidence estimate of the complete would-send request derived from the event's actual `preparation` and current branch—not prior context metrics or only `messagesToSummarize`. It must account for `turnPrefixMessages`, the retained tail after `firstKeptEntryId`, system/tool-schema overhead where measurable, and response reserve. An aborted signal, stale preparation, omitted retained segment, or uncertain estimate allows compaction. Default safety margin SHOULD be max(4,096 tokens, 5% of context window). Repeated cancellation MUST be rate-limited by branch/config/transformed hash; if the same persisted threshold re-fires without a meaningful context change, allow native compaction to prevent a loop.
+Threshold is the only cancellable reason. DCP owns routine context pressure while the runtime is healthy and enabled for the current model. Evaluate the live `enabled` / `disabledModels` policy at the hook, not a cached decision from model selection. Global disablement, an excluded or unknown model, an invalid runtime, or blocked mutations MUST allow native compaction. This replaces the earlier proposed fresh-estimate and cancellation-rate-limit policy; no token estimate or new configuration flag is required.
+
+The user MUST enable Pi `compaction.enabled:true` once in the effective Pi settings. DCP MUST NOT toggle or write that shared setting on model switches. Pi checks that setting before automatic threshold and overflow handling: leaving it false disables both paths. The public extension API supplies the cancellation hook, not a per-session auto-compaction toggle.
+
+On the inspected host, cancellation happens before the native summary request and does not schedule an immediate retry loop. Later threshold checks can repeat because DCP does not rewrite persisted token accounting; the interactive host can show “Auto-compaction cancelled” each time. This is an accepted UI trade-off, not a reason to permit routine native summarization while DCP owns the model. If the outgoing request still exceeds the provider limit, overflow recovery is the safety fallback.
 
 Manual compaction expresses user intent and is never cancelled. Overflow compaction is recovery and is never cancelled, especially when `willRetry` is true.
 
@@ -1110,7 +1103,7 @@ There is no reliable automatic proof that a model summary is faithful. User-visi
 | ask in JSON/print | immediate deny, no hang |
 | parallel tool calls | compress runs sequentially; sibling protocol remains valid |
 | native manual compact | never cancelled; blocks rebase/orphan |
-| threshold compact | cancel only with fresh safe estimate; anti-loop allows later host compaction |
+| threshold compact | cancel only for healthy, unblocked, known DCP-enabled model; disabled/unhealthy cases allow native compaction |
 | overflow `willRetry=true` | never cancelled; no old block resurrection on retry |
 | model switch | snapshot rejected and limits recomputed |
 | extension before DCP modifies text | unique join succeeds or safe no-op |
@@ -1184,7 +1177,7 @@ Implementation is acceptable only when all are true:
 7. Every outgoing transformed context passes protocol validation; DCP never creates half a settled tool exchange and preserves host-supported incomplete/current forms untouched.
 8. Range compression, nested consumption, decompression, and recompression are reversible while coverage remains available.
 9. Old blocks outside post-compaction `buildContextEntries()` are orphaned and never resurrected, including overflow retry.
-10. Manual and overflow native compaction are never cancelled; threshold cancellation meets fresh-estimate/safety/anti-loop policy.
+10. Manual and overflow native compaction are never cancelled; threshold cancellation uses live model/config/runtime health, fails open when the model is unknown, and never toggles shared Pi settings.
 11. `/dcp compress` produces a real model-visible user/follow-up turn and exactly one permitted model-authored tool call, not a forged call.
 12. `allow|ask|deny` behavior is correct in TUI/RPC/JSON/print; deny removes `compress` from active tools and execution rejects defensively (the registered definition may remain in `getAllTools()`).
 13. Untrusted project config is not read; malformed layers/state fail safely; Pi settings are never changed.

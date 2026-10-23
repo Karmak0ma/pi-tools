@@ -1,5 +1,7 @@
 # pi-dcp implementation plan
 
+> **Dependency policy update:** Pi version pins described below are historical and superseded by the [repository dependency policy](../README.md#pi-dependency-policy). All Pi package ranges now use `"*"`; exact lockfile versions describe development installs, not a required host version. Required API capability checks still apply.
+
 **Status:** current implementation contract
 **Inputs:** `DESIGN.md`, `DESIGN_review.md`, user decisions in the planning session
 **Target:** private, source-loaded `pi-dcp` extension for the current Pi `0.87.x` host family
@@ -51,24 +53,27 @@ These are exclusions from this release, not unresolved implementation decisions.
 
 ### 1.3 Pi compaction prerequisite
 
-The user is responsible for disabling Pi automatic threshold compaction:
+The user is responsible for enabling Pi automatic compaction in the effective global/project Pi settings. This supersedes the original disable-compaction prerequisite:
 
 ```json
 {
   "compaction": {
-    "enabled": false
+    "enabled": true
   }
 }
 ```
 
-The extension MUST NOT read, edit, or claim to enforce this setting. The README MUST place this prerequisite immediately after installation instructions and explain that:
+The extension MUST NOT edit or claim to enforce this setting. The README MUST place this prerequisite immediately after installation instructions and explain that:
 
 - pi-dcp is an outgoing-context lens and does not change Pi's persisted token accounting;
-- automatic Pi compaction can otherwise replace history independently of DCP;
-- manual `/compact`, overflow recovery, old sessions, and imported sessions may still contain native compactions;
-- pi-dcp therefore retains projection/rebase support but never cancels any native compaction.
+- `session_before_compact` cancels only `threshold` when the runtime is valid, mutations are not blocked, and the current model is known and enabled by the live DCP configuration;
+- disabled/excluded models and unhealthy runtimes use normal native threshold compaction;
+- manual `/compact`, overflow recovery, and unknown future reasons are never cancelled;
+- `compaction.enabled:false` prevents automatic overflow recovery as well as threshold compaction;
+- repeated threshold checks can show host cancellation notices, but do not trigger an immediate retry loop or native summary request;
+- pi-dcp retains projection/rebase support; switching back cannot restore history replaced by a native compaction.
 
-`session_before_compact` always invalidates the current DCP snapshot and returns `undefined`. It never returns `{cancel:true}` and never supplies a custom compaction result.
+`session_before_compact` always invalidates the current DCP snapshot, including on cancellation. It never supplies a custom compaction result. No transformed-token estimate or cancellation rate limit is used: DCP owns routine pressure while healthy and enabled, and Pi retains overflow recovery. Shared Pi settings MUST NOT be toggled on model switches.
 
 ### 1.4 Package and compatibility policy
 
@@ -685,7 +690,7 @@ Detailed notification shows action/topic/count/estimates/duration/confidence; su
 - **context:** run the exact fail-closed pipeline against Pi's provider-visible messages; on Pi 0.87, system/tool state is host-owned and the complete DCP projection is used only for canonical identity and barriers.
 - **agent_settled:** evaluate and atomically persist automatic pruning decisions; clear one-turn UI indicators.
 - **model_select:** invalidate snapshot, update model limits, increment generation.
-- **session_before_compact:** invalidate snapshot; return `undefined` for manual, threshold, and overflow.
+- **session_before_compact:** invalidate snapshot; cancel only threshold for a valid, unblocked runtime and known DCP-enabled model. Allow all other cases, including manual and overflow.
 - **session_compact:** replay/project, derive orphan availability, clear nudges, increment generation. Never append orphan operations or resurrect unavailable blocks.
 - **session_shutdown:** invalidate runtime, clear UI, and release resources. There are no sidecar writes.
 
@@ -861,8 +866,8 @@ The implementing agent is finished only when:
 9. compression/decompression/recompression, including nesting, are reversible while coverage is available;
 10. aliases never appear in canonical persisted state and every mutation validates a current snapshot;
 11. settled automatic pruning performs no more than one append and is idempotent;
-12. all native compaction reasons are never cancelled, and post-compaction unavailable blocks are derived inactive without writes;
-13. README prominently instructs the user to set Pi `compaction.enabled:false` and states pi-dcp does not change settings;
+12. only threshold compaction for a healthy, unblocked, known DCP-enabled model is cancelled; manual/overflow are always allowed, and post-compaction unavailable blocks are derived inactive without writes;
+13. README prominently instructs the user to set Pi `compaction.enabled:true`, explains conditional routing and overflow fallback, and states pi-dcp does not change settings;
 14. permissions behave correctly in TUI, RPC, JSON, and print modes;
 15. untrusted project config is not read and malformed inputs fail safely;
 16. OpenAI and all four named opencode-cli model fixtures pass;

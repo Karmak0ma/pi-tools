@@ -6,21 +6,38 @@
 
 Load this source package from Pi with `./src/index.ts` (or install it as a local Pi package).
 
-**Immediately after installation, disable Pi automatic compaction:**
+**Enable Pi automatic compaction once in Pi's settings (`~/.pi/agent/settings.json`, or through `/settings`):**
 
 ```json
 {
   "compaction": {
-    "enabled": false
+    "enabled": true
   }
 }
 ```
 
-pi-dcp is an outgoing-context lens and does not change Pi's persisted token accounting or settings. If automatic Pi compaction remains enabled, Pi can replace history independently of DCP. Manual `/compact`, overflow recovery, old sessions, and imported sessions may still contain native compactions; pi-dcp supports rebasing around them and never cancels native compaction.
+This replaces the older instruction to disable Pi automatic compaction. Keep `compaction.enabled: true` in the effective Pi settings; a project setting can override the global setting. pi-dcp does not write Pi settings or toggle them when you switch models.
+
+After changing Pi settings or updating the extension, run `/reload`. `/dcp reload` reloads DCP configuration only; it does not reload Pi settings.
+
+### Which compaction runs?
+
+| Current DCP state | Native threshold compaction | Manual `/compact` | Overflow recovery |
+| --- | --- | --- | --- |
+| Enabled and healthy for the selected model | Blocked by DCP | Allowed | Allowed |
+| Model excluded, globally disabled, or unhealthy | Allowed | Allowed | Allowed |
+
+This table requires Pi's effective `compaction.enabled: true`. DCP does not turn that setting on for you.
+
+pi-dcp is an outgoing-context lens and does not change Pi's persisted token accounting. It cancels native **threshold** compaction only while DCP is healthy, not blocked by a session transition, and enabled for the current model. When DCP is globally disabled, excluded by `disabledModels`, unhealthy, or unable to identify the model, Pi's normal threshold compaction is allowed. Manual `/compact` and **overflow recovery** are always allowed. No extra DCP setting is needed.
+
+Overflow recovery lets Pi summarize older history and retry a request that exceeds the model's context limit. Pi's `compaction.enabled: false` also disables this automatic recovery, so leaving the old setting in place prevents the fallback. DCP rebases after native compaction; switching back to an enabled model cannot restore a prefix that Pi has already replaced with a native summary.
+
+Pi may display “Auto-compaction cancelled” when DCP blocks a threshold attempt. Later threshold checks can show this notice again because DCP does not rewrite Pi's token accounting. Cancellation skips the native summary request; it does not trigger an immediate retry loop. If DCP cannot keep the outgoing request within the model's limit, overflow recovery remains the fallback.
 
 ## Compatibility
 
-The current lockfile and deterministic test suite certify Pi `0.87.1`. This is an internal extension: the supported host is exactly Pi `0.87.1`, and the peer dependencies require that exact version. When Pi updates, update the four pinned Pi packages and peer dependencies together, then rerun `npm ci` plus `npm run check`; no previous-version compatibility matrix is maintained. Hosts without Pi 0.87's required projection API fail closed at startup and are unsupported. On Pi 0.87.1, stable compression guidance is installed in the owned structured system section `pi_dcp_context_compression`; transient nudge text remains request-local context and is not persisted as prompt state. DCP validates Pi's provenance-preserving `buildSessionProjection()`, applies host `context_edit` results without making edits part of DCP's range model, and joins the system-free `context` event against a provider-visible view while retaining system messages as non-compressible canonical barriers. If a host event lacks structured prompt sections, pi-dcp records one metadata-only `capability_missing` diagnostic, disables its compression path, and can recover when a later normalized event provides the sections. The OpenCode DCP reference package has no published authoring TypeScript sources; generated `.d.ts` declarations are present. OpenAI conversion paths and the four vendored `opencode-cli` model fixtures (`opencode/deepseek-v4-flash-free`, `opencode/mimo-v2.5-free`, `opencode/nemotron-3-super-free`, and `opencode/big-pickle`) are deterministic compatibility gates. Optional live checks are never part of `npm run check`.
+Pi package dependencies use `"*"` so host updates are not blocked by an extension version range. The lockfile records the development versions used for repeatable tests, not a required host version. After updating Pi, update the four Pi development packages together with `npm update @earendil-works/pi-coding-agent @earendil-works/pi-agent-core @earendil-works/pi-ai @earendil-works/pi-tui`, then rerun `npm run check`. No previous-version compatibility matrix is maintained; compatibility depends on the required host APIs, not a version pin. Hosts without Pi 0.87's required projection API fail closed at startup and are unsupported. On Pi 0.87.1, stable compression guidance is installed in the owned structured system section `pi_dcp_context_compression`; transient nudge text remains request-local context and is not persisted as prompt state. DCP validates Pi's provenance-preserving `buildSessionProjection()`, applies host `context_edit` results without making edits part of DCP's range model, and joins the system-free `context` event against a provider-visible view while retaining system messages as non-compressible canonical barriers. If a host event lacks structured prompt sections, pi-dcp records one metadata-only `capability_missing` diagnostic, disables its compression path, and can recover when a later normalized event provides the sections. The OpenCode DCP reference package has no published authoring TypeScript sources; generated `.d.ts` declarations are present. OpenAI conversion paths and the four vendored `opencode-cli` model fixtures (`opencode/deepseek-v4-flash-free`, `opencode/mimo-v2.5-free`, `opencode/nemotron-3-super-free`, and `opencode/big-pickle`) are deterministic compatibility gates. Optional live checks are never part of `npm run check`.
 
 ## Commands
 
@@ -92,6 +109,25 @@ When a compress call is rejected with `content_protected`, the error lists every
 ## Configuration
 
 Configuration is read from trusted global and project `dcp.jsonc`/`dcp.json` layers, followed by the personal `~/.pi/agent/dcp_settings.json` file. The personal settings file is the menu's editable source and takes precedence for overlapping keys; untrusted project files are not opened. The complete supported schema is implemented in `src/config`; unknown and excluded settings are rejected or warned. Arrays extend protection baselines. See `IMPLEMENTATION_PLAN.md` for the frozen behavior contract.
+
+### Disable DCP for specific models
+
+Add `disabledModels` to `~/.pi/agent/dcp.jsonc` (or `dcp.json`):
+
+```json
+{
+  "disabledModels": [
+    "anthropic/claude-sonnet-4-5",
+    "openai-codex/gpt-5.4"
+  ]
+}
+```
+
+Use the exact, case-sensitive `provider/model-id` from Pi's model selector, not the display name. These are examples; use your installed model IDs. Model IDs may contain `/`. No wildcard or prefix matching is used, so the same model ID from another provider is not affected. The default is `[]`, which excludes no models. Global `enabled: false` still disables DCP for every model.
+
+The same key works in trusted project `.pi/dcp.jsonc` / `.pi/dcp.json` files and in the personal `dcp_settings.json` file. Higher-priority lists **replace** lower-priority lists; `[]` clears an inherited list. This option is file-only, not a menu control. Saving or resetting the menu does not change the file's model exclusion list. Run `/reload` (or `/dcp reload`) after editing a file. Once loaded, the policy applies immediately when you switch models; no reload is needed for a model switch.
+
+For an excluded model, DCP sends the incoming context unchanged: no saved summaries, pruning, labels, system guidance, or nudges are applied. The `compress` tool is removed from the active tool set, direct calls are rejected, and manual mutation commands are blocked. Settings, status, diagnostics, statistics, and reload remain available. Existing summaries and pruning operations remain saved and can apply again after switching to an enabled model. With Pi automatic compaction enabled as described above, excluded models use Pi's normal threshold compaction and overflow recovery. Restoring full active history can increase context size. A native compaction changes that active history for all later models; switching back does not undo it.
 
 ## Privacy and rollback
 
