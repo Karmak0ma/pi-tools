@@ -1,0 +1,17 @@
+# The Pi extension opens this entrypoint with an absolute app path and repo cwd.
+# No shell is involved: repository paths and feedback cannot become commands.
+id = "vflo.review"
+name = "Git review (vflo)"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Review repository changes and submit line comments to the originating Pi session."
+# Start with the platform verified here; Unix socket support alone is not a
+# substitute for testing Herdr's terminal integration on another platform.
+platforms = ["linux"]
+
+[[panes]]
+id = "review"
+# The pane label and the runtime-reported Agents entry use the same name.
+title = "review"
+placement = "split"
+command = ["node", "--input-type=module", "-e", "await import(process.env.VFLO_REVIEW_APP)"]

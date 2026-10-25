@@ -28,11 +28,38 @@ const GIT_OPTIONS = [
   'diff.mnemonicPrefix=false',
   '-c',
   'color.ui=false',
+  '-c',
+  'diff.submodule=short',
+  '-c',
+  'diff.suppressBlankEmpty=false',
+  '-c',
+  'diff.renames=true',
 ];
 
 function gitEnvironment(overrides = {}) {
-  const environment = {
-    ...process.env,
+  const environment = { ...process.env };
+
+  // Do not let inherited repository-selection variables redirect this snapshot
+  // away from the requested worktree or its disposable index/object store.
+  for (const variable of Object.keys(environment)) {
+    if (
+      variable === 'GIT_DIR' ||
+      variable === 'GIT_WORK_TREE' ||
+      variable === 'GIT_INDEX_FILE' ||
+      variable === 'GIT_OBJECT_DIRECTORY' ||
+      variable === 'GIT_COMMON_DIR' ||
+      variable === 'GIT_CONFIG_PARAMETERS' ||
+      variable === 'GIT_CONFIG_COUNT' ||
+      variable.startsWith('GIT_CONFIG_KEY_') ||
+      variable.startsWith('GIT_CONFIG_VALUE_')
+    ) {
+      // Do not let inherited repository-selection or config-injection variables
+      // redirect the snapshot or re-enable filters after our overrides.
+      delete environment[variable];
+    }
+  }
+
+  Object.assign(environment, {
     GIT_OPTIONAL_LOCKS: '0',
     GIT_PAGER: 'cat',
     PAGER: 'cat',
@@ -40,7 +67,7 @@ function gitEnvironment(overrides = {}) {
     GIT_TERMINAL_PROMPT: '0',
     GIT_LITERAL_PATHSPECS: '1',
     ...overrides,
-  };
+  });
 
   // External diff commands are disabled by command-line options too. Removing
   // this variable closes the environment escape hatch for every Git command.
@@ -170,6 +197,12 @@ function splitNul(buffer) {
   return fields;
 }
 
+function readNulField(buffer, offset, description) {
+  const end = buffer.indexOf(0, offset);
+  if (end === -1) throw new Error(`Malformed git ${description} field`);
+  return { value: buffer.subarray(offset, end), next: end + 1 };
+}
+
 function parseRawHeader(buffer) {
   const header = buffer.toString('utf8');
   if (!header.startsWith(':')) throw new Error('Malformed git raw diff header');
@@ -185,51 +218,70 @@ function parseRawHeader(buffer) {
 }
 
 function parseDiffMetadata(buffer) {
-  const fields = splitNul(buffer);
+  let cursor = 0;
   const rawRecords = [];
-  let index = 0;
 
   // --raw records always start with a colon. This lets us find the boundary
   // between the raw section and the following --numstat section without
   // relying on path contents or quoting rules.
-  while (index < fields.length && fields[index][0] === 0x3a) {
-    const header = parseRawHeader(fields[index]);
-    index += 1;
-    if (index >= fields.length) throw new Error('Malformed git raw diff path');
-    const firstPath = fields[index].toString('utf8');
-    index += 1;
+  while (cursor < buffer.length && buffer[cursor] === 0x3a) {
+    const headerField = readNulField(buffer, cursor, 'raw diff header');
+    const header = parseRawHeader(headerField.value);
+    cursor = headerField.next;
+
+    const firstPathField = readNulField(buffer, cursor, 'raw diff path');
+    cursor = firstPathField.next;
     let secondPath;
     if (header.renameOrCopy) {
-      if (index >= fields.length) throw new Error('Malformed git raw rename path');
-      secondPath = fields[index].toString('utf8');
-      index += 1;
+      const secondPathField = readNulField(buffer, cursor, 'raw rename path');
+      cursor = secondPathField.next;
+      secondPath = secondPathField.value.toString('utf8');
     }
-    rawRecords.push({ ...header, firstPath, secondPath });
+    rawRecords.push({
+      ...header,
+      firstPath: firstPathField.value.toString('utf8'),
+      secondPath,
+    });
+  }
+
+  if (rawRecords.length === 0) {
+    if (buffer.length !== 0) throw new Error('Malformed git diff output without raw records');
+    return { records: [], patchOffset: 0 };
   }
 
   const records = [];
   for (const raw of rawRecords) {
-    if (index >= fields.length) throw new Error('Missing git numstat record');
-    const stats = fields[index].toString('utf8');
-    index += 1;
-    const statFields = stats.split('\t');
-    if (statFields.length !== 3) throw new Error(`Malformed git numstat record: ${stats}`);
-
-    const binary = statFields[0] === '-' || statFields[1] === '-';
-    const added = binary ? 0 : Number.parseInt(statFields[0], 10);
-    const deleted = binary ? 0 : Number.parseInt(statFields[1], 10);
-    if (!binary && (!Number.isSafeInteger(added) || !Number.isSafeInteger(deleted))) {
-      throw new Error(`Malformed git numstat counts: ${stats}`);
+    const statsField = readNulField(buffer, cursor, 'numstat');
+    cursor = statsField.next;
+    const firstTab = statsField.value.indexOf(0x09);
+    const secondTab = firstTab === -1 ? -1 : statsField.value.indexOf(0x09, firstTab + 1);
+    if (firstTab === -1 || secondTab === -1) {
+      throw new Error(`Malformed git numstat record: ${statsField.value.toString('utf8')}`);
     }
 
-    // With -z, Git includes a normal path in the third tab-separated
-    // numstat field. For renames/copies that field is empty, followed by old
-    // and new paths as separate NUL fields. The raw records above remain the
-    // source of truth for names because they are already unquoted byte fields.
+    const addedText = statsField.value.subarray(0, firstTab).toString('utf8');
+    const deletedText = statsField.value.subarray(firstTab + 1, secondTab).toString('utf8');
+    const binary = addedText === '-' || deletedText === '-';
+    const added = binary ? 0 : Number.parseInt(addedText, 10);
+    const deleted = binary ? 0 : Number.parseInt(deletedText, 10);
+    if (!binary && (!Number.isSafeInteger(added) || !Number.isSafeInteger(deleted))) {
+      throw new Error(`Malformed git numstat counts: ${statsField.value.toString('utf8')}`);
+    }
+
+    // With -z, a normal path stays in the third tab-separated field, so only
+    // the first two tabs are delimiters. Rename paths follow an empty field as
+    // separate NUL fields. Raw paths remain the source of truth for names.
     if (raw.renameOrCopy) {
-      if (statFields[2] !== '') throw new Error('Malformed git rename numstat separator');
-      if (index + 1 >= fields.length) throw new Error('Malformed git rename numstat paths');
-      index += 2;
+      if (statsField.value.subarray(secondTab + 1).length !== 0) {
+        throw new Error('Malformed git rename numstat separator');
+      }
+      const oldPath = readNulField(buffer, cursor, 'rename numstat old path');
+      cursor = oldPath.next;
+      const newPath = readNulField(buffer, cursor, 'rename numstat new path');
+      cursor = newPath.next;
+      if (!oldPath.value.equals(Buffer.from(raw.firstPath)) || !newPath.value.equals(Buffer.from(raw.secondPath))) {
+        throw new Error('Mismatched git rename numstat paths');
+      }
     }
 
     records.push({
@@ -242,8 +294,14 @@ function parseDiffMetadata(buffer) {
     });
   }
 
-  if (index !== fields.length) throw new Error('Unexpected fields after git numstat records');
-  return records;
+  // `-z` places one empty NUL field between the metadata records and the
+  // ordinary unified patch. Keeping the offset instead of splitting the whole
+  // buffer prevents tabs/newlines/NUL framing from being confused with paths.
+  const separator = readNulField(buffer, cursor, 'metadata/patch separator');
+  if (separator.value.length !== 0) {
+    throw new Error('Missing git metadata/patch separator');
+  }
+  return { records, patchOffset: separator.next };
 }
 
 function patchChunks(buffer) {
@@ -336,6 +394,40 @@ function patchRows(patch) {
   return rows;
 }
 
+async function filterEnvironment(root) {
+  let output;
+  try {
+    output = await runGit(['config', '--null', '--name-only', '--get-regexp', '^filter\\.'], {
+      cwd: root,
+    });
+  } catch (error) {
+    // `git config --get-regexp` uses exit code 1 when no key matches.
+    if (error.exitCode === 1) return {};
+    throw error;
+  }
+
+  const names = new Set();
+  for (const field of splitNul(output)) {
+    const key = field.toString('utf8');
+    const prefix = 'filter.';
+    const lastDot = key.lastIndexOf('.');
+    if (!key.startsWith(prefix) || lastDot <= prefix.length) continue;
+    names.add(key.slice(prefix.length, lastDot));
+  }
+
+  const sortedNames = [...names].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  const environment = { GIT_CONFIG_COUNT: String(sortedNames.length * 4) };
+  let index = 0;
+  for (const name of sortedNames) {
+    for (const setting of ['clean', 'process', 'smudge', 'required']) {
+      environment[`GIT_CONFIG_KEY_${index}`] = `filter.${name}.${setting}`;
+      environment[`GIT_CONFIG_VALUE_${index}`] = setting === 'required' ? 'false' : '';
+      index += 1;
+    }
+  }
+  return environment;
+}
+
 async function repositoryGitPath(root, env, gitPath = 'index') {
   const output = stripOneTrailingNewline(
     await gitText(['rev-parse', '--git-path', gitPath], { cwd: root, env }),
@@ -353,7 +445,13 @@ async function withTemporaryIndex(root, callback) {
     const realIndex = await repositoryGitPath(root, baseEnvironment);
     const realObjects = await repositoryGitPath(root, baseEnvironment, 'objects');
     try {
+      const indexStat = await fs.stat(realIndex);
       await fs.copyFile(realIndex, temporaryIndex);
+      // Git hashes same-stat entries when their timestamp is at or after the
+      // index timestamp (its racy-file safeguard). A copy's fresh mtime would
+      // disable that safeguard and can hide same-size edits. Date precision
+      // may round this down, which only causes extra safe content checks.
+      await fs.utimes(temporaryIndex, indexStat.atime, indexStat.mtime);
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
       // An unborn repository may have no index yet. Git will create only the
@@ -453,71 +551,100 @@ export async function repositoryRoot(cwd) {
   );
 }
 
+/** Accept a revision pair, never a shell command or arbitrary Git options. */
+export function normalizeComparison(input = '') {
+  if (typeof input !== 'string') throw new Error('Usage: /review [base...tip | base..tip]');
+  const expression = input.trim();
+  if (!expression) return '';
+  const parts = /^(.+?)(\.{2,3})(.+)$/.exec(expression);
+  if (expression.length > 4096 || /[\s\x00-\x1f\x7f]/.test(expression) || !parts ||
+      /^[.-]/.test(parts[1]) || /^[.-]/.test(parts[3]) ||
+      parts[1].includes('..') || parts[3].includes('..')) {
+    throw new Error('Usage: /review [base...tip | base..tip]. Pass one revision pair, not a shell command or Git flags.');
+  }
+  return expression;
+}
+
 /**
- * Read a deterministic HEAD-to-working-tree snapshot without changing the
- * caller's index. Untracked files are represented in a throwaway index with
- * intent-to-add, so staged and unstaged changes are naturally combined by one
- * ordinary Git diff.
+ * Resolve endpoints to commit IDs before diffing. This excludes dirty files,
+ * avoids option/path ambiguity, and pins each read even if a branch moves.
+ * Re-resolve on refresh so new commits appear without reopening the pane.
  */
-export async function readSnapshot(root) {
+export async function resolveComparison(root, input) {
+  const expression = normalizeComparison(input);
+  if (!expression) return undefined;
+  const [, left, operator, right] = /^(.+?)(\.{2,3})(.+)$/.exec(expression);
+  async function commit(revision) {
+    try {
+      return stripOneTrailingNewline(await gitText(
+        ['rev-parse', '--verify', '--end-of-options', `${revision}^{commit}`], { cwd: root },
+      ));
+    } catch {
+      throw new Error(`Cannot resolve revision ${JSON.stringify(revision)} to a commit.`);
+    }
+  }
+  const leftCommit = await commit(left);
+  const tip = await commit(right);
+  let base = leftCommit;
+  if (operator === '...') {
+    let bases;
+    try {
+      bases = (await gitText(['merge-base', '--all', leftCommit, tip], { cwd: root })).trim().split('\n');
+    } catch {
+      throw new Error(`No merge base for ${expression}. Use base..tip to compare unrelated histories directly.`);
+    }
+    // Picking one of several merge bases would silently choose a review scope.
+    if (bases.length !== 1) throw new Error('Multiple merge bases found. Use an explicit base..tip comparison.');
+    [base] = bases;
+  }
+  return { expression, base, tip };
+}
+
+async function diffSnapshot(repository, revisions, env, head, comparison) {
+  // One Git process pairs metadata and patches in both modes. Commit mode
+  // passes only resolved IDs; working-tree mode keeps its private index.
+  const diffOutput = await runGit([
+    'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--no-relative',
+    '--ignore-submodules=none', '--submodule=short', '-M', '--no-abbrev',
+    '--full-index', '--src-prefix=a/', '--dst-prefix=b/',
+    '--raw', '--numstat', '--patch', '-z', ...revisions, '--',
+  ], { cwd: repository, env });
+  const { records: metadata, patchOffset } = parseDiffMetadata(diffOutput);
+  const chunks = patchChunks(diffOutput.subarray(patchOffset));
+  if (metadata.length !== chunks.length) {
+    throw new Error(`Git diff metadata/patch count mismatch (${metadata.length} metadata, ${chunks.length} patches)`);
+  }
+  const files = metadata.map((file, index) => ({
+    ...file,
+    revision: sha256(chunks[index]),
+    rows: patchRows(chunks[index]),
+    // Carry the exact reviewed commits into line comments; named refs may move
+    // before the agent reads the feedback or before another refresh occurs.
+    ...(comparison ? { baseCommit: comparison.base, tipCommit: comparison.tip } : {}),
+  })).sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  return {
+    root: repository, head,
+    ...(comparison ? { comparison } : {}),
+    revision: aggregateRevision(head, files), files,
+  };
+}
+
+/** No arguments reviews the worktree; a revision pair reviews committed trees. */
+export async function readSnapshot(root, input = '') {
+  const expression = normalizeComparison(input);
   const repository = await repositoryRoot(root);
+  const filters = await filterEnvironment(repository);
+  if (expression) {
+    const comparison = await resolveComparison(repository, expression);
+    // No index copy or add -N here: staged, unstaged and untracked edits have
+    // no part in a two-commit comparison, even if the index has conflicts.
+    return diffSnapshot(repository, [comparison.base, comparison.tip], filters, comparison.tip, comparison);
+  }
   const head = await headRevision(repository);
   const base = head || (await emptyTreeRevision(repository));
-
   return withTemporaryIndex(repository, async (env) => {
-    await addUntrackedToTemporaryIndex(repository, env);
-
-    const metadataOutput = await runGit(
-      [
-        'diff',
-        '--no-ext-diff',
-        '--no-textconv',
-        '--no-color',
-        '--ignore-submodules=none',
-        '-M',
-        '--raw',
-        '--numstat',
-        '-z',
-        base,
-      ],
-      { cwd: repository, env },
-    );
-    const patchOutput = await runGit(
-      [
-        'diff',
-        '--no-ext-diff',
-        '--no-textconv',
-        '--no-color',
-        '--ignore-submodules=none',
-        '-M',
-        '--patch',
-        '--full-index',
-        base,
-      ],
-      { cwd: repository, env },
-    );
-
-    const metadata = parseDiffMetadata(metadataOutput);
-    const chunks = patchChunks(patchOutput);
-    if (metadata.length !== chunks.length) {
-      throw new Error(
-        `Git diff metadata/patch count mismatch (${metadata.length} metadata, ${chunks.length} patches)`,
-      );
-    }
-
-    const files = metadata
-      .map((file, index) => ({
-        ...file,
-        revision: sha256(chunks[index]),
-        rows: patchRows(chunks[index]),
-      }))
-      .sort((left, right) => left.path.localeCompare(right.path));
-
-    return {
-      root: repository,
-      head,
-      revision: aggregateRevision(head, files),
-      files,
-    };
+    const snapshotEnvironment = { ...env, ...filters };
+    await addUntrackedToTemporaryIndex(repository, snapshotEnvironment);
+    return diffSnapshot(repository, [base], snapshotEnvironment, head);
   });
 }
