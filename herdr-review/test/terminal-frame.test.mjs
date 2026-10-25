@@ -9,6 +9,15 @@ test('full-width rows are cleared before writing, never at the last cell afterwa
   assert.ok(!output.includes('[+]\x1b[K'));
 });
 
+test('unchanged rows are not erased or rewritten when the pointer moves', () => {
+  const previous = ['header', 'green source', 'old hover'];
+  assert.equal(terminalFrame(previous, 3, previous), '');
+  const output = terminalFrame(['header', 'green source', 'new hover'], 3, previous);
+  assert.ok(!output.includes('green source'));
+  assert.ok(!output.includes('\x1b[2K'));
+  assert.ok(output.includes('\x1b[3;1H'));
+});
+
 test('a shortened frame clears unused rows only after moving below its last row', () => {
   assert.equal(terminalFrame(['header'], 4), '\x1b[H\x1b[2Kheader\x1b[0m\x1b[2;1H\x1b[J');
 });

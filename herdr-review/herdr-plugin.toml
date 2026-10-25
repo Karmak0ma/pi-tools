@@ -13,5 +13,6 @@ platforms = ["linux"]
 id = "review"
 # The pane label and the runtime-reported Agents entry use the same name.
 title = "review"
+# The extension first isolates the calling agent in a tab, then splits right.
 placement = "split"
 command = ["node", "--input-type=module", "-e", "await import(process.env.VFLO_REVIEW_APP)"]

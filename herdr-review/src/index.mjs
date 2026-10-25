@@ -38,8 +38,14 @@ export function registerReview(pi, dependencies = {}) {
     // must not silently relabel old comments or strand another open review.
     let runtime = runtimes.get(comparison);
     if (runtime?.paneId) {
-      try { await run(["plugin", "pane", "focus", runtime.paneId]); return; }
+      let focused;
+      try { focused = await run(["plugin", "pane", "focus", runtime.paneId]); }
       catch { runtime.paneId = undefined; }
+      if (runtime.paneId) {
+        runtime.tabId = focused?.plugin_pane?.pane?.tab_id || runtime.tabId;
+        await arrangeReview(runtime, comparison, current);
+        return;
+      }
     }
     if (!runtime) {
       const bridge = await makeBridge({
@@ -59,20 +65,67 @@ export function registerReview(pi, dependencies = {}) {
       });
       return;
     }
-    const result = await run(["pane", "current", "--current"]);
-    if (!current()) return;
-    // Split the caller's live pane, never whichever agent the UI currently
-    // happens to focus. Herdr returns fresh IDs after workspace moves.
-    const paneId = result.pane?.pane_id;
-    if (!paneId) throw new Error("Herdr did not identify the calling pane.");
+    const caller = await reviewCaller(current);
+    if (!caller) return;
+    const paneId = caller.pane_id;
     const opened = await run([
       "plugin", "pane", "open", "--plugin", "vflo.review", "--entrypoint", "review",
-      "--placement", "split", "--target-pane", paneId, "--direction", "right",
+      "--placement", "split", "--direction", "right", "--target-pane", paneId,
       "--cwd", root, "--focus",
       "--env", `VFLO_REVIEW_APP=${new URL("./tui.mjs", import.meta.url).href}`,
       "--env", `VFLO_REVIEW_DIR=${runtime.bridge.dir}`,
     ]);
-    if (current()) runtime.paneId = opened.plugin_pane?.pane?.pane_id;
+    // If shutdown won the race with Herdr's open command, close only the
+    // reviewer we just created. Do not leave an untracked pane behind.
+    if (!current()) {
+      const stalePane = opened.plugin_pane?.pane?.pane_id;
+      if (stalePane) await run(["pane", "close", stalePane]);
+      return;
+    }
+    runtime.paneId = opened.plugin_pane?.pane?.pane_id;
+    runtime.tabId = opened.plugin_pane?.pane?.tab_id;
+    if (!runtime.paneId || !runtime.tabId) throw new Error("Herdr did not identify the review pane and tab.");
+    // Plugin focus can target the pane without switching the visible tab on
+    // some Herdr versions. Explicit tab focus makes /review switch screens.
+    await run(["tab", "rename", runtime.tabId, comparison ? `Review ${comparison}` : "Review"]);
+    if (current()) await run(["tab", "focus", runtime.tabId]);
+  }
+
+  // A split inside the caller's old tile would inherit that tile's small size.
+  // Move only the calling agent into a new tab first. Plugin splits use 0.5,
+  // so the agent and reviewer each receive half of the full tab. Other panes
+  // stay where they were; Herdr removes a source tab only when it is empty.
+  async function reviewCaller(current, existingTab) {
+    if (!current()) return;
+    const result = await run(["pane", "current", "--current"]);
+    if (!current()) return;
+    const caller = result.pane;
+    if (!caller?.pane_id) throw new Error("Herdr did not identify the calling pane.");
+    if (existingTab && caller.tab_id === existingTab) return caller;
+    const moved = await run(["pane", "move", caller.pane_id, "--new-tab", "--no-focus"]);
+    const pane = moved.move_result?.pane;
+    if (!pane?.pane_id || !pane.tab_id) throw new Error("Herdr did not identify the moved calling pane.");
+    return current() ? pane : undefined;
+  }
+
+  async function arrangeReview(runtime, comparison, current) {
+    const caller = await reviewCaller(current, runtime.tabId);
+    if (!caller) return;
+    // One agent cannot occupy several comparison tabs at once. Bring the
+    // matching saved reviewer alongside it when switching comparisons.
+    if (caller.tab_id !== runtime.tabId) {
+      const moved = await run(["pane", "move", runtime.paneId, "--tab", caller.tab_id,
+        "--split", "right", "--target-pane", caller.pane_id, "--ratio", "0.5", "--no-focus"]);
+      const pane = moved.move_result?.pane;
+      if (!pane?.pane_id || !pane.tab_id) throw new Error("Herdr did not identify the moved review pane.");
+      runtime.paneId = pane.pane_id;
+      runtime.tabId = pane.tab_id;
+    }
+    if (!current()) return;
+    await run(["tab", "rename", runtime.tabId, comparison ? `Review ${comparison}` : "Review"]);
+    if (!current()) return;
+    await run(["plugin", "pane", "focus", runtime.paneId]);
+    if (current()) await run(["tab", "focus", runtime.tabId]);
   }
 
   const handler = async (args, ctx) => {

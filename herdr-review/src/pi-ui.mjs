@@ -51,7 +51,7 @@ export function createPiReviewComponent({ controller, tui, theme, keybindings, t
     }
     for (const [binding, key] of actions) if (matchesKey(data, binding)) return { type: "key", key };
     // A pasted string must never turn into a sequence of UI commands.
-    return /^[acdnprsqS]$/.test(data) ? { type: "text", text: data } : undefined;
+    return /^[acdnprsqS\[\]]$/.test(data) ? { type: "text", text: data } : undefined;
   }
   return {
     get focused() { return focused; },
@@ -108,6 +108,15 @@ export function createPiReviewComponent({ controller, tui, theme, keybindings, t
       });
     },
     handleMouse(event) {
+      const dividerEvent = controller.capture({ type: "mouse",
+        button: event.button === "left" ? (event.type === "drag" ? 32 : 0) : 35,
+        down: event.type !== "release", x: event.x + 1, y: event.y + 1,
+      });
+      // Capture in Pi as well as in the controller: the host must send later
+      // drag/release events here even after the pointer leaves the edge.
+      if (["press", "drag", "release", "move"].includes(event.type) && controller.resizeDivider(dividerEvent)) {
+        return { handled: true, capture: state.resizing, focus: true, render: false };
+      }
       if (event.type === "move") {
         controller.point(event.x + 1, event.y + 1);
         return { handled: true, render: false };

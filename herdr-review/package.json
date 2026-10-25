@@ -3,13 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Review Git changes inside Pi or in a Herdr split pane and send line feedback to Pi",
+  "description": "Review Git changes inside Pi or in a Herdr review tab and send line feedback to Pi",
   "keywords": ["pi-package", "pi-extension", "herdr"],
   "engines": { "node": ">=22" },
   "peerDependencies": { "@earendil-works/pi-coding-agent": "*", "@earendil-works/pi-tui": "*" },
   "pi": { "extensions": ["./src/extension.ts"] },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "check": "node --check src/index.mjs && node --check src/controller.mjs && node --check src/comments.mjs && node --check src/pi-ui.mjs && node --check src/herdr.mjs && node --check src/tui.mjs && node --check src/terminal-frame.mjs && node --check src/protocol.mjs && node --check src/view.mjs && npm test"
+    "check": "node --check src/index.mjs && node --check src/load-launcher.mjs && node --check src/controller.mjs && node --check src/comments.mjs && node --check src/pi-ui.mjs && node --check src/herdr.mjs && node --check src/tui.mjs && node --check src/terminal-frame.mjs && node --check src/text-selection.mjs && node --check src/protocol.mjs && node --check src/view.mjs && npm test"
   }
 }

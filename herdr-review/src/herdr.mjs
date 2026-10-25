@@ -30,13 +30,33 @@ export async function registerReviewPane({ run = runHerdr, env = process.env } =
   const result = await run(["pane", "current", "--current"]);
   const paneId = result.pane?.pane_id;
   if (!paneId) throw new Error("Herdr did not identify the review pane.");
-  // The split shares Pi's tab. Keep that tab's title; only our pane and Agents
-  // entry are named review, so opening a review never renames the conversation.
+  // The launcher owns the comparison-specific tab name. This process only
+  // reports its pane lifecycle; direct launches must not rename Pi's tab.
   await run(["pane", "report-agent", paneId, "--source", "vflo.review", "--agent", "review", "--state", "idle"], { allowEmpty: true });
+  const metadata = ["pane", "report-metadata", paneId, "--source", "vflo.review", "--agent", "review", "--applies-to-source", "vflo.review"];
   let closing;
-  return {
-    // Exit can be requested by both a key and a signal. Release only once;
-    // its child process keeps Node alive until the release request completes.
-    close: () => closing ||= run(["pane", "release-agent", paneId, "--source", "vflo.review", "--agent", "review"], { allowEmpty: true }),
-  };
+  // Exit can be requested by both a key and a signal. Clean up only once;
+  // the child processes keep Node alive until these requests complete.
+  const close = () => closing ||= (async () => {
+    try {
+      // Only clear our source-scoped presentation. State-title tokens belong
+      // to the sidebar plugin; touching them would erase its next frame.
+      await run([...metadata, "--clear-title", "--clear-display-agent"], { allowEmpty: true });
+    } finally {
+      await run(["pane", "release-agent", paneId, "--source", "vflo.review", "--agent", "review"], { allowEmpty: true });
+    }
+  })();
+  try {
+    // Lifecycle kind is not a display name. Standard sidebars use this
+    // presentation; token-based plugins derive theirs from the terminal title
+    // set by tui.mjs. Never write title_idle here: herdr-radar owns that key
+    // and replaces it on its next frame, which caused the transient label.
+    await run([...metadata, "--title", "review", "--display-agent", "review"], { allowEmpty: true });
+  } catch (error) {
+    // Startup can fail after lifecycle registration. Do not leave a ghost
+    // Agents entry behind, even if metadata cleanup itself also fails.
+    await close().catch(() => {});
+    throw error;
+  }
+  return { close };
 }

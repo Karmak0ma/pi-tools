@@ -32,7 +32,7 @@ else if (args[0] === 'tab' && args[1] === 'rename') process.stdout.write(JSON.st
   await assert.rejects(runHerdr(['pane', 'report-agent', '--fail'], { allowEmpty: true }));
 });
 
-test("review split registers a custom review entry without renaming the shared tab, then releases once", async () => {
+test("review publishes a visible sidebar title without renaming the conversation, then cleans up once", async () => {
   const calls = [];
   const registration = await registerReviewPane({ env: pluginEnv, run: async (args) => {
     calls.push(args);
@@ -41,9 +41,52 @@ test("review split registers a custom review entry without renaming the shared t
   assert.deepEqual(calls, [
     ["pane", "current", "--current"],
     ["pane", "report-agent", "w2:p9", "--source", "vflo.review", "--agent", "review", "--state", "idle"],
+    ["pane", "report-metadata", "w2:p9", "--source", "vflo.review", "--agent", "review", "--applies-to-source", "vflo.review", "--title", "review", "--display-agent", "review"],
   ]);
   await Promise.all([registration.close(), registration.close()]);
-  assert.deepEqual(calls.slice(2), [["pane", "release-agent", "w2:p9", "--source", "vflo.review", "--agent", "review"]]);
+  assert.deepEqual(calls.slice(3), [
+    ["pane", "report-metadata", "w2:p9", "--source", "vflo.review", "--agent", "review", "--applies-to-source", "vflo.review", "--clear-title", "--clear-display-agent"],
+    ["pane", "release-agent", "w2:p9", "--source", "vflo.review", "--agent", "review"],
+  ]);
+});
+
+test("registration and cleanup do not overwrite another sidebar plugin\'s title tokens", async () => {
+  // Herdr token keys are shared across sources. Radar rewrites title_idle on
+  // every frame; direct writes only appear briefly, then vanish or conflict.
+  const tokens = { title_idle: "radar-owned title" };
+  const registration = await registerReviewPane({ env: pluginEnv, run: async (args) => {
+    if (args[1] === "report-metadata") {
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === "--token") {
+          const equal = args[i + 1].indexOf("=");
+          tokens[args[i + 1].slice(0, equal)] = args[i + 1].slice(equal + 1);
+        }
+        if (args[i] === "--clear-token") delete tokens[args[i + 1]];
+      }
+    }
+    return { pane: { pane_id: "w2:p9" } };
+  } });
+  try { assert.equal(tokens.title_idle, "radar-owned title"); }
+  finally { await registration.close(); }
+  assert.equal(tokens.title_idle, "radar-owned title", "cleanup must not erase another writer\'s token");
+});
+
+test("metadata startup or cleanup failures still release lifecycle authority", async () => {
+  for (const failingFlag of ["--title", "--clear-title"]) {
+    const calls = [];
+    const run = async (args) => {
+      calls.push(args);
+      if (args.includes(failingFlag)) throw new Error("metadata failure");
+      return { pane: { pane_id: "w2:p9" } };
+    };
+    if (failingFlag === "--title") {
+      await assert.rejects(registerReviewPane({ env: pluginEnv, run }), /metadata failure/);
+    } else {
+      const registration = await registerReviewPane({ env: pluginEnv, run });
+      await assert.rejects(registration.close(), /metadata failure/);
+    }
+    assert.equal(calls.filter((args) => args[1] === "release-agent").length, 1);
+  }
 });
 
 test("direct launches never relabel the inherited Pi pane", async () => {

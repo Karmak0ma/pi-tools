@@ -5,7 +5,7 @@ export function plain(value) {
 }
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-function cells(s) {
+export function cells(s) {
   const n = s.codePointAt(0);
   if (/^\p{Mark}+$/u.test(s)) return 0;
   return /\p{Extended_Pictographic}|\p{Emoji_Presentation}|\u20e3/u.test(s) || (n >= 0x1100 && (
@@ -45,12 +45,17 @@ export function updateOutdated(comments, snapshot) {
 // Paint the padded source row, not only the +/- character: users must be
 // able to distinguish additions/deletions while scanning a wide diff. Keep
 // keyboard focus bold rather than inverse so it cannot erase that distinction.
+// Brighter, kind-specific focus backgrounds keep the cursor obvious even when
+// the terminal font renders bold with little visual difference.
 const ansi = {
   add: "\x1b[48;2;21;52;32m\x1b[38;2;169;209;173m",
   delete: "\x1b[48;2;63;29;33m\x1b[38;2;226;161;165m",
   hunk: "\x1b[38;2;122;162;190m", meta: "\x1b[90m", context: "",
 };
-const hoverStyle = "\x1b[48;2;57;64;71m\x1b[38;2;231;233;235m";
+// Hover exposes the action only. Replacing a diff background on each pointer
+// transition makes additions/deletions appear to blink even with partial paints.
+const cursorBackground = { add: "\x1b[48;2;43;92;54m", delete: "\x1b[48;2;112;48;56m" };
+const cursorNeutral = "\x1b[48;2;57;73;96m";
 const noteBackground = "\x1b[48;2;29;37;43m";
 const noteText = "\x1b[38;2;216;221;225m";
 const noteBorder = "\x1b[38;2;196;154;71m";
@@ -76,6 +81,16 @@ function rawEditorLines(text, width, limit) {
 }
 
 /**
+ * Keep enough room for file names and the inline note buttons. Store the
+ * requested width separately from this clamp so shrinking a terminal does not
+ * discard the user's wider layout when the terminal grows again.
+ */
+export function filePaneWidth(width, requested) {
+  const preferred = requested ?? Math.min(32, Math.max(20, Math.floor(width * 0.27)));
+  return Math.max(20, Math.min(width - 41, Math.round(preferred)));
+}
+
+/**
  * The right pane is a single list of source rows, notes and an inline editor.
  * Hit regions come from that same list: insertion, scrolling and resize cannot
  * turn a click on source text into an add-comment action.
@@ -94,11 +109,21 @@ export function frame(state, width, height, fitLine = fit, renderEditor) {
   const sent = comments.length - unsent;
   put(`Git review | ${state.snapshot?.comparison?.expression || state.comparison || "working tree vs HEAD"} | ${state.snapshot?.root || "Loading repository…"}`, "\x1b[1m");
   function footer() {
-    put("Tab: files/diff | Enter: add/edit | n/p: next/previous comment | c: list");
-    put(state.mode === "confirm" ? `Submit ${state.pendingCount || unsent} unsent comments to Pi? Enter: send | Esc: cancel` :
-      `[s] Send ${unsent} unsent | ${sent} sent to Pi | [r] Refresh | [q] Close`, "\x1b[36m");
-    if (state.mode !== "confirm") hits.push({ x1: 1, x2: 18, y: lines.length, type: "submit" });
-    put(state.status || "Hover a source line to comment. Sent means accepted by Pi, not acted on.");
+    if (state.mode === "confirm") {
+      // The modal owns input. Show its controls instead of advertising normal
+      // navigation, and provide real mouse hits for both choices. Keep actions
+      // first so they remain visible at the minimum supported pane width.
+      put("CONFIRM SEND | Enter: send | Esc: cancel | q: close", "\x1b[1m");
+      put(`[Send now] [Cancel] | ${state.pendingCount || unsent} unsent to Pi`, "\x1b[36m");
+      hits.push({ x1: 1, x2: 10, y: lines.length, type: "confirmSend" },
+        { x1: 12, x2: 19, y: lines.length, type: "confirmCancel" });
+    } else {
+      put("Tab: focus | Enter: note | [/]: hunk | n/p: note | c: list");
+      put(`[s] Send ${unsent} unsent | ${sent} sent to Pi | [r] Refresh | [q] Close`, "\x1b[36m");
+      hits.push({ x1: 1, x2: 18, y: lines.length, type: "submit" });
+    }
+    put(state.copyMode ? "COPY MODE: drag to select text; use host copy. m: return to review." :
+      state.status || ("Wheel: scroll | Hover to add a note" + (state.copyAvailable ? " | Drag: select/copy" : "")));
   }
   if (state.mode === "comments") {
     put("Comments | Enter: edit | d: delete unsent | n/p: navigate | Esc: return", "\x1b[36m");
@@ -113,7 +138,10 @@ export function frame(state, width, height, fitLine = fit, renderEditor) {
     footer();
     return { lines, hits, viewTop: state.viewTop || 0 };
   }
-  const left = Math.min(32, Math.max(20, Math.floor(width * 0.27)));
+  const left = filePaneWidth(width, state.filePaneWidth);
+  // The header and body share one continuous draggable edge. Do not extend
+  // its hit area into either pane: text selection and note actions own those.
+  for (let y = 2; y <= height - 3; y++) hits.push({ type: "divider", x1: left + 1, x2: left + 1, y });
   const right = width - left - 1;
   const count = height - 5;
   const files = state.snapshot?.files || [];
@@ -209,7 +237,7 @@ export function frame(state, width, height, fitLine = fit, renderEditor) {
     // Keep both the selected source line and the whole inline editor visible.
     if (editorStart - 1 < top) top = Math.max(0, editorStart - 1);
     if (editorEnd >= top + count) top = editorEnd - count + 1;
-  } else if (target >= 0) {
+  } else if (!state.freeScroll && target >= 0) {
     if (target < top) top = target;
     if (target >= top + count) top = target - count + 1;
   }
@@ -228,9 +256,12 @@ export function frame(state, width, height, fitLine = fit, renderEditor) {
       const hovered = source && state.pointer?.y === lines.length + 1 && state.pointer.x >= left + 2 && state.pointer.x <= width;
       // Keep the action column fixed while panning. One cell of right margin
       // prevents the action from appearing attached to the terminal edge.
-      text = fitLine(prefix + row.text, right - 5, state.horizontal) + " " + (hovered ? "[+]" : "   ") + " ";
-      style = hovered ? hoverStyle : ansi[row.kind] || "";
-      if (item.index === state.rowIndex && state.focus === "diff") style += "\x1b[1m";
+      const active = item.index === state.rowIndex && state.focus === "diff";
+      // Keep the cursor marker outside horizontal scrolling: a long line must
+      // not hide the only non-color indication of keyboard position.
+      text = (active ? "> " : "  ") + fitLine(prefix + row.text, right - 7, state.horizontal) + " " + (hovered ? "[+]" : "   ") + " ";
+      style = ansi[row.kind] || "";
+      if (active) style += (cursorBackground[row.kind] || cursorNeutral) + "\x1b[1m";
       hits.push({ x1: left + 2, x2: width - 4, y: lines.length + 1, type: "row", index: item.index, source });
       // A press can arrive without a preceding move (some terminals do not
       // report hover). Its coordinates still identify this exact action slot.
@@ -246,7 +277,7 @@ export function frame(state, width, height, fitLine = fit, renderEditor) {
   footer();
   const editorBounds = bodyStart >= top && bodyStart + bodyLength <= top + count ?
     { x: editorX, y: 3 + bodyStart - top, width: editorWidth, height: bodyLength } : undefined;
-  return { lines, hits, editorBounds, viewTop: top };
+  return { lines, hits, editorBounds, filePaneWidth: left, viewTop: top, maxViewTop: Math.max(0, items.length - count), items: items.map((item) => item.index) };
 }
 
 export function hitTest(hits, x, y) { return hits.find((h) => h.y === y && x >= h.x1 && x <= h.x2); }

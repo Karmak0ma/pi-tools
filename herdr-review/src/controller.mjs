@@ -4,17 +4,17 @@ import { randomUUID } from "node:crypto";
 import { readSnapshot } from "./git.mjs";
 import { submitBatch, validateBatch } from "./protocol.mjs";
 import { restoreComments, getUnsent, saveComment, deleteComment, acknowledgeComments } from "./comments.mjs";
-import { frame, hitTest, anchor, matchesAnchor, updateOutdated, plain } from "./view.mjs";
+import { frame, hitTest, anchor, matchesAnchor, updateOutdated, plain, filePaneWidth } from "./view.mjs";
 
 /** Both terminal adapters share anchors, revision history and delivery receipts. */
 export async function createReviewController({
   connection, dir, loadSnapshot = readSnapshot, send = submitBatch,
-  onChange = () => {}, onClose = () => {}, rows = () => 24,
+  onChange = () => {}, onClose = () => {}, rows = () => 24, onMouseCapture,
 }) {
   const draftPath = path.join(dir, "drafts.json");
   const state = { snapshot: undefined, comparison: connection.comparison || "", fileIndex: 0, rowIndex: 0,
     viewTop: 0, horizontal: 0, focus: "files", mode: "review", comments: [], commentIndex: 0,
-    selectedCommentId: undefined, pendingCount: 0, status: "" };
+    selectedCommentId: undefined, pendingCount: 0, status: "", copyAvailable: !!onMouseCapture };
   let pending;
   try {
     const saved = JSON.parse(await readFile(draftPath, "utf8"));
@@ -32,7 +32,7 @@ export async function createReviewController({
   let queue = Promise.resolve();
   function draw() { if (!stopped) onChange(); }
   function point(x, y) {
-    if (stopped) return;
+    if (stopped || state.copyMode) return;
     const hovered = (position) => position && lastFrame?.hits.find((hit) => hit.type === "row" && hit.source &&
       hit.y === position.y && position.x >= hit.x1 && position.x <= lastWidth);
     const previous = hovered(state.pointer);
@@ -40,6 +40,31 @@ export async function createReviewController({
     // Moving within a source row changes no visible state. Cross-row/leave
     // transitions repaint immediately, without waiting for filesystem work.
     if (previous !== hovered(state.pointer)) draw();
+  }
+  function resizeDivider(event) {
+    if (stopped || state.copyMode) return false;
+    if (event.type !== "mouse") { state.resizing = false; return false; }
+    if (state.resizing) {
+      if ((event.button === 32 && event.down) || (event.button === 0 && !event.down)) {
+        const width = filePaneWidth(lastWidth, event.x - 1);
+        const changed = width !== state.filePaneWidth;
+        state.filePaneWidth = width;
+        if (!event.down) state.resizing = false;
+        if (changed) draw();
+        return true;
+      }
+      // While captured, ordinary hover must not select rows underneath the
+      // moving divider. A different button cancels the gesture.
+      if (event.button & 32) return true;
+      state.resizing = false;
+    }
+    if (event.down && event.button === 0 && event.hit?.type === "divider" &&
+        hitTest(lastFrame?.hits || [], event.x, event.y)?.type === "divider") {
+      state.resizing = true;
+      state.pointer = undefined;
+      return true;
+    }
+    return false;
   }
   function enqueue(work) {
     queue = queue.then(async () => { if (!stopped) await work(); })
@@ -81,11 +106,13 @@ export async function createReviewController({
     state.editor = { anchor: comment || source, text: comment?.text || "", commentId: comment?.id };
     state.selectedCommentId = comment?.id;
     locate(source);
+    state.freeScroll = false;
     state.focus = "diff"; state.mode = "edit"; state.status = "";
   }
   function jumpToComment(commentId) {
     const comment = state.comments.find((c) => c.id === commentId);
     if (!comment) return;
+    state.freeScroll = false;
     state.selectedCommentId = comment.id;
     state.commentIndex = state.comments.indexOf(comment);
     state.focus = "diff";
@@ -102,6 +129,20 @@ export async function createReviewController({
     if (index < 0) index = delta > 0 ? -1 : 0;
     jumpToComment(ordered[(index + delta + ordered.length) % ordered.length].id);
   }
+  function nextHunk(delta) {
+    const hunks = [];
+    for (const [fileIndex, file] of (state.snapshot?.files || []).entries()) {
+      for (const [rowIndex, row] of file.rows.entries()) {
+        if (row.kind === "hunk") hunks.push({ fileIndex, rowIndex });
+      }
+    }
+    if (!hunks.length) { state.status = "No hunks to navigate."; return; }
+    const before = (h) => h.fileIndex < state.fileIndex || (h.fileIndex === state.fileIndex && h.rowIndex < state.rowIndex);
+    const after = (h) => h.fileIndex > state.fileIndex || (h.fileIndex === state.fileIndex && h.rowIndex > state.rowIndex);
+    const destination = delta > 0 ? hunks.find(after) || hunks[0] : hunks.findLast(before) || hunks.at(-1);
+    if (destination.fileIndex !== state.fileIndex) { state.viewTop = 0; state.horizontal = 0; }
+    Object.assign(state, destination, { focus: "diff", freeScroll: false, selectedCommentId: undefined, pointer: undefined });
+  }
   async function remove(commentId) {
     if (pending) { state.status = "Retry the pending submission before editing comments."; return; }
     state.comments = deleteComment(state.comments, commentId);
@@ -112,6 +153,10 @@ export async function createReviewController({
   function confirm() {
     if (!getUnsent(state.comments).length && !pending) { state.status = "No unsent comments. Sent feedback is not sent again."; return; }
     state.mode = "confirm";
+    // Saving is local. Replace the old save message when entering this modal,
+    // otherwise blocked navigation looks like a frozen editor rather than a
+    // deliberate confirmation step. Transport errors still replace this text.
+    state.status = "Nothing sent yet. Confirm Send now, or Cancel to keep reviewing.";
   }
   async function submit() {
     if (!pending) {
@@ -140,6 +185,7 @@ export async function createReviewController({
     stopped = true; clearInterval(timer); onClose();
   }
   async function handle(event) {
+    if (resizeDivider(event)) return;
     if (event.type === "mouse") point(event.x, event.y);
     const key = event.key;
     if (key === "quit") { stop(); return; }
@@ -152,7 +198,7 @@ export async function createReviewController({
         state.selectedCommentId = result.commentId;
         state.commentIndex = Math.max(0, state.comments.findIndex((c) => c.id === result.commentId));
         await persist(); state.mode = "review";
-        state.status = result.changed ? "Comment saved as unsent." : "No changes to save.";
+        state.status = result.changed ? "Comment saved as unsent. Press s to review and send." : "No changes to save.";
         return;
       }
       if (key === "backspace") state.editor.text = Array.from(state.editor.text).slice(0, -1).join("");
@@ -163,11 +209,28 @@ export async function createReviewController({
       return;
     }
     if (event.type === "paste") return;
+    if (event.text === "m" && onMouseCapture && state.mode === "review") {
+      state.copyMode = !state.copyMode;
+      state.pointer = undefined;
+      // Let the host own native drag selection. No clipboard subprocess or
+      // OSC 52 write is needed, and periodic refresh must not erase selection.
+      onMouseCapture(!state.copyMode);
+      return;
+    }
+    if (state.copyMode) {
+      if (key === "escape" || event.text === "q") stop();
+      return;
+    }
     if (state.mode === "confirm") {
-      if (key === "enter") {
+      const action = event.type === "mouse" && event.down && event.button === 0 ? event.hit?.type : undefined;
+      if (event.text === "q") { stop(); return; }
+      if (key === "enter" || action === "confirmSend") {
         try { await submit(); }
         catch (error) { state.status = `${plain(error.message)} Enter retries; Esc returns. Notes are kept.`; state.mode = "confirm"; }
-      } else if (key === "escape") state.mode = "review";
+      } else if (key === "escape" || action === "confirmCancel") {
+        state.mode = "review";
+        state.status = "Send cancelled. Unsent comments are kept.";
+      }
       return;
     }
     if (event.text === "r") { await refresh(); state.status = "Refreshed."; return; }
@@ -186,12 +249,24 @@ export async function createReviewController({
       }
       return;
     }
+    if (event.text === "[" || event.text === "]") { nextHunk(event.text === "]" ? 1 : -1); return; }
     if (event.type === "mouse") {
       if (!event.down) return;
       const hit = event.hit;
       if (event.button === 64 || event.button === 65) {
         state.focus = hit?.type === "file" ? "files" : "diff";
-        await handle({ type: "key", key: event.button === 64 ? "up" : "down" }); return;
+        if (state.focus === "files") {
+          await handle({ type: "key", key: event.button === 64 ? "up" : "down" });
+        } else {
+          // Scroll rendered items, not source-row selection: inline notes take
+          // space too. Keep the cursor visible so Enter targets visible code.
+          state.viewTop = Math.max(0, Math.min(lastFrame?.maxViewTop || 0, state.viewTop + (event.button === 64 ? -3 : 3)));
+          state.freeScroll = true;
+          state.selectedCommentId = undefined;
+          const visible = lastFrame?.items?.slice(state.viewTop, state.viewTop + Math.max(1, rows() - 5)).filter(Number.isInteger) || [];
+          if (visible.length && !visible.includes(state.rowIndex)) state.rowIndex = visible[0];
+        }
+        return;
       }
       if (event.button !== 0) return;
       if (hit?.type === "file") {
@@ -209,6 +284,7 @@ export async function createReviewController({
       if (hit?.type === "note") { state.selectedCommentId = hit.commentId; state.focus = "diff"; }
       return;
     }
+    state.freeScroll = false;
     if (key === "tab") state.focus = state.focus === "files" ? "diff" : "files";
     else if (key === "enter" || event.text === "a") {
       if (state.focus === "files") state.focus = "diff";
@@ -229,9 +305,10 @@ export async function createReviewController({
     }
   }
   return {
-    state, enqueue, handle, stop, point,
+    state, enqueue, handle, stop, point, resizeDivider,
     get stopped() { return stopped; },
     render(width, height, fitLine, renderEditor) {
+      if (lastWidth !== width) state.resizing = false;
       lastWidth = width;
       lastFrame = frame(state, width, height, fitLine, renderEditor);
       state.viewTop = lastFrame.viewTop;
@@ -241,7 +318,7 @@ export async function createReviewController({
     start() {
       if (timer || stopped) return queue;
       timer = setInterval(() => {
-        if (refreshing) return;
+        if (refreshing || state.copyMode || state.selecting || state.resizing) return;
         refreshing = true;
         enqueue(refresh).finally(() => { refreshing = false; });
       }, 3000);

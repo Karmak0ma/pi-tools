@@ -1,6 +1,10 @@
 # pi-tools
 Set of extensions and themes for pi coding agent
 
+## Git review
+
+[herdr-review](herdr-review/README.md) opens a file list and unified Git diff inside Pi's terminal, with no browser or Herdr requirement. When running inside Herdr, it opens a focused split on the right with an Agents-list entry named `review` instead. Click a source row's `[+]` to add an inline comment, save with Ctrl+S, and submit unsent notes as feedback to Pi. Sent revisions remain visible; `n`/`p` navigate comments and `r` refreshes the diff. Open it with `/review` or Alt+R after installing the Pi extension; the Herdr launcher is optional. Use `/review develop...HEAD` to review committed changes since the merge base with another branch.
+
 ## DCP setup
 
 [pi-dcp](pi-dcp/README.md) supports model-specific exclusions through `disabledModels` in its extension configuration. Keep Pi's `compaction.enabled` set to `true`: DCP blocks normal threshold compaction only for models where DCP is enabled and healthy. Excluded models use Pi's normal compaction. Manual compaction and overflow recovery remain available for all models.

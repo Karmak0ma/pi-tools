@@ -89,7 +89,7 @@ test("in-Pi keyboard review saves anchored comments, retries safely, and returns
   await addComment(h);
   assert.equal(h.options.overlay, true);
   assert.equal(h.options.overlayOptions.width, "100%");
-  h.input("s"); await h.waitFor("Submit 1 unsent comments");
+  h.input("s"); await h.waitFor("CONFIRM SEND");
   h.input("\r"); await h.waitFor("Enter retries;");
   h.input("\r"); await h.waitFor("Sent 1 comments to Pi");
   assert.equal(batches.length, 2);
@@ -103,6 +103,21 @@ test("in-Pi keyboard review saves anchored comments, retries safely, and returns
   assert.ok(saved.comments[0].sentAt > 0);
   assert.ok(h.lines.some((line) => line.includes('Sent to Pi')));
   h.input("q"); await h.opening;
+});
+
+test('in-Pi confirmation supports mouse cancel and send without losing drafts', async (t) => {
+  const batches = [];
+  const h = await harness(t, { send: async (_connection, batch) => batches.push(batch) });
+  await addComment(h);
+  h.input('s'); await h.waitFor('CONFIRM SEND');
+  h.mouse({ type: 'press', button: 'left', x: 14, y: 22 });
+  await h.waitFor('Send cancelled.');
+  assert.equal(batches.length, 0);
+  h.input('s'); await h.waitFor('CONFIRM SEND');
+  h.mouse({ type: 'press', button: 'left', x: 4, y: 22 });
+  await h.waitFor('Sent 1 comments to Pi');
+  assert.equal(batches.length, 1);
+  h.input('q'); await h.opening;
 });
 
 test("normalized Pi mouse coordinates open the displayed line and pasted commands remain text", async (t) => {
@@ -134,6 +149,53 @@ test("normalized Pi mouse coordinates open the displayed line and pasted command
   assert.equal(saved.comments[0].line, 1);
   assert.equal(saved.comments[0].text, "sq");
   assert.equal(saved.pending, undefined);
+});
+
+test("Pi captures divider drags and keeps comment hit targets aligned after resizing", async (t) => {
+  const h = await harness(t);
+  await h.waitFor("newCode();");
+  const edge = () => h.lines[1].indexOf("│");
+  assert.equal(edge(), 27);
+  const press = h.mouse({ type: "press", button: "left", x: edge(), y: 1 });
+  assert.equal(press.capture, true);
+  assert.equal(h.mouse({ type: "drag", button: "left", x: 45, y: 3 }).capture, true);
+  assert.equal(edge(), 45);
+  assert.equal(h.mouse({ type: "release", button: "left", x: 50, y: 3 }).capture, false);
+  assert.equal(edge(), 50);
+  h.mouse({ type: "drag", button: "left", x: 35, y: 3 });
+  assert.equal(edge(), 50, "release ends resize capture");
+  h.mouse({ type: "press", button: "left", x: 98, y: 3 });
+  await h.waitFor("Draft note");
+  assert.ok(h.lines.some((line) => line.includes("Write a note…")));
+
+  // Layout may also be adjusted while editing without losing editor text.
+  h.input("keep this");
+  await h.waitFor("keep this");
+  h.mouse({ type: "press", button: "left", x: edge(), y: 1 });
+  h.mouse({ type: "drag", button: "left", x: 59, y: 1 });
+  h.mouse({ type: "release", button: "left", x: 59, y: 1 });
+  assert.equal(edge(), 59);
+  assert.ok(h.lines.some((line) => line.includes("keep this")));
+});
+
+test("Pi forwards bracket hunk navigation and wheel scrolling to the shared viewport", async (t) => {
+  const long = structuredClone(snapshot);
+  long.files[0].rows = [
+    { kind: "hunk", text: "@@ FIRST @@" },
+    ...Array.from({ length: 40 }, (_, i) => ({ kind: "add", text: `code${i}`, newLine: i + 1 })),
+    { kind: "hunk", text: "@@ SECOND @@" },
+    { kind: "add", text: "lastCode", newLine: 99 },
+  ];
+  const h = await harness(t, { loadSnapshot: async () => long });
+  await h.waitFor("@@ FIRST @@");
+  assert.ok(!h.lines.some((line) => line.includes("@@ SECOND @@")));
+  h.mouse({ type: "wheel", wheelDelta: 1, x: 55, y: 4 });
+  await h.waitFor("code20");
+  assert.ok(!h.lines.some((line) => line.includes("@@ FIRST @@")));
+  h.input("]");
+  await h.waitFor("@@ SECOND @@");
+  h.input("[");
+  await h.waitFor("@@ FIRST @@");
 });
 
 test("closing before the Pi toolkit loads never mounts a stale screen", async (t) => {

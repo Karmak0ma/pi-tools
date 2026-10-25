@@ -2,7 +2,7 @@
 
 Review the current repository, leave comments on source lines, then submit them as user feedback to the Pi session that opened the review. No browser is needed.
 
-Outside Herdr, the **Pi extension** opens a review screen inside Pi's existing terminal. Inside Herdr, the optional **Herdr plugin** launches the same review behavior in a focused split pane on the right. The extension uses the host's Pi TUI package; the separate terminal reviewer uses Node's standard library, with no bundled runtime npm dependencies.
+Outside Herdr, the **Pi extension** opens a review screen inside Pi's existing terminal. Inside Herdr, the optional **Herdr plugin** launches the same review behavior in a focused review tab. The extension uses the host's Pi TUI package; the separate terminal reviewer uses Node's standard library, with no bundled runtime npm dependencies.
 
 ## Install
 
@@ -26,9 +26,9 @@ Run `/reload` in the existing Pi session after installation. Open with `/review`
 
 **Outside Herdr:** the review fills Pi's terminal viewport. The conversation stays behind the review; `q`, Esc, or Ctrl+C closes the review and returns to Pi. Pi owns rendering and terminal modes throughout—no extra window, subprocess TUI, or browser is opened. Each comparison has separate drafts; reopening the same comparison restores them.
 
-**Inside Herdr:** the review opens in a **split to the right of the calling Pi pane**, with focus on the review. The pane label and entry in Herdr's **Agents** list are named **review**. The shared conversation tab is not renamed. Repeating the same `/review` command focuses its existing review. Each comparison has a separate pane and saved notes. Closing and reopening the same comparison in the same Pi runtime and repository restores those notes, including delivery status.
+**Inside Herdr:** `/review` moves the calling Pi pane into a **new, focused tab**, then opens the reviewer on its right. Each gets **half the tab width**, even if Pi was in a small tile. Other panes stay in their existing tabs. Herdr removes the old tab only if it becomes empty. Plain `/review` names the new tab **Review**; `/review develop...HEAD` names it **Review develop...HEAD**. The review pane and its entry in Herdr's **Agents** list are named **review**. Repeating the same command focuses the existing pair. Switching comparisons brings the calling Pi pane and matching saved reviewer together in a two-pane tab; previous reviewers keep their notes. Closing the reviewer leaves Pi in that tab; it does not restore Pi's old layout. Reopening the same comparison in the same Pi runtime and repository restores its notes, including delivery status.
 
-In Herdr, the reviewer reports its own `review` lifecycle label to Herdr; it does not pretend to be Pi or start another AI agent. It releases that report on normal close, Ctrl+C, and termination signals. No Herdr source changes or global keybinding changes are needed. Keep Herdr mouse capture enabled for mouse comments. Plain left-clicks are used; Ctrl-click is reserved for Herdr link handling.
+In Herdr, the reviewer reports its own `review` lifecycle label to Herdr; it does not pretend to be Pi or start another AI agent. It publishes standard display metadata and sets the reviewer's terminal title to `review`. Sidebar plugins such as `herdr-radar` use that terminal title to generate their own display tokens. The reviewer does not write or clear those shared tokens; doing so would compete with the sidebar plugin and could make the name appear briefly, then disappear. It clears its display metadata and releases its lifecycle report on normal close, Ctrl+C, and termination signals. No Herdr source changes or global keybinding changes are needed. Keep Herdr mouse capture enabled for mouse comments. Plain left-clicks are used; Ctrl-click is reserved for Herdr link handling.
 
 ## Typical workflow
 
@@ -37,7 +37,7 @@ In Herdr, the reviewer reports its own `review` lifecycle label to Herdr; it doe
 3. Hover a source line and click its `[+]`, or select the line with the keyboard and press Enter.
 4. Write a comment in the inline **Draft note** box. Press **Ctrl+S** to save it as **Unsent**, or Esc to cancel.
 5. Repeat for other lines. Use `n` / `p` to visit saved comments and `r` to refresh the diff.
-6. Press `s` or Shift+S, review the unsent count, and press Enter to send. Accepted notes remain visible as **Sent to Pi**.
+6. Press `s` or Shift+S to open **CONFIRM SEND**. Review the unsent count, then press Enter or click **Send now**. Esc or **Cancel** returns to the review without sending; `q` closes it. Accepted notes remain visible as **Sent to Pi**.
 
 **Saving is not sending.** You can collect and edit several unsent notes before submitting one feedback message. “Sent to Pi” means accepted or queued by Pi, not that the model has acted on the feedback.
 
@@ -78,20 +78,28 @@ Initial limits: unresolved merge-conflict index entries are unsupported in the w
 
 These controls apply while browsing the diff or comments. While editing a comment, letters such as `n`, `p`, `r`, and `s` are ordinary text.
 
+The active diff row has a fixed `>` marker, bold text, and a brighter background. Added and deleted rows keep distinct green and red backgrounds. The marker stays visible when you scroll horizontally.
+
 | Control | Action |
 | --- | --- |
 | Click a file | Select its diff |
-| Click source text | Select the source row only; does not open a comment |
+| Drag the vertical edge between files and diff | Resize the file panel; release to finish |
+| Click source text | Select the source row on release; does not open a comment |
+| Click and drag source text or a saved note (Herdr) | Highlight text; release to copy it to the clipboard |
 | Hover a source row, then click its `[+]` on the right | Open a comment box immediately below that line |
 | Click a note's `[Edit]` | Edit its text inline |
 | Click an unsent note's `[x]` | Delete that unsent note |
 | Tab | Switch keyboard focus between files and diff |
 | Up/Down, Page Up/Down, Home/End | Navigate the focused list |
+| Mouse wheel over the diff | Scroll the viewport up/down, three display rows per notch |
+| Mouse wheel over the file list | Select the previous/next file |
+| `[` / `]` | Previous / next hunk; wraps across files |
+| `m` (Herdr only, optional) | Release mouse capture for host-native selection instead of the built-in drag selector |
 | Left/Right | Scroll long diff lines horizontally |
 | Enter | Enter the diff from the file list; add/edit at the selected row or selected note |
 | `n` / `p` | Next / previous saved comment in diff order, including sent revisions; wraps across files |
 | `c` | List all comments and delivery status; Enter edits, `d` deletes an unsent note, Esc returns |
-| `s`, Shift+S, or click Send | Confirm submission of **unsent** notes only; Enter sends, Esc cancels |
+| `s`, Shift+S, or click Send | Open confirmation for **unsent** notes only; Enter or **Send now** sends, Esc or **Cancel** returns |
 | `r` | Refresh the diff immediately without losing comments |
 | `q`, Esc, Ctrl+C | Close the reviewer; saved drafts remain |
 
@@ -113,11 +121,27 @@ Bracketed paste is accepted as text, never as navigation or submission commands.
 
 ## Appearance and mouse support
 
-The review needs at least 64 columns and 16 rows, including space for the inline editor. Resize the terminal or zoom the Herdr pane if it is too small. Added source rows have a dark green background; deleted rows have a dark red background. A neutral gray background marks the hovered source row, and keyboard selection uses bold text without removing the diff background. These are display styles applied to the existing Git diff, not a different Git comparison tool.
+The review needs at least 64 columns and 16 rows, including space for the inline editor. Resize the terminal or zoom the Herdr pane if it is too small. Added source rows have a dark green background; deleted rows have a dark red background. Hover shows the comment action without replacing these backgrounds, and keyboard selection uses bold text without removing the diff background. The standalone renderer updates only changed rows, without clearing their backgrounds first. These are display styles applied to the existing Git diff, not a different Git comparison tool.
+
+**Resize the file panel:** press the vertical `│` edge between the panels, then drag left or right and release. The header and body edge both accept this gesture. The file panel keeps at least 20 columns; the diff keeps at least 40 columns so the comment controls remain usable. The chosen width stays in effect while this review is open. A smaller terminal clamps the layout; widening it restores the chosen width. Divider drags do not select or copy source text, and they also work while editing a comment. This needs Herdr mouse forwarding or Pi's fullscreen mouse support; Pi's regular mode leaves mouse input to the terminal.
 
 Only the hovered source row displays `[+]`. Its action column stays fixed when panning, with a one-cell right margin. Moving over the file list, notes, or controls hides it. Clicking source text selects the row but does not start a comment.
 
 Pi routes mouse clicks to custom components in its **fullscreen TUI mode**. In Pi's regular mode, mouse input stays with the terminal; use Tab, arrows, and Enter to comment. This extension does not change your `tuiMode` setting or enable raw mouse capture behind Pi's back. The review still fills the viewport in regular mode, but keyboard controls are the reliable input path. Herdr's standalone reviewer requests all-motion mouse reports while open and restores them on close. In Pi, hover is available only when Pi's own terminal mode delivers pointer moves; some nested terminal multiplexers suppress those reports even in fullscreen mode. The extension does not change host mouse settings to work around that limitation. Use Enter at the selected source row when hover is unavailable.
+
+### Select and copy text
+
+In the Herdr reviewer, **click and drag directly over source text or a saved note**. The reviewer highlights the selected text and **copies it on mouse release**. Paste normally in the destination screen. No `m` step is needed. Copy uses OSC 52, which Herdr handles through its clipboard support; the host must permit clipboard writes. A click without a drag still selects a source row, and `[+]` still opens a comment immediately.
+
+Selection follows the visible text and stays within the right pane. Multi-line copies can include the displayed line numbers and diff markers; use a single-line selection to copy only part of a source line. The selector preserves Unicode characters and excludes terminal color codes. It does not auto-scroll beyond the visible viewport. Automatic refresh pauses while selecting and while the highlight remains visible. A new click, key, wheel event, or resize clears the highlight and resumes refresh.
+
+**Optional fallback:** `m` still releases mouse capture for host-native selection. Use the host's copy action, then press `m` again to resume review controls. While editing a comment, `m`, `[` and `]` insert text instead of running commands.
+
+In Pi's regular TUI mode, selection belongs to the terminal. In fullscreen mode, use the host's selection controls or mouse-capture override. The Pi adapter never changes host mouse modes. The Herdr-only `m` switch does not apply to the in-Pi view.
+
+## Configuration comparison
+
+This extension does not load a user configuration file. See the [upstream option inventory](docs/upstream-options.md) for all 14 settings in `herdr-hunk-diff`, their defaults, and the fixed behavior or missing feature here. This inventory does not add those settings.
 
 ## Line identity and concurrent edits
 
@@ -172,7 +196,9 @@ The review needs **64 columns and 16 rows**. Widen or zoom the pane if necessary
 
 ### Changes to the extension are not visible
 
-Run `/reload` in Pi, close the old Herdr review pane, and run `/review` again. Existing standalone panes keep running the code with which they started. Saved notes from an old runtime remain available only for manual recovery as described above.
+Close the old Herdr review pane before testing updated code. If the review still splits a small tile instead of opening an equal-width pair, **fully restart Pi once**, resume this session, then run `/review`. Older extension versions kept the native launcher cached across `/reload`, so reload alone could not apply the layout fix.
+
+The entrypoint now refreshes the launcher on `/reload`. During development, fully restart Pi after changing other native `.mjs` dependencies: Node can still cache those modules. Existing standalone panes keep running the code with which they started. Saved notes from an old runtime remain available only for manual recovery as described above.
 
 ## Development
 
@@ -180,7 +206,7 @@ Run `/reload` in Pi, close the old Herdr review pane, and run `/review` again. E
 npm run check --prefix herdr-review
 ```
 
-Tests cover committed merge-base/direct comparisons and dirty-file exclusion, Git line mapping and unusual paths, source anchors, terminal input decoding and hit mapping, feedback receipts/retries, separate comparison panes, in-Pi keyboard/mouse/paste behavior, and Pi session lifecycle. A terminal smoke test is also useful for real Herdr mouse forwarding, scrolling, resizing, and focus behavior.
+Tests cover committed merge-base/direct comparisons and dirty-file exclusion, Git line mapping and unusual paths, source anchors, terminal input decoding and hit mapping, feedback receipts/retries, separate, focused comparison tabs, in-Pi keyboard/mouse/paste behavior, and Pi session lifecycle. A terminal smoke test is also useful for real Herdr mouse forwarding, scrolling, resizing, and focus behavior.
 
 The package entrypoint is [src/extension.ts](src/extension.ts): it binds Pi's host TUI modules through Pi's loader instead of bundling another renderer. Load the [package manifest](package.json), or that entrypoint for development, not the standalone terminal app as an extension.
 
@@ -191,8 +217,8 @@ The implementation separates:
 - [Shared review state and actions](src/controller.mjs).
 - [Layout, styling, and hit regions](src/view.mjs).
 - [The host-owned Pi screen](src/pi-ui.mjs).
-- [The standalone terminal adapter](src/tui.mjs) and [safe frame writer](src/terminal-frame.mjs).
+- [The standalone terminal adapter](src/tui.mjs), [drag selection and clipboard output](src/text-selection.mjs), and [safe frame writer](src/terminal-frame.mjs).
 - [Local feedback delivery](src/protocol.mjs).
 - [Pi lifecycle and launch selection](src/index.mjs), with [Herdr lifecycle integration](src/herdr.mjs).
 
-Both adapters share line anchoring, draft persistence, refresh, and retry rules. The standalone frame writer clears each row **before** writing it: clearing after a full-width row can erase its final character on real terminals.
+Both adapters share line anchoring, draft persistence, refresh, and retry rules. The standalone frame writer clears rows **before** the first paint or a resize. Later frames overwrite only changed, width-padded rows; unchanged rows emit no terminal output. Clearing after a full-width row can erase its final character on real terminals.

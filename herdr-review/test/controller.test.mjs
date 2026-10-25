@@ -73,6 +73,97 @@ test('hover repaints only on source-row transitions and never opens an editor or
   assert.equal(h.reads, 1);
 });
 
+test('dragging the divider resizes both panes without selecting source or changing files', async (t) => {
+  const { c } = await harness(t);
+  let rendered = c.render(100, 24);
+  const divider = rendered.hits.find((hit) => hit.type === 'divider' && hit.y === 4);
+  assert.ok(divider, 'the visible pane edge must be a mouse target');
+  const mouse = (button, x, y, down = true) => c.handle(c.capture({ type: 'mouse', button, x, y, down }));
+  await mouse(0, divider.x1, 4);
+  assert.equal(c.state.resizing, true);
+  await mouse(32, 46, 4);
+  rendered = c.render(100, 24);
+  assert.equal(rendered.filePaneWidth, 45);
+  assert.equal(rendered.hits.find((hit) => hit.type === 'row').x1, 47);
+  await mouse(0, 51, 4, false);
+  assert.equal(c.state.resizing, false);
+  assert.equal(c.render(100, 24).filePaneWidth, 50);
+  assert.equal(c.state.fileIndex, 0);
+  assert.equal(c.state.rowIndex, 0);
+  assert.equal(c.state.mode, 'review');
+  await mouse(32, 60, 4);
+  assert.equal(c.render(100, 24).filePaneWidth, 50, 'motion after release must not resize');
+
+  await mouse(0, 51, 4);
+  await mouse(32, -20, 1);
+  assert.equal(c.render(100, 24).filePaneWidth, 20);
+  await mouse(32, 300, 40);
+  assert.equal(c.render(100, 24).filePaneWidth, 59, 'keep at least 40 diff columns');
+  await mouse(0, 300, 40, false);
+  assert.equal(c.render(64, 16).filePaneWidth, 23, 'clamp to a narrowed terminal');
+  assert.equal(c.render(100, 24).filePaneWidth, 59, 'restore requested width when space returns');
+
+  const stalePress = c.capture({ type: 'mouse', button: 0, x: 60, y: 4, down: true });
+  await c.handle(stalePress);
+  assert.equal(c.state.resizing, true);
+  c.render(64, 16);
+  assert.equal(c.state.resizing, false, 'terminal resize cancels an active gesture');
+  await c.handle(stalePress);
+  assert.equal(c.state.resizing, false, 'an old hit must not restart a drag on source text');
+  await mouse(32, 45, 4);
+  assert.equal(c.render(100, 24).filePaneWidth, 59);
+});
+
+test('wheel scrolls the viewport immediately rather than walking selection to its edge', async (t) => {
+  const snapshot = structuredClone(fixture);
+  snapshot.files[0].rows = Array.from({ length: 100 }, (_, i) => ({ kind: 'add', text: `line ${i}`, newLine: i + 1 }));
+  const { c } = await harness(t, { loadSnapshot: async () => snapshot });
+  let rendered = c.render(100, 24);
+  const hit = rendered.hits.find((h) => h.type === 'row');
+  await c.handle(c.capture({ type: 'mouse', down: true, button: 65, x: 50, y: hit.y }));
+  rendered = c.render(100, 24);
+  assert.equal(rendered.viewTop, 3);
+  await c.handle(c.capture({ type: 'mouse', down: true, button: 64, x: 50, y: hit.y }));
+  assert.equal(c.render(100, 24).viewTop, 0);
+});
+
+test('brackets navigate hunks across files and wrap without treating editor text as commands', async (t) => {
+  const snapshot = structuredClone(fixture);
+  snapshot.files[0].rows.push({ kind: 'hunk', text: '@@ -30 +30 @@' }, { kind: 'add', text: 'later', newLine: 30 });
+  const { c } = await harness(t, { loadSnapshot: async () => snapshot });
+  await c.handle(text(']'));
+  assert.equal(c.state.rowIndex, 2);
+  assert.equal(c.state.focus, 'diff');
+  await c.handle(text(']'));
+  assert.equal(c.state.fileIndex, 1);
+  assert.equal(c.state.rowIndex, 0);
+  await c.handle(text('['));
+  assert.equal(c.state.fileIndex, 0);
+  assert.equal(c.state.rowIndex, 2);
+  await c.handle(text(']')); await c.handle(text(']'));
+  assert.equal(c.state.fileIndex, 0);
+  assert.equal(c.state.rowIndex, 0);
+  c.state.rowIndex = 1;
+  await c.handle(key('enter'));
+  await c.handle(text('[')); await c.handle(text(']'));
+  assert.equal(c.state.editor.text, '[]');
+});
+
+test('copy mode releases mouse capture and ignores review commands until m resumes', async (t) => {
+  const capture = [];
+  const { c } = await harness(t, { onMouseCapture: (enabled) => capture.push(enabled) });
+  await c.handle(text('m'));
+  assert.equal(c.state.copyMode, true);
+  assert.deepEqual(capture, [false]);
+  assert.ok(c.render(100, 24).lines.some((line) => line.includes('COPY MODE')));
+  await c.handle(text(']')); await c.handle(text('s'));
+  assert.equal(c.state.mode, 'review');
+  assert.equal(c.state.rowIndex, 0);
+  await c.handle(text('m'));
+  assert.equal(c.state.copyMode, false);
+  assert.deepEqual(capture, [false, true]);
+});
+
 test('sent notes persist, are not resent, and editing creates only one new unsent revision', async (t) => {
   const h = await harness(t);
   const c = h.c;
@@ -110,6 +201,42 @@ test('sent notes persist, are not resent, and editing creates only one new unsen
   assert.ok(restored.state.comments.every((comment) => comment.sentAt > 0));
   await restored.handle(text('s'));
   assert.equal(h.attempts.length, 2);
+});
+
+test('save then send replaces the stale saved status and offers working mouse confirmation', async (t) => {
+  const { c, attempts } = await harness(t);
+  await add(c);
+  assert.match(c.state.status, /saved as unsent/);
+  await c.enqueue(() => c.handle(text('s')));
+  const rendered = c.render(100, 24);
+  assert.equal(c.state.mode, 'confirm');
+  assert.ok(!rendered.lines.at(-1).includes('saved as unsent'), 'do not leave the old save message below a modal that ignores navigation');
+  const send = rendered.hits.find((hit) => hit.type === 'confirmSend');
+  assert.ok(send, 'confirmation must have a working mouse action, not an inert Send footer');
+  await click(c, send);
+  assert.equal(attempts.length, 1);
+  assert.equal(c.state.mode, 'review');
+  assert.ok(c.state.comments[0].sentAt);
+});
+
+test('send confirmation can be cancelled by mouse or Escape, and q still closes', async (t) => {
+  const { c, attempts } = await harness(t);
+  await add(c);
+  await c.handle(text('s'));
+  await click(c, c.render(100, 24).hits.find((hit) => hit.type === 'confirmCancel'));
+  assert.equal(c.state.mode, 'review');
+  assert.match(c.state.status, /cancelled/);
+  await c.handle(key('up'));
+  assert.equal(c.state.rowIndex, 0, 'normal navigation resumes after cancelling');
+  await c.handle(text('s'));
+  await c.handle(key('escape'));
+  assert.equal(c.state.mode, 'review');
+  await c.handle(text('s'));
+  await c.handle(text('q'));
+  assert.equal(c.stopped, true);
+  assert.equal(attempts.length, 0);
+  assert.equal(c.state.comments.length, 1);
+  assert.equal(c.state.comments[0].sentAt, undefined);
 });
 
 test('failed submissions keep unsent notes and retry the same immutable batch', async (t) => {

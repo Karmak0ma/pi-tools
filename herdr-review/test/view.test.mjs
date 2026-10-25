@@ -18,6 +18,24 @@ test("anchors use old path/line for deletions and new path/line for additions", 
   assert.equal(historical.tipCommit, 'c'.repeat(40));
 });
 
+test("custom file widths clamp safely and keep the inline editor inside the viewport", () => {
+  for (const width of [64, 100, 160]) {
+    for (const requested of [1, 45, 1000]) {
+      const state = { snapshot: { root: "/repo", files: [file] }, comments: [], mode: "edit",
+        fileIndex: 0, rowIndex: 2, filePaneWidth: requested, horizontal: 0, focus: "diff",
+        editor: { anchor: anchor(file, file.rows[2]), text: "draft" } };
+      const rendered = frame(state, width, 24);
+      assert.ok(rendered.filePaneWidth >= 20);
+      assert.ok(width - rendered.filePaneWidth - 1 >= 40);
+      assert.ok(rendered.hits.some((hit) => hit.type === "editorSave"));
+      for (const line of rendered.lines) {
+        const visible = line.replace(/\x1b\[[0-9;]*m/g, "");
+        assert.equal([...visible].length, width);
+      }
+    }
+  }
+});
+
 test("comments become outdated without changing their source anchor", () => {
   const c = { ...anchor(file, file.rows[2]), text: "Check this." };
   const [outdated] = updateOutdated([c], { files: [{ ...file, revision: "b".repeat(64) }] });
@@ -86,7 +104,7 @@ test('the editor stays inline with its source and preserves host cursor markers'
   }
 });
 
-test('source backgrounds survive keyboard selection and hover has a separate neutral highlight', () => {
+test('source backgrounds survive keyboard selection and hover', () => {
   const state = { snapshot: { root: '/repo', files: [file] }, comments: [], mode: 'review', fileIndex: 0, rowIndex: 1, horizontal: 0, focus: 'diff' };
   const rendered = frame(state, 100, 24);
   const deleted = rendered.hits.find((h) => h.type === 'row' && h.index === 1);
@@ -95,7 +113,28 @@ test('source backgrounds survive keyboard selection and hover has a separate neu
   assert.ok(rendered.lines[added.y - 1].includes('\x1b[48;2;21;52;32m'));
   assert.ok(!rendered.lines[deleted.y - 1].split('│')[1].includes('\x1b[7m'));
   state.pointer = { x: 50, y: added.y };
-  assert.ok(frame(state, 100, 24).lines[added.y - 1].includes('\x1b[48;2;57;64;71m'));
+  assert.ok(frame(state, 100, 24).lines[added.y - 1].includes('\x1b[48;2;21;52;32m'));
+});
+
+test('cursor emphasis follows rows and stays visible while panning without changing hit columns', () => {
+  const rows = [...file.rows, { kind: 'context', text: 'unchanged', oldLine: 42, newLine: 42 }];
+  const state = { snapshot: { root: '/repo', files: [{ ...file, rows }] }, comments: [], mode: 'review', fileIndex: 0, rowIndex: 0, horizontal: 200, focus: 'diff' };
+  const colors = ['57;73;96', '112;48;56', '43;92;54', '57;73;96'];
+  for (let index = 0; index < rows.length; index++) {
+    state.rowIndex = index;
+    const rendered = frame(state, 100, 24);
+    for (const hit of rendered.hits.filter((h) => h.type === 'row')) {
+      const right = rendered.lines[hit.y - 1].split('│')[1];
+      assert.equal(right.includes('> '), hit.index === index);
+      if (hit.index === index) {
+        assert.ok(right.includes(`\x1b[48;2;${colors[index]}m`));
+        assert.ok(right.includes('\x1b[1m'));
+      }
+    }
+    assert.equal(rendered.hits.find((h) => h.type === 'add').x1, 97);
+  }
+  state.focus = 'files';
+  assert.ok(!frame(state, 100, 24).lines.some((line) => line.includes('> ')));
 });
 
 test("source text cannot emit terminal controls; wide characters keep bounded width", () => {
