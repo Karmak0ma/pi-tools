@@ -40,6 +40,8 @@ ${selectionRules(runtime.config)}
 - Protected tool output (configured protected tools and file patterns) does not need to be described in your summary or avoided: pi-dcp automatically appends it to the block verbatim, so it survives compression even if your prose omits it.
 
 Summary quality
+- Every new call must include a full, model-authored summary for each range. pi-dcp does not generate summaries automatically.
+- After a successful call, pi-dcp removes summary arguments from that historical call in the context shown to you, because the text is already in the compressed block. A past successful call without summary arguments is a shortened history record, not a valid example for a new call.
 - Write an exhaustive technical summary: decisions, constraints, exact paths, findings, verification evidence.
 - Preserve user intent; quote short user messages verbatim when they carry the intent.
 - Keep the summary lean: no preamble, no restating the obvious.
