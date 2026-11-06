@@ -12,7 +12,9 @@ import { deepFreeze } from "../../src/util/clone.ts";
  * behavior change, and say which change in the commit message; never update it
  * just to make an optimization pass.
  */
-const GOLDEN_OUTPUT_SHA256 = "881fc7b91d2971d3c8cd31da995adffab6632e5b3f538d0bc53c846e6d608b7e";
+// Updated 2026-11-06: tool-call units are labelled on their tool result, not
+// inside the assistant turn (plain-text tool-call incident, labels.ts).
+const GOLDEN_OUTPUT_SHA256 = "bb9fbbd844b87d0d59f0cb3c49fbd4d3019ba0eef0a3aaee1584471ee2e635b7";
 
 /**
  * Coarse guard against a large regression, not a performance target. The

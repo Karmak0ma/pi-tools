@@ -28,8 +28,10 @@ describe("inline message labels", () => {
     // absorbs protected tool content into compression summaries instead of
     // rejecting/blocking the unit that contains it (see
     // compression/protected.ts). It gets its own ordinary alias like any
-    // other settled unit.
-    expect(JSON.stringify(assistant)).toContain("m0003");
+    // other settled unit. The label sits on the tool result, not in the
+    // assistant turn (2026-11-06 plain-text tool-call incident).
+    expect(JSON.stringify(assistant)).not.toContain("m0003");
+    expect(JSON.stringify(result.messages.find((message) => message.role === "toolResult"))).toContain("m0003");
     expect(result.messages.some((message) => JSON.stringify(message).includes("BLOCKED"))).toBe(false);
     expect(JSON.stringify(result.messages[1])).toContain("m0002");
   });

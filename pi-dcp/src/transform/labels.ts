@@ -114,7 +114,23 @@ export function injectInlineLabels(
     // label: the model cannot reference content it cannot see, and the unit
     // still keeps its ordinal, because unitAlias() is positional - nothing is
     // renumbered and every other label stays byte-identical.
-    const offset = group.findIndex((message) => hasProviderVisibleContent(message));
+    //
+    // A tool-call unit is labelled on its first visible tool result, never
+    // inside the assistant message. Injecting a text block into the model's own
+    // tool-call turn (thinking -> text(tag) -> tool_use) taught
+    // claude-sonnet-5-5 to write tool calls as plain-text XML: in the
+    // 2026-11-06 reproduction the old placement leaked at call 10 and ran to
+    // max_tokens, while this placement made 49 clean calls up to 253k context.
+    // Assistant tool-call turns therefore reach the provider exactly as the
+    // model produced them. The anchor is presentation only, because aliases are
+    // positional (unitAlias). A unit with no visible tool result yet (unsettled)
+    // falls back to its first visible message.
+    const head = group[0];
+    const isToolCallUnit = head?.role === "assistant" && head.content.some((part) => part.type === "toolCall");
+    const resultOffset = isToolCallUnit
+      ? group.findIndex((message) => message.role === "toolResult" && hasProviderVisibleContent(message))
+      : -1;
+    const offset = resultOffset >= 0 ? resultOffset : group.findIndex((message) => hasProviderVisibleContent(message));
     if (offset >= 0) output[cursor + offset] = appendLabel(group[offset], tag);
     cursor = end;
   }
@@ -146,6 +162,10 @@ function appendLabel(message: AgentMessage, tag: string): AgentMessage {
     // its own. Inserting before the first tool call keeps the natural shape
     // Claude itself produces (thinking, then text, then tool_use last) and
     // leaves thinking signatures and tool call JSON untouched.
+    // Since the 2026-11-06 plain-text tool-call incident this branch is only a
+    // fallback for tool-call turns: injectInlineLabels anchors a tool-call unit
+    // on its tool result, so a synthesized block here appears only while the
+    // unit has no visible tool result yet.
     const part = { type: "text", text: suffix };
     const firstToolCall = next.content.findIndex((item: any) => item.type === "toolCall");
     next.content = firstToolCall >= 0

@@ -81,35 +81,56 @@ describe("label placement never ends an assistant turn with text", () => {
    * with tool calls and no text of its own) could hit it, which is why the
    * failure always appeared right after a tool call.
    */
-  it("inserts the label before the first tool call when the turn has no text", () => {
+  it("labels a settled tool call on its tool result and leaves the assistant turn untouched", () => {
+    // 2026-11-06 plain-text tool-call incident: a synthesized text(tag) block
+    // inside the model's own tool-call turn led claude-sonnet-5-5 to continue
+    // that pattern and write tool calls as plain-text XML. The assistant turn
+    // must reach the provider byte-for-byte as the model produced it; the
+    // unit label lives on the first tool result instead.
+    const thinking = { type: "thinking", thinking: "quiet", thinkingSignature: "sig" };
+    const toolCall = { type: "toolCall", id: "t1", name: "bash", arguments: {} };
     const messages: AgentMessage[] = [
       { role: "user", content: "go", timestamp: 1 },
-      { role: "assistant", content: [{ type: "thinking", thinking: "quiet", thinkingSignature: "sig" }, { type: "toolCall", id: "t1", name: "bash", arguments: {} }], timestamp: 2 } as any,
+      { role: "assistant", content: [thinking, toolCall], timestamp: 2 } as any,
       { role: "toolResult", toolCallId: "t1", toolName: "bash", content: [{ type: "text", text: "out" }], timestamp: 3 } as any,
     ];
 
-    const assistant = harness(messages).messages[1] as any;
+    const result = harness(messages).messages as any[];
 
-    expect(assistant.content.map((part: any) => part.type)).toEqual(["thinking", "text", "toolCall"]);
-    // The invariant that matters to the provider: tool_use stays last.
-    expect(assistant.content.at(-1).type).toBe("toolCall");
-    expect(assistant.content[1].text).toContain(LABEL_TAG_NAME);
-    // Thinking must stay first and keep its signature intact.
-    expect(assistant.content[0]).toEqual({ type: "thinking", thinking: "quiet", thinkingSignature: "sig" });
+    expect(result[1].content).toEqual([thinking, toolCall]);
+    expect(serialized(result[2])).toContain(LABEL_TAG_NAME);
   });
 
-  it("still extends an existing text block rather than adding another", () => {
+  it("does not extend the turn's own text when the tool call has a result", () => {
+    // Same incident: appending the tag to the model's own text would still put
+    // markup inside a tool-call turn, so existing text stays untouched too.
     const messages: AgentMessage[] = [
       { role: "user", content: "go", timestamp: 1 },
       { role: "assistant", content: [{ type: "text", text: "working" }, { type: "toolCall", id: "t1", name: "bash", arguments: {} }], timestamp: 2 } as any,
       { role: "toolResult", toolCallId: "t1", toolName: "bash", content: [{ type: "text", text: "out" }], timestamp: 3 } as any,
     ];
 
+    const result = harness(messages).messages as any[];
+
+    expect(result[1].content[0].text).toBe("working");
+    expect(serialized(result[2])).toContain(LABEL_TAG_NAME);
+  });
+
+  it("falls back to a label before the first tool call while no tool result exists", () => {
+    // Fallback path only (unsettled unit). The synthesized text must not end
+    // the turn: see the 2026-08-19 prefill incident described above.
+    const messages: AgentMessage[] = [
+      { role: "user", content: "go", timestamp: 1 },
+      { role: "assistant", content: [{ type: "thinking", thinking: "quiet", thinkingSignature: "sig" }, { type: "toolCall", id: "t1", name: "bash", arguments: {} }], timestamp: 2 } as any,
+      { role: "user", content: "next", timestamp: 3 },
+    ];
+
     const assistant = harness(messages).messages[1] as any;
 
-    expect(assistant.content.map((part: any) => part.type)).toEqual(["text", "toolCall"]);
-    expect(assistant.content[0].text).toContain("working");
-    expect(assistant.content[0].text).toContain(LABEL_TAG_NAME);
+    expect(assistant.content.map((part: any) => part.type)).toEqual(["thinking", "text", "toolCall"]);
+    expect(assistant.content[1].text).toContain(LABEL_TAG_NAME);
+    // Thinking must stay first and keep its signature intact.
+    expect(assistant.content[0]).toEqual({ type: "thinking", thinking: "quiet", thinkingSignature: "sig" });
   });
 
   it("appends at the end only when the turn has no tool calls at all", () => {

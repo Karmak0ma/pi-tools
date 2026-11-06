@@ -21,7 +21,9 @@
  * pi-dcp hit this by appending its <pi-dcp-message-id> label as a trailing text
  * part on assistant turns that had no text of their own - i.e. silent tool
  * calls. Fixed in src/transform/labels.ts by inserting the label before the
- * first tool call so tool_use stays last.
+ * first tool call so tool_use stays last. Since the 2026-11-06 plain-text
+ * tool-call incident, a tool-call unit is labelled on its tool result instead,
+ * and the insert-before-tool-call path is only a fallback for unsettled units.
  *
  * Usage:
  *   1. PI_CLAUDE_CODE_USE_DEBUG_LOG=/tmp/dcp-payloads.log pi -e <path-to>/pi-dcp/src/index.ts

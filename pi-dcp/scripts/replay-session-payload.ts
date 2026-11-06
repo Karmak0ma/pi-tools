@@ -15,6 +15,10 @@ import { stream } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { transformOutgoingContext } from "../src/transform/pipeline.ts";
 import { reconstructFromBranch } from "../src/state/reconstruct.ts";
 import { defaults } from "../src/config/defaults.ts";
+// Since the Pi 0.87 migration (a9e0c503) the pipeline reads the session through
+// sessionManager.buildSessionProjection(). Reuse the test suite's host mock so
+// this script cannot drift from the surface the tests certify again.
+import { currentHostSessionManager } from "../test/helpers/current-host.ts";
 
 const file = process.argv[2];
 if (!file) {
@@ -38,7 +42,7 @@ const model: any = {
 const ctx: any = {
   cwd: "/tmp", model,
   getContextUsage: () => ({ tokens: null, contextWindow: 200_000 }),
-  sessionManager: { buildContextEntries: () => contextEntries, getLeafId: () => contextEntries.at(-1)?.id ?? null },
+  sessionManager: currentHostSessionManager(contextEntries),
 };
 
 function report(label: string, list: any[]) {
@@ -72,6 +76,13 @@ const result = transformOutgoingContext(messages, {
   ctx, sessionId: "replay", generation: 1, state: rebuilt.state, config: structuredClone(defaults) as any,
 });
 console.log(`transform changed=${result.changed} reason=${result.reason} blocks=${rebuilt.state.blocks.size}`);
+// A pipeline fallback returns the input unchanged by design (the live request
+// must still go out). Here that would print a "WITH pi-dcp" payload that is
+// really the payload without pi-dcp, which once hid a broken mock. Fail loudly.
+if (result.reason) {
+  console.error(`pi-dcp fell back to raw context (${result.reason}); the WITH pi-dcp payload would be meaningless.`);
+  process.exit(1);
+}
 
 await report("WITHOUT pi-dcp", messages);
 await report("WITH pi-dcp", result.messages as any[]);
