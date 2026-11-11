@@ -316,12 +316,17 @@ cancels a 30-second startup-activity deadline:
   interrupted task becomes `closed`, an errored task becomes `failed`, and an
   otherwise active task becomes `closed`; a dead pane is never reported as a
   successful completion.
-- Parent cancellation (or the inspector's `x`) closes the pane and resolves
-  the task as `closed` (shown as aborted by the compatibility UI status).
-  Escape pressed inside the child pane is different: it interrupts only the
-  current child turn and is non-terminal.
-- Session shutdown closes every Herdr child pane, so no child process
-  outlives its parent session.
+- Parent cancellation (or the inspector's `x`) detaches the monitor and
+  resolves the task as `closed` (shown as aborted by the compatibility UI
+  status); it never closes an already-started pane. Escape pressed inside the
+  child pane is different: it interrupts only the current child turn and is
+  non-terminal, so the pane remains available for manual correction.
+- Herdr panes are user-owned after startup. Normal completion, child errors,
+  parent cancellation, direct abort, and session shutdown leave the pane open.
+  The only post-startup close is safety cleanup after a startup-activity or
+  completion/error fallback timeout, when the child may still be running but
+  the parent can no longer confirm its state. Startup command failures also
+  close their incomplete pane.
 
 The RPC runner stays the fallback outside Herdr and keeps its existing
 process/turn protocol. Both backends now expose the same explicit delegated

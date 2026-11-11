@@ -522,7 +522,7 @@ describe("HerdrBackend interruption semantics", () => {
     expect(result.finalOutput).toBe("completed after guidance");
   });
 
-  it("terminates an interrupted task when the parent explicitly cancels it", async () => {
+  it("keeps an interrupted pane open when the parent explicitly cancels it", async () => {
     const fake = new FakeHerdr();
     const events: any[] = [];
     const handle = await makeBackend(fake).spawn(makeSpec({
@@ -537,7 +537,31 @@ describe("HerdrBackend interruption semantics", () => {
 
     expect(result.lifecycle).toBe("closed");
     expect(result.stopReason).toBe("aborted");
-    expect(fake.closedPanes).toHaveLength(1);
+    expect(fake.closedPanes).toEqual([]);
+  });
+
+  it("leaves an interrupted pane open when the parent tool signal is cancelled", async () => {
+    const fake = new FakeHerdr();
+    const controller = new AbortController();
+    const events: any[] = [];
+    const handle = await makeBackend(fake).spawn(makeSpec({
+      agentPrompt: "",
+      signal: controller.signal,
+      onEvent: (event) => events.push(event),
+    }));
+    appendAssistant(sessionDirOf(fake), { content: [], stopReason: "aborted" });
+    await until(() => events.some((event) => event.type === "subagent_turn_aborted"));
+
+    controller.abort();
+    const result = await handle.result;
+
+    expect(result.lifecycle).toBe("closed");
+    expect(result.stopReason).toBe("aborted");
+    expect(fake.closedPanes).toEqual([]);
+
+    // A second abort is also a detach, not a hidden pane-close command.
+    handle.control!.abort();
+    expect(fake.closedPanes).toEqual([]);
   });
 
   it("does not leave the parent pending forever when a steering command fails", async () => {
@@ -556,7 +580,6 @@ describe("HerdrBackend interruption semantics", () => {
   it("resolves aborted — never completed — when the parent aborts a running child", async () => {
     const fake = new FakeHerdr();
     const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
-    const paneId = fake.started[0].paneId;
 
     handle.control!.abort();
     const result = await handle.result;
@@ -564,26 +587,13 @@ describe("HerdrBackend interruption semantics", () => {
     expect(result.lifecycle).toBe("closed");
     expect(result.stopReason).toBe("aborted");
     expect(result.exitCode).toBe(0);
-    expect(fake.closedPanes).toContain(paneId);
+    expect(fake.closedPanes).toEqual([]);
     // Watcher stopped: no pane polling after settle.
     const calls = fake.paneGetCalls;
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(fake.paneGetCalls).toBe(calls);
   });
 
-  it("still resolves aborted when the pane close itself fails", async () => {
-    const fake = new FakeHerdr();
-    const handle = await makeBackend(fake).spawn(makeSpec({ agentPrompt: "" }));
-    fake.failPaneClose = true;
-
-    handle.control!.abort();
-    const result = await handle.result;
-
-    // paneClose reported an error, but the poll loop observes the pane as
-    // gone; either way a parent-requested close is an abort, not a success.
-    expect(result.lifecycle).toBe("closed");
-    expect(result.stopReason).toBe("aborted");
-  });
 });
 
 // ─── Completion after a "stop" turn ─────────────────────────────────────────
@@ -794,7 +804,7 @@ describe("HerdrBackend failure handling", () => {
     expect(fake.prompts).toEqual([]);
   });
 
-  it("aborts when the tool signal fires while agent start is in flight", async () => {
+  it("leaves the pane open when the tool signal fires while agent start is in flight", async () => {
     const fake = new FakeHerdr();
     const controller = new AbortController();
     fake.onAgentStart = () => controller.abort();
@@ -802,10 +812,11 @@ describe("HerdrBackend failure handling", () => {
     await expect(makeBackend(fake).spawn(makeSpec({ agentPrompt: "", signal: controller.signal })))
       .rejects.toThrow("aborted during startup");
 
-    // The pane was created before the abort landed; cleanup must close it.
+    // The pane was created before the abort landed; cancellation is not a
+    // startup failure, so the always-open policy leaves it available.
     expect(fake.splits).toHaveLength(1);
     expect(fake.started).toHaveLength(1);
-    expect(fake.closedPanes).toHaveLength(1);
+    expect(fake.closedPanes).toEqual([]);
     expect(fake.prompts).toEqual([]);
   });
 
@@ -823,7 +834,7 @@ describe("HerdrBackend failure handling", () => {
     expect(result.model).toBe("provider/only-model");
   });
 
-  it("aborts during startup without leaving a pane behind", async () => {
+  it("leaves a pane open when already aborted during startup", async () => {
     const fake = new FakeHerdr();
     const controller = new AbortController();
     controller.abort(); // tool call aborted while spawn is in flight
@@ -832,7 +843,7 @@ describe("HerdrBackend failure handling", () => {
       .rejects.toThrow("aborted during startup");
     expect(fake.splits).toHaveLength(1); // the split raced the abort
     expect(fake.started).toEqual([]);
-    expect(fake.closedPanes).toHaveLength(1);
+    expect(fake.closedPanes).toEqual([]);
   });
 
   it("uses a down split for narrow parents and the first-task hint for wide ones", async () => {

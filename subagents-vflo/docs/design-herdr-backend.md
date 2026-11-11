@@ -69,9 +69,12 @@ through that capability rather than calling `spawn` unconditionally:
 
 A rejected reuse prompt does not run new-pane startup cleanup: the existing
 pane may contain user work. Once accepted, the ordinary monitor rules still
-apply, including parent cancellation closing the active pane and fallback
-settlement closing a child whose idle state could not be confirmed. A later
-continuation can then restore the saved successful history in a replacement.
+apply. Parent cancellation detaches the active monitor and leaves the pane
+open, whether or not its current turn was interrupted with Escape. Normal
+completion, direct abort, and session shutdown also leave an already-started
+pane open. Fallback settlement still closes a child whose idle state could not
+be confirmed. A later continuation can then restore the saved successful
+history in a replacement.
 Herdr does not offer an atomic reservation against human terminal input, so
 the user must not submit manual work while the parent submits a follow-up.
 The default RPC backend has no live capability and continues through a private
@@ -151,7 +154,9 @@ The authoritative observation surface for task completion remains the child's
    - last was `aborted` → `closed` (interrupted, then pane closed)
    - last was `error` → `failed`
    - nothing/mid-turn → `closed` ("pane closed before completing")
-   - parent-requested close (`control.abort()`) → `closed`, never success
+   - explicit parent-requested abort (`control.abort()`) → `closed`, never
+     success; the monitor detaches without closing the already-started pane.
+     Parent tool-signal cancellation follows the same rule.
 4. Fallback settle closes the pane. When a fallback timer (step 2) settles
    the task, Herdr never confirmed that the child is idle, so the child may
    still be running. The backend settles with the pending outcome first,
@@ -207,8 +212,8 @@ classification.
 | Parent API        | Default backend              | Herdr backend                          |
 | ----------------- | ---------------------------- | -------------------------------------- |
 | `sendMessage`     | RPC `prompt` over stdin      | `herdr agent prompt <name> <text>`     |
-| `abort`           | RPC `abort` / SIGTERM        | `herdr pane close` (kills the child)   |
-| killAll           | SIGTERM → SIGKILL            | `herdr pane close` for every controlled instance |
+| `abort`           | RPC `abort` / SIGTERM        | Detach the monitor; keep the already-started pane open |
+| killAll           | SIGTERM → SIGKILL            | Detach Herdr monitors; keep panes open |
 
 ## Verifying against reality
 

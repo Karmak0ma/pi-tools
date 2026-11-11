@@ -33,7 +33,14 @@ function fakeBackend(live = false) {
       );
       children.push({
         spec,
-        finish: (output, sessionFile, sessionBytes) => resolveResult({ ...base, lifecycle: "completed", finalOutput: output, stopReason: "stop", sessionFile, sessionBytes }),
+        finish: (output, sessionFile, sessionBytes) => resolveResult({
+          ...base,
+          lifecycle: "completed",
+          finalOutput: output,
+          stopReason: "stop",
+          sessionFile,
+          sessionBytes,
+        }),
       });
       return { result, control: { sendMessage: async () => {}, abort: () => {} }, resume: live ? resume : undefined };
     },

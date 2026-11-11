@@ -31,6 +31,7 @@ export interface SubagentProcessControl {
  * Abort flows through control (which cancels pending dialogs first); a child
  * without control is signalled directly. SIGTERM escalates to SIGKILL after
  * 5s so shutdown always terminates, and `done` fires exactly once.
+ * Herdr controls detach observation without closing their user-owned pane.
  */
 function killChildProcess(proc: ChildProcess, control: SubagentProcessControl | undefined, done: () => void): void {
   let exited = false;
@@ -125,10 +126,9 @@ export class SubagentTracker {
   killAll(): Promise<void> {
     // Shut down every live child during session cleanup, including children
     // that are between an agent-settled event and their RPC process close.
-    // RPC children are killed only while their process is live; pane-hosted
-    // children (Herdr) have no process handle — the child lives in its pane
-    // even after the task settles, so pane close applies whenever control
-    // exists.
+    // RPC children are killed only while their process is live. Herdr controls
+    // detach the parent observation but deliberately leave the interactive
+    // pane open; Herdr pane closure is owned by startup/fallback safety paths.
     const liveInstances = Array.from(this.instances.values()).filter(
       (i) => (i.process ? i.process.exitCode === null : !!i.control),
     );
@@ -141,9 +141,9 @@ export class SubagentTracker {
       for (const instance of liveInstances) {
         const proc = instance.process;
         if (!proc) {
-          // Pane-hosted child (Herdr): abort closes the pane, killing the
-          // child. Fire-and-forget — the Herdr server completes the close
-          // even if this process exits right after.
+          // Pane-hosted child (Herdr): abort detaches observation without
+          // closing the user-owned pane. Fire-and-forget because Herdr does
+          // not expose a process handle to await here.
           instance.control?.abort();
           done();
           continue;

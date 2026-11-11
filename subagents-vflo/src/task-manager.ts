@@ -245,8 +245,9 @@ export class SubagentTaskManager {
 
   /**
    * Abort queued or running tasks. A queued task never spawns; a running
-   * task's backend kills it (RPC process / Herdr pane) and its result
-   * settles as aborted. Unknown or already finished ids are ignored.
+   * task's backend detaches the request and settles it as aborted. The Herdr
+   * backend keeps an already-started pane open for the user. Unknown or
+   * already finished ids are ignored.
    */
   cancel(ids: string[]): void {
     for (const id of ids) {
@@ -592,7 +593,10 @@ class Semaphore {
  * Release a child's runtime handles once its backend result has settled:
  * cancel any dialog still queued for it and drop the steering references.
  */
-function releaseChildRuntime(broker: ChildExtensionUIBroker, instance: RuntimeSubagentInstance): void {
+function releaseChildRuntime(
+  broker: ChildExtensionUIBroker,
+  instance: RuntimeSubagentInstance,
+): void {
   broker.cancelOwner(instance.id, "exit");
   instance.activeToolCalls.clear();
   instance.pendingUIRequestCount = 0;

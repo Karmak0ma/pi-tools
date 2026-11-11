@@ -28,7 +28,10 @@
  *   an interrupted task becomes `closed` (with cancellation text), an
  *   errored task becomes `failed`, and an otherwise active task becomes
  *   `closed`. A dead pane is never a successful completion.
- * - Parent abort (control.abort) closes the pane and resolves as `closed`.
+ * - Parent abort, direct control abort, and session cleanup detach the parent
+ *   from an already-started child and resolve as `closed`; they never close the
+ *   user-visible pane. Only startup failures and startup/fallback timeout
+ *   safety cleanup close a pane.
  * - An errored turn (stopReason "error") works like "stop": it only makes
  *   FAILURE pending. Pi retries transient provider errors inside the same
  *   run (it writes a `context_edit` entry, waits with backoff, then asks the
@@ -398,6 +401,8 @@ class HerdrChildMonitor {
           throw error;
         }
       },
+      // Every post-startup abort detaches this request without destroying the
+      // interactive pane. Pane closure is reserved for startup/fallback safety.
       abort: () => this.abort(),
     };
   }
@@ -420,17 +425,18 @@ class HerdrChildMonitor {
 
   private readonly onAbort = () => this.abort();
 
-  /** Parent-requested abort: close the pane (killing the child) and settle. */
+  /**
+   * Detach the parent from the child without closing an already-started pane.
+   *
+   * Herdr panes are interactive user surfaces. A parent signal, inspector
+   * abort, or session cleanup ends this request's observation, but it must not
+   * destroy the pane. Startup cleanup and fallback safety cleanup are the only
+   * normal paths that call paneClose.
+   */
   private abort(): void {
-    if (this.abortedByParent || this.settled) return;
+    if (this.settled || this.abortedByParent) return;
     this.abortedByParent = true;
-    void this.cli
-      .paneClose(this.paneId)
-      .then(() => this.settle(this.buildDeathResult()))
-      .catch(() => {
-        // The pane may already be gone or the server unreachable; the poll
-        // loop observes the death either way and settles the same result.
-      });
+    this.settle(this.buildDeathResult());
   }
 
   private settle(value: ChildRunResult): void {
@@ -574,7 +580,7 @@ class HerdrChildMonitor {
 
   /**
    * Terminal result for a pane that is gone. Death is classified by the last
-   * session state, never reported as success: a parent-requested close or a
+   * session state, never reported as success: a parent-requested abort or a
    * user interrupt is closed, an errored task fails, and other death is closed.
    */
   private buildDeathResult(): ChildRunResult {
@@ -1063,9 +1069,15 @@ async function spawnSubagentInHerdr(
       initialOffsets: continued ? new Map([[continued.sessionFile, continued.historyBytes]]) : undefined,
     });
   } catch (error) {
-    // Startup failure: close the pane (may not exist yet) and drop the prompt
-    // file, then surface the real error. This must never become a completion.
-    if (paneId) {
+    // Startup failures close the pane (which may not exist yet) and drop the
+    // prompt file, then surface the real error. A parent cancellation during
+    // startup is not a startup failure: preserve the pane under the same
+    // always-open policy used after startup.
+    const parentCancelledDuringStartup =
+      spec.signal?.aborted
+      && error instanceof Error
+      && error.message === "Subagent aborted during startup";
+    if (paneId && !parentCancelledDuringStartup) {
       try { await cli.paneClose(paneId); } catch { /* best effort */ }
     }
     if (promptFilePath) {
