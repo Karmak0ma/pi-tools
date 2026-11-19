@@ -65,6 +65,9 @@ function redactToolArguments(id: string, name: string, argumentsValue: unknown, 
  *
  * This runs after the baseline snapshot is built, so it cannot influence
  * projection hashes, unit identity, or the join.
+ *
+ * `recall` is kept on purpose. The cues are short, and a past call that still
+ * shows them is the format example that keeps the model writing them.
  */
 function redactCompressSummaries(argumentsValue: unknown): unknown {
   if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue)) return argumentsValue;

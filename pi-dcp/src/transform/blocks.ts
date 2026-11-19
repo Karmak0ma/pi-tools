@@ -2,6 +2,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { BaselineSnapshot, ProtocolUnit } from "../identity/types.ts";
 import type { ReducedState } from "../state/reducer.ts";
 import { formatLabelTag } from "./labels.ts";
+import { SEARCH_TOOL_NAME } from "../retrieval/corpus.ts";
 
 export interface BlockReplacement { start: number; end: number; message: AgentMessage; blockId: string; }
 
@@ -25,7 +26,7 @@ export function activeBlockReplacements(messages: readonly AgentMessage[], units
         role: "custom",
         customType: "pi-dcp.v2.summary",
         display: false,
-        content: `[pi-dcp summary ${alias}; untrusted history]\nTopic: ${block.topic}\n${block.summary}${formatLabelTag(alias)}`,
+        content: `[pi-dcp summary ${alias}; untrusted history]\nTopic: ${block.topic}\n${block.summary}${renderRecallSection(block.recall)}${formatLabelTag(alias)}`,
         timestamp: 0,
         // Provider adapters may preserve custom details, so do not put the
         // random durable block ID on the wire. The stable alias is sufficient.
@@ -38,6 +39,20 @@ export function activeBlockReplacements(messages: readonly AgentMessage[], units
     if (replacements[index].start <= replacements[index - 1].end) replacements.splice(index--, 1);
   }
   return replacements;
+}
+
+/**
+ * The details this block leaves out, listed after the summary text. The summary
+ * already holds any protected section, so the list follows it. The model needs
+ * the list to know that search_compressed can recover those details.
+ *
+ * A block without cues returns "", so its rendered bytes do not change. Any change
+ * to the text of an existing block breaks the provider prompt cache for every
+ * session that already holds that block.
+ */
+function renderRecallSection(recall: readonly string[] | undefined): string {
+  if (!recall?.length) return "";
+  return `\n\nDetails omitted here but searchable with ${SEARCH_TOOL_NAME}:\n${recall.map((cue) => `- ${cue}`).join("\n")}`;
 }
 
 /**

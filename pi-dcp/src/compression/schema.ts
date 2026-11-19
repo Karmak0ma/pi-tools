@@ -1,4 +1,5 @@
 import { Type, type Static } from "typebox";
+import { isRecallCues, MAX_RECALL_CUE_CHARS, MAX_RECALL_CUES } from "../state/operations.ts";
 
 /** Version-2 is intentionally free of model-echoed snapshot credentials. */
 export const CompressionParametersV2 = Type.Object({
@@ -9,6 +10,12 @@ export const CompressionParametersV2 = Type.Object({
     startId: Type.String({ pattern: "^(m|b)[0-9]{4}$" }),
     endId: Type.String({ pattern: "^(m|b)[0-9]{4}$" }),
     summary: Type.String({ minLength: 1, maxLength: 100000 }),
+    // Optional, because most ranges need no cues. Omitting it keeps the call
+    // shape that the model already uses. The bounds match the stored block.
+    recall: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: MAX_RECALL_CUE_CHARS }), {
+      maxItems: MAX_RECALL_CUES,
+      description: "Optional. Short names of useful details that the summary omits but that remain in the original history. Write concrete, searchable terms (file names, symbols, error text, measurement names), one per item. Example: 'SQLite rejection reasons: concurrent writers'.",
+    })),
   }, { additionalProperties: false }), { minItems: 1, maxItems: 16 }),
 }, { additionalProperties: false });
 export const CompressionParameters = CompressionParametersV2;
@@ -28,7 +35,8 @@ export function isCompressionParams(value: unknown): value is CompressionParams 
     return typeof item.startId === "string" && /^(m|b)[0-9]{4}$/.test(item.startId)
       && typeof item.endId === "string" && /^(m|b)[0-9]{4}$/.test(item.endId)
       && typeof item.summary === "string" && item.summary.length >= 1 && item.summary.length <= 100000
-      && Object.keys(item).every((key) => ["startId", "endId", "summary"].includes(key));
+      && (item.recall === undefined || isRecallCues(item.recall))
+      && Object.keys(item).every((key) => ["startId", "endId", "summary", "recall"].includes(key));
   });
 }
 

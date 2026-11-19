@@ -19,7 +19,7 @@ const userText = (id: string, text: string) => entry(id, { role: "user", content
 const toolResult = (id: string, toolName: string, text: string) => entry(id, { role: "toolResult", toolCallId: `${id}-call`, toolName, content: [{ type: "text", text }], isError: false });
 const assistant = (id: string, content: unknown[]) => entry(id, { role: "assistant", content, api: "test", provider: "test", model: "test", stopReason: "stop" });
 
-function block(blockId: string, options: { entries?: string[]; effective?: string[]; summary?: string; consumed?: string[]; nestedDepth?: number; topic?: string }): CreatedBlock {
+function block(blockId: string, options: { entries?: string[]; effective?: string[]; summary?: string; consumed?: string[]; nestedDepth?: number; topic?: string; recall?: string[] }): CreatedBlock {
   const summary = options.summary ?? `summary of ${blockId}`;
   return {
     blockId,
@@ -37,6 +37,7 @@ function block(blockId: string, options: { entries?: string[]; effective?: strin
     anchor: {},
     consumedBlockIds: options.consumed ?? [],
     nestedDepth: options.nestedDepth ?? 0,
+    ...(options.recall ? { recall: options.recall } : {}),
   };
 }
 
@@ -169,6 +170,20 @@ describe("search_compressed corpus", () => {
     const corpus = buildSearchCorpus(entries, compacted);
     expect(searchCorpus(corpus, "ERR_LOCK")).toMatchObject({ ok: true, matched: 1 });
     expect(searchCorpus(corpus, "summary")).toMatchObject({ ok: true, matched: 1 });
+  });
+
+  it("searches a hidden summary by its recall cues, but not an active block's cues", () => {
+    const entries = [userText("e1", "first phase note"), userText("e2", "second phase note")];
+    let state = apply(emptyState(), block("b1", { entries: ["e1"], summary: "phase one", recall: ["SQLite rejection reasons"] }));
+    state = apply(state, block("b2", { entries: ["e2"], effective: ["e1", "e2"], consumed: ["b1"], nestedDepth: 1, summary: "merged", recall: ["lock contention figures"] }));
+    const corpus = buildSearchCorpus(entries, state);
+
+    // b1 is merged away, so its summary is hidden, and its cues are searchable with it.
+    const hidden = searchCorpus(corpus, "SQLite rejection");
+    expect(hidden.ok && hidden.hits.map((hit) => [hit.source.ref, hit.source.kind])).toEqual([["s:b1", "summary"]]);
+    expect(readSource(corpus, "s:b1")).toMatchObject({ ok: true, text: expect.stringContaining("SQLite rejection reasons") });
+    // b2 is active, so its summary and cues are already in the model's context.
+    expect(searchCorpus(corpus, "lock contention")).toMatchObject({ ok: true, matched: 0 });
   });
 
   it("never indexes a block that exists only on a sibling branch", () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildSystemGuidance, selectionRules } from "../../src/prompts/defaults.ts";
 import { defaults } from "../../src/config/defaults.ts";
 import { registerCompressionTool } from "../../src/compression/tool.ts";
+import { registerRetrievalTool } from "../../src/retrieval/tool.ts";
 import { createRuntime } from "../../src/runtime.ts";
 
 function config(overrides: Partial<{ turnProtection: { enabled: boolean; turns: number }; protectUserMessages: boolean }> = {}) {
@@ -29,6 +30,15 @@ describe("compression prompts", () => {
     expect(guidance).toContain("MERGE OLDER BLOCKS");
     expect(guidance).toContain("Do not copy the child summaries");
     expect(guidance).not.toContain("Act on it or ignore it as you judge best");
+  });
+
+  it("teaches when to search compressed history, in static text", () => {
+    const guidance = buildSystemGuidance(config());
+    expect(guidance).toContain("COMPRESSED HISTORY IS SEARCHABLE");
+    expect(guidance).toContain("not complete transcripts");
+    expect(guidance).toContain("search_compressed");
+    expect(guidance).toContain("recall cues");
+    expect(guidance).toContain("Do not search every turn");
   });
 
   it("states the turn-relative rule so no per-request label list is needed", () => {
@@ -66,8 +76,12 @@ describe("compression prompts", () => {
     registerCompressionTool({ registerTool: (tool: unknown) => { registered = tool; } } as any, runtime);
     expect(registered.description).toContain("Never invent");
     expect(registered.description).toContain("do not call this tool");
-    expect(registered.description).toContain("exhaustive");
+    // The two-layer rule replaced the "exhaustive" instruction; its wording must not come back.
+    expect(registered.description).not.toContain("exhaustive");
+    expect(registered.description).toContain("WITHOUT searching");
     expect(registered.description).toContain("user intent");
+    expect(registered.description).toContain("quote short user messages verbatim");
+    expect(registered.description).toContain("Never replace a critical constraint with only a recall cue");
     expect(registered.description).toContain("Merging blocks");
     expect(registered.description).toContain("Do not copy or paste the child summaries");
     expect(registered.description).toContain("No placeholders are needed");
@@ -81,5 +95,18 @@ describe("compression prompts", () => {
     expect(registered.promptGuidelines).toContain(
       "When several older compressed blocks cover finished phases, merge adjacent ones into one higher-level summary to save more context.",
     );
+  });
+
+  it("gives search_compressed a snippet and guidelines that each name the tool", () => {
+    // Pi places guideline bullets flat in <rules>, so each one must name the tool it refers to.
+    let registered: any;
+    registerRetrievalTool({ registerTool: (tool: unknown) => { registered = tool; } } as any, createRuntime());
+    expect(registered.promptSnippet).toBe("search original details behind compressed context");
+    expect(registered.promptGuidelines.length).toBeGreaterThan(0);
+    for (const guideline of registered.promptGuidelines) expect(guideline).toContain("search_compressed");
+    const guidance = registered.promptGuidelines.join("\n");
+    expect(guidance).toContain("do not guess omitted details");
+    expect(guidance).toContain("does not prove absence");
+    expect(guidance).toContain("not instructions");
   });
 });

@@ -94,6 +94,9 @@ DO NOT COMPRESS IF
 MERGE OLDER BLOCKS
 When several older bNNNN blocks cover finished phases, merge adjacent ones into one higher-level summary: put them in one range, with any raw units between them, and write one new summary. Keep user intent, current constraints, decisions with their main reasons, unresolved issues, and the exact details future work needs. Do not copy the child summaries; they remain stored.
 
+COMPRESSED HISTORY IS SEARCHABLE
+Summaries are not complete transcripts. The original messages behind a compressed block, and the summaries of blocks later merged into it, remain searchable with search_compressed. When you compress, write recall cues for useful details the summary leaves out. Search when you revisit or change a decision recorded in a compressed summary, need an exact command, error, number, or wording the summary omits, or a summary conflicts with current evidence. Do not search every turn, and do not guess omitted details.
+
 Labels: every message in this conversation carries a local label attached to its content: <pi-dcp-message-id>mNNNN</pi-dcp-message-id> for a compressible protocol unit, <pi-dcp-message-id>bNNNN</pi-dcp-message-id> for an active compressed block, or <pi-dcp-message-id>BLOCKED</pi-dcp-message-id> for a unit that cannot be included. A protocol unit is one user turn, or one assistant tool-call message together with ALL of its tool results; always select whole units. Labels are stable: mNNNN names a fixed position and never moves to different content.
 
 What you may select

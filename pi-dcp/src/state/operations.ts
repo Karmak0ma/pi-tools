@@ -20,6 +20,19 @@ export const OPERATION_SCHEMA = 2 as const;
  */
 export const MAX_NESTED_DEPTH = 64;
 
+/**
+ * Bounds on a range's recall cues. The model-facing schema (compression/schema.ts)
+ * uses the same numbers, so a call that passes validation always replays. A cue
+ * is one short line; the bound keeps the list small enough to render with every
+ * block.
+ *
+ * Replay enforces these bounds too (isRecallCues), so they are a persisted-format
+ * contract. A stored cue above a later, lower bound would fail replay and mark the
+ * whole session corrupt. Raise these bounds if needed, but never lower them.
+ */
+export const MAX_RECALL_CUES = 6;
+export const MAX_RECALL_CUE_CHARS = 160;
+
 export interface CanonicalCoverage {
   directEntryIds: EntryId[];
   effectiveEntryIds: EntryId[];
@@ -40,6 +53,12 @@ export interface CreatedBlock {
   anchor: { beforeEntryId?: string; afterEntryId?: string };
   consumedBlockIds: BlockId[];
   nestedDepth: number;
+  /**
+   * Searchable names of details that the summary leaves out but the original
+   * history keeps. Optional: blocks created before cues existed have none, and a
+   * block without cues has no such key, so its persisted bytes do not change.
+   */
+  recall?: string[];
 }
 
 export interface CompressionCreated {
@@ -189,7 +208,13 @@ function isCreatedBlock(value: unknown): value is CreatedBlock {
     && (anchor.beforeEntryId === undefined || typeof anchor.beforeEntryId === "string")
     && (anchor.afterEntryId === undefined || typeof anchor.afterEntryId === "string")
     && isStringArray(block.consumedBlockIds)
-    && typeof block.nestedDepth === "number" && Number.isInteger(block.nestedDepth) && block.nestedDepth >= 0 && block.nestedDepth <= MAX_NESTED_DEPTH;
+    && typeof block.nestedDepth === "number" && Number.isInteger(block.nestedDepth) && block.nestedDepth >= 0 && block.nestedDepth <= MAX_NESTED_DEPTH
+    && (block.recall === undefined || isRecallCues(block.recall));
+}
+/** Replay gate for recall cues. Shared with the model-facing schema so both enforce one bound. */
+export function isRecallCues(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length <= MAX_RECALL_CUES
+    && value.every((cue) => typeof cue === "string" && cue.length >= 1 && cue.length <= MAX_RECALL_CUE_CHARS);
 }
 function isDecision(value: unknown): value is PrunedToolDecision {
   if (!value || typeof value !== "object") return false;

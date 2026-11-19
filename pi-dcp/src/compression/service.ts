@@ -93,9 +93,16 @@ export function buildCompressionEnvelope(options: CompressionBuildOptions): Comp
     const nested = children.map((child) => child.coverage);
     const effectiveEntryIds = [...new Set([...directEntryIds, ...nested.flatMap((coverage) => coverage.effectiveEntryIds)])];
     const effectiveToolCallIds = [...new Set([...directToolCallIds, ...nested.flatMap((coverage) => coverage.effectiveToolCallIds)])];
-    const estimatedSummaryTokens = Math.max(1, Math.ceil(finalSummary.length / 4));
+    // Recall cues are the model's list for THIS block only. They are not carried
+    // over from merged children: that would grow the list at every merge and keep
+    // names that the new summary may no longer need. Nothing becomes unsearchable:
+    // each child keeps its own summary and cues in its record, and the search
+    // corpus indexes them there.
+    const recall = cleanRecall(params.content[index].recall);
+    // Cues are rendered with the block, so they count toward its footprint.
+    const estimatedSummaryTokens = Math.max(1, Math.ceil([finalSummary, ...recall].join("\n").length / 4));
     const estimatedSourceTokens = estimateCompressionSourceTokens(options, units, range.consumedBlockIds);
-    const block: CreatedBlock = { blockId: randomId(), ordinal: index, topic: params.topic, summary: finalSummary, authoredSummary: authored, estimatedSummaryTokens, estimatedSourceTokens, estimatedSavingsTokens: Math.max(0, estimatedSourceTokens - estimatedSummaryTokens), coverage: { directEntryIds, effectiveEntryIds, directToolCallIds, effectiveToolCallIds }, anchor: { beforeEntryId: options.snapshot.units[range.start - 1]?.entryIds.at(-1), afterEntryId: options.snapshot.units[range.end + 1]?.entryIds[0] }, consumedBlockIds: range.consumedBlockIds, nestedDepth };
+    const block: CreatedBlock = { blockId: randomId(), ordinal: index, topic: params.topic, summary: finalSummary, authoredSummary: authored, estimatedSummaryTokens, estimatedSourceTokens, estimatedSavingsTokens: Math.max(0, estimatedSourceTokens - estimatedSummaryTokens), coverage: { directEntryIds, effectiveEntryIds, directToolCallIds, effectiveToolCallIds }, anchor: { beforeEntryId: options.snapshot.units[range.start - 1]?.entryIds.at(-1), afterEntryId: options.snapshot.units[range.end + 1]?.entryIds[0] }, consumedBlockIds: range.consumedBlockIds, nestedDepth, ...(recall.length ? { recall } : {}) };
     blocks.push(block);
   }
   const operation: CompressionCreated = { type: "compression.created", runId: randomId(), mode: "range", toolCallId: options.toolCallId || `legacy-${options.snapshot.hash.slice(0, 16)}`, snapshotHash: options.snapshot.hash, model: { provider: options.model?.provider || "unknown", id: options.model?.id || "unknown", api: options.model?.api || "unknown" }, blocks };
@@ -105,6 +112,17 @@ export function buildCompressionEnvelope(options: CompressionBuildOptions): Comp
   // this limit even when its own summary is short.
   if (JSON.stringify(envelope).length > 256 * 1024) return { ok: false, reason: "summary_invalid", hint: "the stored operation exceeds 256 KiB; merge fewer blocks or shorten the summary" };
   return { ok: true, envelope, blocks };
+}
+
+/**
+ * Normalize the model's cues before they are stored. Each cue becomes one trimmed
+ * line, so the rendered list cannot break into extra lines. Blank and repeated
+ * cues are dropped. An empty result omits the field entirely (see the block literal
+ * above), so a block without cues keeps the fields it had before cues existed.
+ */
+function cleanRecall(cues: readonly string[] | undefined): string[] {
+  const lines = (cues ?? []).map((cue) => cue.replace(/\s+/g, " ").trim()).filter((cue) => cue.length > 0);
+  return [...new Set(lines)];
 }
 
 /**

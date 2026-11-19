@@ -145,7 +145,7 @@ export function buildSearchCorpus(branchEntries: readonly SessionEntry[], state:
       kind: "summary",
       topic: cleanTopic(block.topic),
       label: "stored summary",
-      text: block.summary,
+      text: storedSummaryText(block),
       scopeBlockIds,
     });
   }
@@ -227,6 +227,15 @@ function nonEmpty(label: string, text: string): EntryText | undefined {
  */
 function outermost(blocks: readonly ReducedBlock[]): ReducedBlock {
   return blocks.reduce((best, block) => block.nestedDepth > best.nestedDepth ? block : best);
+}
+
+/**
+ * A stored summary is searched together with its recall cues. A cue names a detail
+ * that the summary left out, so a search for that name should also find the
+ * summary that recorded it. Blocks without cues are unchanged.
+ */
+function storedSummaryText(block: ReducedBlock): string {
+  return block.recall?.length ? `${block.summary}\n\n${block.recall.join("\n")}` : block.summary;
 }
 
 /** Map each block to the blocks that consumed it, so scope can follow merges upward. */

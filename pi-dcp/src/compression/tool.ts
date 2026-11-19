@@ -42,15 +42,17 @@ ${selectionRules(runtime.config)}
 Summary quality
 - Every new call must include a full, model-authored summary for each range. pi-dcp does not generate summaries automatically.
 - After a successful call, pi-dcp removes summary arguments from that historical call in the context shown to you, because the text is already in the compressed block. A past successful call without summary arguments is a shortened history record, not a valid example for a new call.
-- Write an exhaustive technical summary: decisions, constraints, exact paths, findings, verification evidence.
-- Preserve user intent; quote short user messages verbatim when they carry the intent.
+- Layer 1, the summary: it must let work continue safely WITHOUT searching. Keep user intent (quote short user messages verbatim when they carry the intent), current constraints, decisions with their main reasons, unresolved issues, and the exact details still needed (paths, commands, identifiers, numbers).
+- Layer 2, recall: useful supporting detail that is no longer needed day-to-day (full logs, benchmark tables, rejected alternatives and why, long command output, exploration notes) may be left out of the summary. List it in recall: one short item per detail, with concrete searchable names (file names, symbols, error text, measurement names), for example "SQLite rejection reasons: concurrent writers".
+- Never replace a critical constraint with only a recall cue. If future work depends on it, state it in the summary.
 - Keep the summary lean: no preamble, no restating the obvious.
 - topic is optional display metadata; if omitted, pi-dcp uses "Compressed context".
 
 Merging blocks
 - A range may include existing bNNNN blocks. Including them merges them into the new block; select whole blocks only.
 - Write ONE new, higher-level summary for the whole range: the selected blocks plus any raw units in it. Do not copy or paste the child summaries.
-- Keep user intent, current constraints, decisions with their main reasons, unresolved issues, and the critical exact details future work still needs (paths, commands, numbers). Unlike the exhaustive summaries above, a merged summary may drop everything else.
+- Keep user intent, current constraints, decisions with their main reasons, unresolved issues, and the critical exact details future work still needs (paths, commands, numbers). A merged summary may drop everything else; list dropped detail that future work may need in recall.
+- Write new recall cues for the merged block. Cues of the merged blocks are not carried over; their summaries and cues stay searchable.
 - No placeholders are needed. The replaced summaries remain stored; they are not deleted.
 - Protected tool output inside the merged blocks is carried over verbatim automatically, like the range's own protected output; do not repeat it.
 
