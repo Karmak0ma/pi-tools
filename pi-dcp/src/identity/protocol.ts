@@ -45,7 +45,7 @@ export function buildProtocolUnits(projected: readonly ProjectedMessage[]): Cano
  * history by default; content that must persist verbatim belongs in the
  * system prompt, not in a transcript message.
  * - pi-dcp.v2.summary: pi-dcp's own rendered block. Blocks are selected via
- *   their bNNNN alias and nested-placeholder rules, never as a raw unit.
+ *   their bNNNN alias and the merge rules, never as a raw unit.
  */
 export const PROTECTED_CUSTOM_TYPES: ReadonlySet<string> = new Set(["pi-dcp.v2.summary"]);
 

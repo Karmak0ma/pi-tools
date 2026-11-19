@@ -27,12 +27,10 @@ describe("actionable compression errors", () => {
     expect(text).toContain("Re-issue compress");
   });
 
-  it("includes the specific nested-placeholder repair in the model-visible error", () => {
-    const text = buildErrorText(setup(), "placeholder_invalid", {
-      hint: "range 0 (m0001-m0002) includes (b0001); include it exactly once.",
-    });
-
-    expect(text).toContain("range 0 (m0001-m0002) includes (b0001)");
+  it("explains the nesting limit and says not to merge the range", () => {
+    const text = buildErrorText(setup(), "nesting_limit_exceeded", { rangeIndex: 0 });
+    expect(text).toContain("nested deeper than 64 levels");
+    expect(text).toContain("Do not merge this range");
   });
 
   it.each([

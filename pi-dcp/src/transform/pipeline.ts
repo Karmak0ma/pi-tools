@@ -107,7 +107,7 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
     // without ever being inspected or mutated by DCP. Labels only reflect
     // settledness now - tool-output protection no longer blocks a unit (it
     // is absorbed into the compressed summary instead, see
-    // appendProtectedToolContent in compression/protected.ts), and the
+    // collectProtectedToolSections in compression/protected.ts), and the
     // turn-relative eligibility rules (live turn, turnProtection window,
     // protectUserMessages) stay out of inline labels on purpose - see the
     // comment in labels.ts on why baking them in would break prompt-cache

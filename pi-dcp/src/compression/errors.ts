@@ -1,6 +1,7 @@
 import type { BaselineSnapshot } from "../identity/types.ts";
 import { latestBaseline, type DcpRuntime } from "../runtime.ts";
 import { blockReasonText, buildEligibility, compressibleSegments, type UnitBlockReason } from "./eligibility.ts";
+import { MAX_NESTED_DEPTH } from "../state/operations.ts";
 
 export interface CompressionErrorExtra {
   stage?: string;
@@ -9,6 +10,7 @@ export interface CompressionErrorExtra {
   byTool?: string;
   byPattern?: string;
   hint?: string;
+  limit?: number;
   baseline?: BaselineSnapshot;
   cause?: UnitBlockReason;
   blocked?: readonly { id: string; rangeIndex: number; cause: UnitBlockReason }[];
@@ -61,8 +63,15 @@ export function buildErrorText(runtime: DcpRuntime, reason: string, extra: Compr
     appendInventory(lines, baseline, runtime);
     return lines.join("\n");
   }
-  if (reason === "placeholder_invalid" || reason === "summary_invalid") {
-    lines.push(extra.hint || "Fix the summary and retry; see the tool description for placeholder rules.");
+  if (reason === "summary_invalid") {
+    lines.push(extra.hint || "Fix the summary and retry.");
+    appendInventory(lines, baseline, runtime);
+    return lines.join("\n");
+  }
+  if (reason === "nesting_limit_exceeded") {
+    // The merged block would be deeper than the stored limit. Only a range that
+    // avoids the deepest block avoids this, so the model must choose another range.
+    lines.push("Do not merge this range. Choose a range that leaves out the deeply merged block, or compress raw units only.");
     appendInventory(lines, baseline, runtime);
     return lines.join("\n");
   }
@@ -87,7 +96,7 @@ function diagnosisFor(reason: string, extra: CompressionErrorExtra, runtime: Dcp
       const why = extra.cause ? blockReasonText(extra.cause) : "is protected";
       return `Unit ${unit} ${why}. Nothing was compressed.`;
     }
-    case "placeholder_invalid": return "The summary has an invalid nested block placeholder.";
+    case "nesting_limit_exceeded": return `Range ${extra.rangeIndex ?? "unknown"} would create a block nested deeper than ${extra.limit ?? MAX_NESTED_DEPTH} levels.`;
     case "summary_invalid": return "The summary is invalid.";
     case "permission_denied": case "permission_unavailable": return "Compression permission is not available.";
     case "protocol_version": return "The compression parameters do not match the current tool schema.";

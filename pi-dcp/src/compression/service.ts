@@ -2,18 +2,17 @@ import type { Model } from "@earendil-works/pi-ai";
 import { hashJson, randomId, sha256 } from "../util/hash.ts";
 import type { BaselineSnapshot } from "../identity/types.ts";
 import type { ReducedState } from "../state/reducer.ts";
-import { createEnvelope, type CompressionCreated, type CreatedBlock } from "../state/operations.ts";
-import { expandNestedSummary, placeholders } from "./nesting.ts";
-import { resolveCompressionRanges, type ResolvedRange } from "./range.ts";
+import { createEnvelope, MAX_NESTED_DEPTH, type CompressionCreated, type CreatedBlock } from "../state/operations.ts";
+import { resolveCompressionRanges } from "./range.ts";
 import { validateSummary, type SummaryValidation } from "./validate.ts";
 import { normalizeCompressionParams, type CompressionParams } from "./schema.ts";
 import type { CanonicalIndex } from "../identity/types.ts";
-import { appendProtectedToolContent, type ProtectionOptions } from "./protected.ts";
+import { appendProtectedSections, collectProtectedToolSections, extractProtectedSection, type ProtectionOptions } from "./protected.ts";
 import { buildEligibility, compressibleSegments, unitBlockReason, type UnitBlockReason } from "./eligibility.ts";
 import { unitAlias } from "../identity/snapshot.ts";
 import { estimateTokens } from "../tokens/estimate.ts";
 
-export interface CompressionBuildOptions { sessionId: string; extensionVersion: string; snapshot: BaselineSnapshot; state: ReducedState; params: CompressionParams; model: Model<any> | undefined; toolCallId?: string; maxSummaryChars?: number; maxExpandedChars?: number; maxNestedDepth?: number; index?: CanonicalIndex; protection?: ProtectionOptions; turnProtection?: { enabled: boolean; turns: number }; protectUserMessages?: boolean; }
+export interface CompressionBuildOptions { sessionId: string; extensionVersion: string; snapshot: BaselineSnapshot; state: ReducedState; params: CompressionParams; model: Model<any> | undefined; toolCallId?: string; maxSummaryChars?: number; maxNestedDepth?: number; index?: CanonicalIndex; protection?: ProtectionOptions; turnProtection?: { enabled: boolean; turns: number }; protectUserMessages?: boolean; }
 export type CompressionBuildFailure = {
   ok: false;
   reason: string;
@@ -22,6 +21,8 @@ export type CompressionBuildFailure = {
   byTool?: string;
   byPattern?: string;
   hint?: string;
+  /** Depth limit in force when nesting_limit_exceeded was raised. */
+  limit?: number;
   cause?: UnitBlockReason;
   /** Every blocked unit across all requested ranges (content_protected). */
   blocked?: BlockedUnit[];
@@ -38,7 +39,7 @@ export function buildCompressionEnvelope(options: CompressionBuildOptions): Comp
   // Tool-output protection (compress.protectedTools / protectedFilePatterns)
   // is deliberately absent from this eligibility check: a protected tool
   // call no longer blocks the range, its output is folded into the summary
-  // verbatim below instead (appendProtectedToolContent). The only remaining
+  // verbatim below instead (collectProtectedToolSections). The only remaining
   // hard blockers are settledness and the user-turn protection rules.
   const eligibility = buildEligibility(options.snapshot.units, { turnProtection: options.turnProtection, protectUserMessages: options.protectUserMessages });
   // Collect EVERY blocker instead of failing on the first one. Reporting a
@@ -63,46 +64,47 @@ export function buildCompressionEnvelope(options: CompressionBuildOptions): Comp
   for (let index = 0; index < ranges.ranges.length; index++) {
     const range = ranges.ranges[index]; const authored = params.content[index].summary;
     const valid: SummaryValidation = validateSummary(authored, options.maxSummaryChars || 100000); if (!valid.ok) return { ok: false, reason: valid.reason, rangeIndex: range.rangeIndex, hint: authored.length > (options.maxSummaryChars || 100000) ? "exceeds maxChars" : "summary contains invalid content" };
-    const aliases = new Map([...options.snapshot.blockAliases.entries()].map(([alias, block]) => [alias, block.blockId]));
-    const expanded = expandNestedSummary(authored, range.consumedBlockIds, options.state, options.maxNestedDepth || 8, options.maxExpandedChars || 200000, aliases); if (!expanded.ok) return { ok: false, reason: expanded.reason, rangeIndex: range.rangeIndex, hint: expanded.reason === "placeholder_invalid" ? nestedPlaceholderHint(authored, range, params.content[index], options.snapshot) : "expanded summary exceeds maxChars" };
+    // A range that includes blocks merges them. The authored summary replaces
+    // the whole range and is stored as written. Child summaries are NOT pasted
+    // in: pasting kept every merged block as large as all its ancestors put
+    // together. The children stay in their own records, inactive after the
+    // reducer applies this envelope.
+    const children = range.consumedBlockIds.flatMap((id) => { const child = options.state.blocks.get(id); return child ? [child] : []; });
+    // Depth is one more than the deepest child. This is the smallest value the
+    // reducer accepts (block.nestedDepth >= child.nestedDepth + 1), and it is
+    // checked before anything persists: a stored block above MAX_NESTED_DEPTH
+    // would fail replay for the whole session.
+    const nestedDepth = children.reduce((depth, child) => Math.max(depth, child.nestedDepth + 1), 0);
+    const depthLimit = Math.min(options.maxNestedDepth ?? MAX_NESTED_DEPTH, MAX_NESTED_DEPTH);
+    if (nestedDepth > depthLimit) return { ok: false, reason: "nesting_limit_exceeded", rangeIndex: range.rangeIndex, limit: depthLimit };
     const units = options.snapshot.units.slice(range.start, range.end + 1);
-    // Fold any protected tool output that fell inside this range into the
-    // summary verbatim rather than rejecting the range for containing it.
-    const finalSummary = options.index && options.protection
-      ? appendProtectedToolContent(expanded.summary, units, options.index, options.protection)
-      : expanded.summary;
+    // Protected tool output is kept verbatim instead of blocking the range.
+    // Children's protected output comes first and is carried even when this call
+    // has no index or protection options: it is already stored in their summaries.
+    // Tool calls that a child covers are skipped, so each child's stored output is
+    // the only copy from it (appendProtectedSections also drops identical bodies).
+    const coveredToolCallIds = new Set(children.flatMap((child) => child.coverage.effectiveToolCallIds));
+    const ownProtected = options.index && options.protection
+      ? collectProtectedToolSections(units, options.index, options.protection, coveredToolCallIds)
+      : "";
+    const finalSummary = appendProtectedSections(authored, [...children.map((child) => extractProtectedSection(child)), ownProtected]);
     const directEntryIds = [...new Set(units.flatMap((unit) => unit.entryIds))];
     const directToolCallIds = [...new Set(units.flatMap((unit) => unit.toolCallIds))];
-    const nested = range.consumedBlockIds.flatMap((id) => options.state.blocks.get(id)?.coverage || []).filter(Boolean);
+    const nested = children.map((child) => child.coverage);
     const effectiveEntryIds = [...new Set([...directEntryIds, ...nested.flatMap((coverage) => coverage.effectiveEntryIds)])];
     const effectiveToolCallIds = [...new Set([...directToolCallIds, ...nested.flatMap((coverage) => coverage.effectiveToolCallIds)])];
     const estimatedSummaryTokens = Math.max(1, Math.ceil(finalSummary.length / 4));
     const estimatedSourceTokens = estimateCompressionSourceTokens(options, units, range.consumedBlockIds);
-    const block: CreatedBlock = { blockId: randomId(), ordinal: index, topic: params.topic, summary: finalSummary, authoredSummary: authored, estimatedSummaryTokens, estimatedSourceTokens, estimatedSavingsTokens: Math.max(0, estimatedSourceTokens - estimatedSummaryTokens), coverage: { directEntryIds, effectiveEntryIds, directToolCallIds, effectiveToolCallIds }, anchor: { beforeEntryId: options.snapshot.units[range.start - 1]?.entryIds.at(-1), afterEntryId: options.snapshot.units[range.end + 1]?.entryIds[0] }, consumedBlockIds: expanded.consumedBlockIds, nestedDepth: expanded.depth };
+    const block: CreatedBlock = { blockId: randomId(), ordinal: index, topic: params.topic, summary: finalSummary, authoredSummary: authored, estimatedSummaryTokens, estimatedSourceTokens, estimatedSavingsTokens: Math.max(0, estimatedSourceTokens - estimatedSummaryTokens), coverage: { directEntryIds, effectiveEntryIds, directToolCallIds, effectiveToolCallIds }, anchor: { beforeEntryId: options.snapshot.units[range.start - 1]?.entryIds.at(-1), afterEntryId: options.snapshot.units[range.end + 1]?.entryIds[0] }, consumedBlockIds: range.consumedBlockIds, nestedDepth };
     blocks.push(block);
   }
   const operation: CompressionCreated = { type: "compression.created", runId: randomId(), mode: "range", toolCallId: options.toolCallId || `legacy-${options.snapshot.hash.slice(0, 16)}`, snapshotHash: options.snapshot.hash, model: { provider: options.model?.provider || "unknown", id: options.model?.id || "unknown", api: options.model?.api || "unknown" }, blocks };
   const requestKey = sha256(`${options.sessionId}\0${operation.toolCallId}\0${options.snapshot.hash}`);
   const envelope = createEnvelope(operation, options.sessionId, options.extensionVersion, requestKey);
-  if (JSON.stringify(envelope).length > 256 * 1024) return { ok: false, reason: "summary_invalid" };
+  // Carried protected output accumulates across merges, so a range can exceed
+  // this limit even when its own summary is short.
+  if (JSON.stringify(envelope).length > 256 * 1024) return { ok: false, reason: "summary_invalid", hint: "the stored operation exceeds 256 KiB; merge fewer blocks or shorten the summary" };
   return { ok: true, envelope, blocks };
-}
-
-function nestedPlaceholderHint(authored: string, range: ResolvedRange, selected: CompressionParams["content"][number], snapshot: BaselineSnapshot): string {
-  const selectedLabel = selected.startId === selected.endId ? selected.startId : `${selected.startId}-${selected.endId}`;
-  const rangeLabel = `range ${range.rangeIndex} (${selectedLabel})`;
-  const aliasesByBlockId = new Map([...snapshot.blockAliases.values()].map((block) => [block.blockId, block.alias]));
-  const required = range.consumedBlockIds.map((blockId) => aliasesByBlockId.get(blockId) || blockId);
-  const referenced = placeholders(authored);
-  const count = (alias: string): number => referenced.filter((candidate) => candidate === alias).length;
-  const missing = required.filter((alias) => count(alias) === 0);
-  const repeated = required.filter((alias) => count(alias) > 1);
-  if (missing.length) return `${rangeLabel} includes ${missing.map((alias) => `(${alias})`).join(", ")}; include each required nested block placeholder exactly once in its summary.`;
-  if (repeated.length) return `${rangeLabel} repeats ${repeated.map((alias) => `(${alias})`).join(", ")}; include each required nested block placeholder exactly once in its summary.`;
-  const unexpected = referenced.filter((alias) => !required.includes(alias));
-  if (unexpected.length) return `${rangeLabel} references ${unexpected.map((alias) => `(${alias})`).join(", ")}, but those blocks are not inside the selected range; remove those placeholders.`;
-  if (required.length) return `${rangeLabel} has an invalid nested block placeholder; include ${required.map((alias) => `(${alias})`).join(", ")} exactly once in its summary.`;
-  return `${rangeLabel} has an invalid nested block placeholder; this range has no valid nested block placeholders.`;
 }
 
 /**

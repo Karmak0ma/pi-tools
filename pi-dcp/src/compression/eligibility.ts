@@ -5,7 +5,7 @@ import { unitAlias } from "../identity/snapshot.ts";
  * Reasons a unit can never be part of a compression range. Tool-output
  * protection (compress.protectedTools / protectedFilePatterns) is
  * deliberately NOT one of these: a match there is absorbed verbatim into
- * the block summary instead (see appendProtectedToolContent in
+ * the block summary instead (see collectProtectedToolSections in
  * protected.ts), so it never blocks a range. Blocking on tool protection
  * used to turn every `write`/`edit`/`compress` call into a permanent,
  * fragmenting barrier in the middle of history - that coupling was the bug.

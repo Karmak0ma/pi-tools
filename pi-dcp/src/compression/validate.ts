@@ -14,7 +14,8 @@ export function validateSummary(summary: string, maxChars = 100000): SummaryVali
   // Matched on trimmed EQUALITY, not `includes`: a summary that legitimately
   // discusses this very redaction must stay valid.
   if (summary.trim() === compressSummaryMarker()) return { ok: false, reason: "summary_invalid" };
-  if ([...summary.matchAll(/\(b(\d+)\)/g)].some((match) => match[1].length !== 4)) return { ok: false, reason: "summary_invalid" };
-  if (summary.replace(/\(b\d{4}\)/g, "").trim().length === 0) return { ok: false, reason: "summary_invalid" };
+  // A model may still write "(bNNNN)" in prose. It is ordinary text now that
+  // merging needs no placeholders, so only blank summaries are rejected here.
+  if (summary.trim().length === 0) return { ok: false, reason: "summary_invalid" };
   return { ok: true };
 }

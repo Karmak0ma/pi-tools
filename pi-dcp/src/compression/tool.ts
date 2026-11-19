@@ -47,11 +47,12 @@ Summary quality
 - Keep the summary lean: no preamble, no restating the obvious.
 - topic is optional display metadata; if omitted, pi-dcp uses "Compressed context".
 
-Nested blocks
-- If your range includes a block (bNNNN), you MUST reference it in the summary as (bNNNN) exactly once per block.
-- (bNNNN) are reserved tokens; do not invent them and do not repeat one.
-- Preflight check before calling: every block inside your range appears exactly once in your summary.
-- (bNNNN) is a write-only instruction to this tool, not the stored result: pi-dcp replaces it with that block's full stored content before saving, atomically, in the same call. A tool result reporting success means this already happened - there is nothing left to fix and nothing to verify by re-reading. Never call compress again on a block just because you cannot see its expanded text; that re-wraps real content for no reason and risks failing for reasons unrelated to your actual task.
+Merging blocks
+- A range may include existing bNNNN blocks. Including them merges them into the new block; select whole blocks only.
+- Write ONE new, higher-level summary for the whole range: the selected blocks plus any raw units in it. Do not copy or paste the child summaries.
+- Keep user intent, current constraints, decisions with their main reasons, unresolved issues, and the critical exact details future work still needs (paths, commands, numbers). Unlike the exhaustive summaries above, a merged summary may drop everything else.
+- No placeholders are needed. The replaced summaries remain stored; they are not deleted.
+- Protected tool output inside the merged blocks is carried over verbatim automatically, like the range's own protected output; do not repeat it.
 
 Batching
 - You may pass up to 16 ranges in one call; each range gets its own summary.
@@ -67,6 +68,7 @@ Validation
       "Use compress only with current visible mNNNN or bNNNN labels; never invent labels.",
       "Never pass compress a BLOCKED unit or a still-live recent user turn.",
       "If no labels are visible, do not call compress.",
+      "When several older compressed blocks cover finished phases, merge adjacent ones into one higher-level summary to save more context.",
     ],
     parameters: CompressionParameters,
     executionMode: "sequential",
@@ -169,7 +171,6 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
       model: ctx.model,
       toolCallId,
       maxSummaryChars: runtime.config.summary.maxChars,
-      maxExpandedChars: runtime.config.summary.maxExpandedChars,
       maxNestedDepth: runtime.config.summary.maxNestedDepth,
       index: baseline.index || runtime.index,
       protection: { cwd: ctx.cwd, protectedTools: runtime.config.compress.protectedTools, protectedFilePatterns: runtime.config.protectedFilePatterns },
@@ -182,10 +183,11 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
     // is a pure, non-mutating dry run (reduceEnvelope always clones state; it
     // never touches runtime.reduced), so trying it first costs nothing when
     // it succeeds. What it buys: buildCompressionEnvelope's checks (range,
-    // placeholder, size) and the reducer's own invariants (anchors, coverage,
+    // size) and the reducer's own invariants (anchors, coverage,
     // nestedDepth, no-overlap) are two independently maintained pieces of
     // logic, and a future gap between them - like the nestedDepth
-    // under-count fixed in nesting.ts (2026-08-19 incident) - must never
+    // under-count fixed in the former nesting.ts (2026-08-19 incident; depth is
+    // now computed in service.ts) - must never
     // reach `pi.appendEntry`. Once appended, a rejected envelope is
     // permanent: reconstructFromBranch (state/reconstruct.ts) replays the
     // full persisted branch unconditionally on every resume *and* restart,

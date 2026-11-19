@@ -6,6 +6,20 @@ export const OPERATION_CUSTOM_TYPE = "pi-dcp.v2.operation";
 export const LEGACY_OPERATION_CUSTOM_TYPE = "pi-dcp.operation";
 export const OPERATION_SCHEMA = 2 as const;
 
+/**
+ * Largest nestedDepth a stored block may have. Depth counts merge levels: a
+ * block that merges children one level deeper is one level deeper itself. The
+ * old limit of 8 bounded recursive text expansion, and merging no longer
+ * expands text. Long sessions re-merge the same lineage many times, so 64 is
+ * the new bound. Walks over consumedBlockIds (reducer.ts) stay within this
+ * depth, so their recursion is safe.
+ *
+ * This bound is also a replay gate. A block above it fails isOperationEnvelope,
+ * and reconstruction then marks the whole session's state corrupt. The service
+ * must therefore refuse such a merge before it persists anything.
+ */
+export const MAX_NESTED_DEPTH = 64;
+
 export interface CanonicalCoverage {
   directEntryIds: EntryId[];
   effectiveEntryIds: EntryId[];
@@ -175,7 +189,7 @@ function isCreatedBlock(value: unknown): value is CreatedBlock {
     && (anchor.beforeEntryId === undefined || typeof anchor.beforeEntryId === "string")
     && (anchor.afterEntryId === undefined || typeof anchor.afterEntryId === "string")
     && isStringArray(block.consumedBlockIds)
-    && typeof block.nestedDepth === "number" && Number.isInteger(block.nestedDepth) && block.nestedDepth >= 0 && block.nestedDepth <= 8;
+    && typeof block.nestedDepth === "number" && Number.isInteger(block.nestedDepth) && block.nestedDepth >= 0 && block.nestedDepth <= MAX_NESTED_DEPTH;
 }
 function isDecision(value: unknown): value is PrunedToolDecision {
   if (!value || typeof value !== "object") return false;

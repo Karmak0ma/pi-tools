@@ -95,6 +95,8 @@ The editable file uses the same shape as the menu. For example:
 
 Compression summaries are authored by the model through the v2 `compress` tool. The schema contains no model-supplied snapshot ID. Deterministic `m0001` and `b0001` aliases are attached locally to protocol units and active summaries; they are resolved against the producing assistant response's retained internal baseline. A missing or changed baseline fails closed and writes no operation. Version-1 operation entries remain in raw history but are ignored by v2 so raw context can be restored safely.
 
+**Merging blocks.** A compress range may include existing `bNNNN` blocks. Those blocks are replaced by one new block. The model writes one fresh, higher-level summary for the whole range and does not paste the child summaries in, so a merged block stays small as older work is compressed again. Protected tool output from the merged blocks is carried over verbatim. The replaced blocks stay in the session record as inactive blocks and are not deleted. No placeholders are needed. Each merge adds one nesting level above its deepest child. The limit is 64 levels; `summary.maxNestedDepth` can lower it. A merge that would exceed the limit is refused before anything is saved.
+
 ## Compressible and blocked units
 
 Every message in the provider request carries a label: `mNNNN` for a unit the model may compress, `bNNNN` for an active summary block, or `BLOCKED` for a unit that can never be part of a compress range. A unit is `BLOCKED` for one of two reasons:

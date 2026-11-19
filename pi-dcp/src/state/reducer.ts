@@ -205,6 +205,9 @@ function applyOperation(state: ReducedState, operation: DcpOperation, opId: stri
   return false;
 }
 
+// Both walks below recurse over consumedBlockIds. Recursion depth is bounded by
+// MAX_NESTED_DEPTH, because nestedDepth strictly decreases from parent to child
+// (see the invariant in applyOperation), so no walk can exceed that many frames.
 function deactivateDescendants(state: ReducedState, blockId: string): void {
   const block = state.blocks.get(blockId);
   if (!block) return;

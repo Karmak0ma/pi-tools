@@ -91,6 +91,9 @@ DO NOT COMPRESS IF
 - The target content is still actively in progress.
 - You may need exact code, error messages, or file contents in the immediate next steps.
 
+MERGE OLDER BLOCKS
+When several older bNNNN blocks cover finished phases, merge adjacent ones into one higher-level summary: put them in one range, with any raw units between them, and write one new summary. Keep user intent, current constraints, decisions with their main reasons, unresolved issues, and the exact details future work needs. Do not copy the child summaries; they remain stored.
+
 Labels: every message in this conversation carries a local label attached to its content: <pi-dcp-message-id>mNNNN</pi-dcp-message-id> for a compressible protocol unit, <pi-dcp-message-id>bNNNN</pi-dcp-message-id> for an active compressed block, or <pi-dcp-message-id>BLOCKED</pi-dcp-message-id> for a unit that cannot be included. A protocol unit is one user turn, or one assistant tool-call message together with ALL of its tool results; always select whole units. Labels are stable: mNNNN names a fixed position and never moves to different content.
 
 What you may select

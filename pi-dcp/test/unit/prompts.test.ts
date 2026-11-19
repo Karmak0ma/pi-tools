@@ -25,6 +25,9 @@ describe("compression prompts", () => {
     expect(guidance).toContain("Do not wait for the user to request compression or for context pressure");
     expect(guidance).toContain("before starting a different substantial phase");
     expect(guidance).toContain("Continue without compression only when no safe closed range is visible");
+    // Static text only: a dynamic value here would change the cached prompt on every turn.
+    expect(guidance).toContain("MERGE OLDER BLOCKS");
+    expect(guidance).toContain("Do not copy the child summaries");
     expect(guidance).not.toContain("Act on it or ignore it as you judge best");
   });
 
@@ -65,14 +68,18 @@ describe("compression prompts", () => {
     expect(registered.description).toContain("do not call this tool");
     expect(registered.description).toContain("exhaustive");
     expect(registered.description).toContain("user intent");
-    expect(registered.description).toContain("(bNNNN)");
-    expect(registered.description).toContain("Preflight check");
+    expect(registered.description).toContain("Merging blocks");
+    expect(registered.description).toContain("Do not copy or paste the child summaries");
+    expect(registered.description).toContain("No placeholders are needed");
     // One source of truth: the tool description embeds the same rules the
     // system prompt does, so the two can never disagree.
     expect(registered.description).toContain(selectionRules(runtime.config));
     expect(registered.description).toContain("you never need a per-turn list");
     expect(registered.promptGuidelines).toContain(
       "After substantial work is finished and verified, use compress proactively before beginning a different substantial work phase when a useful safe range is visible.",
+    );
+    expect(registered.promptGuidelines).toContain(
+      "When several older compressed blocks cover finished phases, merge adjacent ones into one higher-level summary to save more context.",
     );
   });
 });
