@@ -39,9 +39,12 @@ export function mergeConfig(base: EffectiveConfig, patch: Record<string, unknown
     const target = result[key as "commands" | "manualMode" | "turnProtection" | "compress" | "strategies" | "summary"] as unknown as Record<string, unknown>;
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${key} must be an object`);
     for (const [child, childValue] of Object.entries(raw as Record<string, unknown>)) {
-      // Removed with the placeholder expansion it bounded. Ignoring it with a
-      // named warning matches nudge.type, so an old settings file still loads.
-      if (key === "summary" && child === "maxExpandedChars") { warnings.push("deprecated configuration key ignored: summary.maxExpandedChars"); continue; }
+      // Removed settings. maxExpandedChars bounded placeholder expansion, which no
+      // longer exists. maxNestedDepth is now the fixed MAX_NESTED_DEPTH bound, so a
+      // copied tuning value (the old 8) would refuse merges that replay accepts.
+      // Both are ignored with a named warning, not an error, as nudge.type is, so an
+      // old settings file still loads.
+      if (key === "summary" && (child === "maxExpandedChars" || child === "maxNestedDepth")) { warnings.push(`deprecated configuration key ignored: summary.${child}`); continue; }
       if (!(child in target)) { warnings.push(`unknown configuration key: ${key}.${child}`); continue; }
       if (child === "protectedTools" || child === "protectedFilePatterns") target[child] = stringArray(childValue, `${key}.${child}`);
       else if (child === "modelMaxLimits" || child === "modelMinLimits") target[child] = limitsMap(childValue, `${key}.${child}`);

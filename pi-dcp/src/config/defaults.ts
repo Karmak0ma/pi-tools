@@ -1,5 +1,3 @@
-import { MAX_NESTED_DEPTH } from "../state/operations.ts";
-
 export const defaults = {
   enabled: true,
   disabledModels: [] as string[],
@@ -40,9 +38,9 @@ export const defaults = {
     deduplication: { enabled: true, protectedTools: [] as string[] },
     purgeErrors: { enabled: true, turns: 4, protectedTools: [] as string[] },
   },
-  // maxNestedDepth can lower the limit. Values above MAX_NESTED_DEPTH are clamped
-  // to it, because a stored depth above that fails replay (state/operations.ts).
-  summary: { maxChars: 100000, maxNestedDepth: MAX_NESTED_DEPTH },
+  // No nesting setting: merge depth is the stored-format bound MAX_NESTED_DEPTH
+  // (state/operations.ts). A configured lower value would refuse merges that replay accepts.
+  summary: { maxChars: 100000 },
 } as const;
 
 export type EffectiveConfig = {
@@ -79,5 +77,5 @@ export type EffectiveConfig = {
     deduplication: { enabled: boolean; protectedTools: string[] };
     purgeErrors: { enabled: boolean; turns: number; protectedTools: string[] };
   };
-  summary: { maxChars: number; maxNestedDepth: number };
+  summary: { maxChars: number };
 };

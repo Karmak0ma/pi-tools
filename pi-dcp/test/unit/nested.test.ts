@@ -177,8 +177,5 @@ describe("merging compressed blocks", () => {
     // A child at depth 64 would make 65. That must fail here, before anything is persisted.
     child.nestedDepth = MAX_NESTED_DEPTH;
     expect(build(raw, state, 3, content)).toMatchObject({ ok: false, reason: "nesting_limit_exceeded", rangeIndex: 0, limit: MAX_NESTED_DEPTH });
-    // A configured limit lowers the bound; a configured value above the stored bound is clamped to it.
-    expect(build(raw, state, 4, content, { maxNestedDepth: 8 })).toMatchObject({ ok: false, reason: "nesting_limit_exceeded", limit: 8 });
-    expect(build(raw, state, 5, content, { maxNestedDepth: 100 })).toMatchObject({ ok: false, reason: "nesting_limit_exceeded", limit: MAX_NESTED_DEPTH });
   });
 });

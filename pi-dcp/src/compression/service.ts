@@ -12,7 +12,7 @@ import { buildEligibility, compressibleSegments, unitBlockReason, type UnitBlock
 import { unitAlias } from "../identity/snapshot.ts";
 import { estimateTokens } from "../tokens/estimate.ts";
 
-export interface CompressionBuildOptions { sessionId: string; extensionVersion: string; snapshot: BaselineSnapshot; state: ReducedState; params: CompressionParams; model: Model<any> | undefined; toolCallId?: string; maxSummaryChars?: number; maxNestedDepth?: number; index?: CanonicalIndex; protection?: ProtectionOptions; turnProtection?: { enabled: boolean; turns: number }; protectUserMessages?: boolean; }
+export interface CompressionBuildOptions { sessionId: string; extensionVersion: string; snapshot: BaselineSnapshot; state: ReducedState; params: CompressionParams; model: Model<any> | undefined; toolCallId?: string; maxSummaryChars?: number; index?: CanonicalIndex; protection?: ProtectionOptions; turnProtection?: { enabled: boolean; turns: number }; protectUserMessages?: boolean; }
 export type CompressionBuildFailure = {
   ok: false;
   reason: string;
@@ -73,10 +73,11 @@ export function buildCompressionEnvelope(options: CompressionBuildOptions): Comp
     // Depth is one more than the deepest child. This is the smallest value the
     // reducer accepts (block.nestedDepth >= child.nestedDepth + 1), and it is
     // checked before anything persists: a stored block above MAX_NESTED_DEPTH
-    // would fail replay for the whole session.
+    // would fail replay for the whole session. The bound belongs to the stored
+    // format, not to a setting: a configured lower limit would refuse merges that
+    // replay accepts, which is how a copied old value (8) refused depth 9.
     const nestedDepth = children.reduce((depth, child) => Math.max(depth, child.nestedDepth + 1), 0);
-    const depthLimit = Math.min(options.maxNestedDepth ?? MAX_NESTED_DEPTH, MAX_NESTED_DEPTH);
-    if (nestedDepth > depthLimit) return { ok: false, reason: "nesting_limit_exceeded", rangeIndex: range.rangeIndex, limit: depthLimit };
+    if (nestedDepth > MAX_NESTED_DEPTH) return { ok: false, reason: "nesting_limit_exceeded", rangeIndex: range.rangeIndex, limit: MAX_NESTED_DEPTH };
     const units = options.snapshot.units.slice(range.start, range.end + 1);
     // Protected tool output is kept verbatim instead of blocking the range.
     // Children's protected output comes first and is carried even when this call

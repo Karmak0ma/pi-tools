@@ -9,10 +9,12 @@ import { defaults } from "../../src/config/defaults.ts";
 import { PI_BUILTIN_TOOLS, PRUNE_PROTECTED_TOOLS } from "../../src/compression/protected.ts";
 
 describe("configuration", () => {
-  it("ignores the removed summary.maxExpandedChars with a named warning and keeps the other limits", () => {
-    const result = validateConfig({ summary: { maxExpandedChars: 1, maxNestedDepth: 12 } });
+  it("ignores the removed summary.maxExpandedChars and summary.maxNestedDepth with named warnings, not errors, and keeps other limits", () => {
+    const result = validateConfig({ summary: { maxChars: 500, maxExpandedChars: 1, maxNestedDepth: 12 } });
+    expect(result.error).toBeUndefined();
     expect(result.warnings).toContain("deprecated configuration key ignored: summary.maxExpandedChars");
-    expect(result.value!.summary).toEqual({ maxChars: defaults.summary.maxChars, maxNestedDepth: 12 });
+    expect(result.warnings).toContain("deprecated configuration key ignored: summary.maxNestedDepth");
+    expect(result.value!.summary).toEqual({ maxChars: 500 });
   });
 
   it("validates exact provider/model identifiers and defaults to all models enabled", () => {

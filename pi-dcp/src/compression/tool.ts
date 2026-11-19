@@ -173,7 +173,6 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
       model: ctx.model,
       toolCallId,
       maxSummaryChars: runtime.config.summary.maxChars,
-      maxNestedDepth: runtime.config.summary.maxNestedDepth,
       index: baseline.index || runtime.index,
       protection: { cwd: ctx.cwd, protectedTools: runtime.config.compress.protectedTools, protectedFilePatterns: runtime.config.protectedFilePatterns },
       turnProtection: runtime.config.turnProtection,
