@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { buildSessionProjection } from "@earendil-works/pi-coding-agent";
 import { registerLifecycle } from "../../src/lifecycle.ts";
 import { registerCompressionTool } from "../../src/compression/tool.ts";
+import { registerRetrievalTool } from "../../src/retrieval/tool.ts";
 import { createRuntime } from "../../src/runtime.ts";
 import { DCP_SYSTEM_SECTION } from "../../src/prompts/defaults.ts";
 import { handleDcp } from "../../src/commands/index.ts";
@@ -9,12 +10,12 @@ import { handleDcp } from "../../src/commands/index.ts";
 function setup() {
   const handlers = new Map<string, (event: any, ctx: any) => any>();
   let active = ["read", "compress", "todo"];
-  let tool: any;
+  const tools = new Map<string, any>();
   const pi = {
     on: (name: string, handler: any) => handlers.set(name, handler),
     getActiveTools: () => [...active],
     setActiveTools: (names: string[]) => { active = names; },
-    registerTool: (value: any) => { tool = value; },
+    registerTool: (value: any) => { tools.set(value.name, value); },
     appendEntry: vi.fn(), sendMessage: vi.fn(), sendUserMessage: vi.fn(),
   } as any;
   const runtime = createRuntime(pi);
@@ -22,6 +23,7 @@ function setup() {
   runtime.sessionId = "model-test";
   registerLifecycle(pi, runtime);
   registerCompressionTool(pi, runtime);
+  registerRetrievalTool(pi, runtime);
   const message = { role: "user", content: "current request", timestamp: 1 };
   const entry = { type: "message", id: "user-1", parentId: null, timestamp: new Date(1).toISOString(), message };
   const ctx = {
@@ -35,7 +37,7 @@ function setup() {
   } as any;
   const fire = (name: string, event: any = {}) => handlers.get(name)!(event, ctx);
   const select = (id: string) => { ctx.model = { ...ctx.model, id }; return fire("model_select", { model: ctx.model }); };
-  return { runtime, pi, ctx, message, fire, select, active: () => active, tool: () => tool };
+  return { runtime, pi, ctx, message, fire, select, active: () => active, tool: () => tools.get("compress") };
 }
 
 describe("model-specific disable", () => {
@@ -116,7 +118,8 @@ describe("model-specific disable", () => {
     expect(h.runtime.valid).toBe(true);
 
     await h.select("enabled");
-    expect(h.active()).toEqual(["read", "todo", "compress"]);
+    // search_compressed follows compress exactly: both are offered or neither is.
+    expect(h.active()).toEqual(["read", "todo", "compress", "search_compressed"]);
     await h.fire("before_agent_start", { systemPromptOptions: { sections } });
     expect(sections[DCP_SYSTEM_SECTION]).toBeTruthy();
     await h.fire("context", { messages: [h.message] });
@@ -144,9 +147,11 @@ describe("model-specific disable", () => {
     await h.select("enabled");
     expect(h.runtime.valid).toBe(false);
     expect(h.active()).not.toContain("compress");
+    expect(h.active()).not.toContain("search_compressed");
     h.runtime.valid = true;
     h.runtime.config.compress.permission = "deny";
     await h.select("enabled");
     expect(h.active()).not.toContain("compress");
+    expect(h.active()).not.toContain("search_compressed");
   });
 });

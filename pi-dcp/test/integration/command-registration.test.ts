@@ -12,14 +12,14 @@ describe("command registration", () => {
     expect(options.getArgumentCompletions("co")).toEqual([{ value: "context", label: "context", description: "show context usage" }, { value: "compress", label: "compress", description: "request model-authored compression" }]);
   });
 
-  it("registers compress before optional lifecycle capabilities are checked", () => {
+  it("registers the DCP tools before optional lifecycle capabilities are checked", () => {
     const tools: string[] = [];
     piDcp({
       registerCommand: () => undefined,
       registerTool: (tool: { name: string }) => { tools.push(tool.name); },
     } as any);
 
-    expect(tools).toEqual(["compress"]);
+    expect(tools).toEqual(["compress", "search_compressed"]);
   });
 
   it("gates manual compression when readiness is unavailable for a known reason", async () => {

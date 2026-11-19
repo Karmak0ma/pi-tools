@@ -97,6 +97,16 @@ Compression summaries are authored by the model through the v2 `compress` tool. 
 
 **Merging blocks.** A compress range may include existing `bNNNN` blocks. Those blocks are replaced by one new block. The model writes one fresh, higher-level summary for the whole range and does not paste the child summaries in, so a merged block stays small as older work is compressed again. Protected tool output from the merged blocks is carried over verbatim. The replaced blocks stay in the session record as inactive blocks and are not deleted. No placeholders are needed. Each merge adds one nesting level above its deepest child. The limit is 64 levels; `summary.maxNestedDepth` can lower it. A merge that would exceed the limit is refused before anything is saved.
 
+## Searching compressed context
+
+A summary is not a complete record. The model-facing `search_compressed` tool searches the original messages behind compressed blocks, and the stored summaries of blocks that a later block merged. It can then read a match back in full. The result is a new tool result. It is read-only: it writes no operation entry, changes no block activation, and does not bump the context generation.
+
+- **Scope.** Only the current branch is searched. Entries covered by any block are searchable, including entries whose block is inactive or unavailable after native compaction. Summaries of active blocks are not searched, because they are already in context.
+- **Withheld content.** Thinking, system messages, and pi-dcp's own messages are never returned. Images appear only as a placeholder, and a `compress` call is indexed by its topic only, because its summaries are stored in the block. Entries that a host `context_edit` changed or removed are withheld, and so is any summary whose block covers such an entry, so the search cannot bypass that redaction.
+- **Matching.** Matching is deterministic keyword search with no embeddings or model calls. Exact identifiers such as paths, symbols, and numbers work best. A path also finds the `path:line:col` locations that error output prints. `"quoted phrases"` match exactly. A search with no match does not prove that the detail is absent.
+- **Size.** A result is capped at about 12,000 characters and pages with `next offset`. A read returns 8,000 characters per page.
+- **Availability.** The tool is active exactly when `compress` is active: DCP is enabled and healthy, and the model is not excluded. Like `compress`, it is removed when `compress.permission` is `deny`.
+
 ## Compressible and blocked units
 
 Every message in the provider request carries a label: `mNNNN` for a unit the model may compress, `bNNNN` for an active summary block, or `BLOCKED` for a unit that can never be part of a compress range. A unit is `BLOCKED` for one of two reasons:

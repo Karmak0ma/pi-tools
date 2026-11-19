@@ -167,11 +167,11 @@ describe("extension capability gate", () => {
     } as any;
 
     setDcpToolActive(pi, true);
-    expect(active).toEqual(["read", "todo", "compress"]);
+    expect(active).toEqual(["read", "todo", "compress", "search_compressed"]);
 
-    // Repeated session starts must not duplicate the schema name.
+    // Repeated session starts must not duplicate the schema names.
     setDcpToolActive(pi, true);
-    expect(active).toEqual(["read", "todo", "compress"]);
+    expect(active).toEqual(["read", "todo", "compress", "search_compressed"]);
   });
 
   it("reactivates compress on session_start even if the host previously dropped it from the active set", async () => {

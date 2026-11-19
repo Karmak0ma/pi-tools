@@ -259,9 +259,17 @@ export function disableRuntime(runtime: DcpRuntime, reason: string): void {
 }
 
 export function currentToolNames(pi: ExtensionAPI): string[] { return [...new Set(pi.getActiveTools())]; }
+/**
+ * Model-facing tools that exist only while DCP may serve the current model.
+ * They toggle as one set because both describe DCP's compressed context: a
+ * model that cannot receive that context must not be offered tools for it.
+ * Add a name here, not at each call site, so the tools cannot drift apart.
+ */
+export const DCP_TOOL_NAMES = ["compress", "search_compressed"];
+
 export function setDcpToolActive(pi: ExtensionAPI, active: boolean): void {
-  const names = currentToolNames(pi).filter((name) => name !== "compress");
-  if (active) names.push("compress");
+  const names = currentToolNames(pi).filter((name) => !DCP_TOOL_NAMES.includes(name));
+  if (active) names.push(...DCP_TOOL_NAMES);
   pi.setActiveTools(names);
 }
 export function runtimeSessionIdentity(ctx: ExtensionContext): { sessionId: string; leafId: string | null; sessionFile?: string } {
