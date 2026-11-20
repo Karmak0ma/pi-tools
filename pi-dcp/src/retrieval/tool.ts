@@ -23,7 +23,7 @@ export const SearchCompressedParameters = Type.Object({
   query: Type.Optional(Type.String({
     minLength: 1,
     maxLength: 500,
-    description: "For action search. Exact identifiers work best; \"quoted phrases\" match exactly.",
+    description: "For action search. Exact identifiers, paths, and error text match exactly. Plain words also match word forms and small typos. \"Quoted phrases\" match exactly.",
   })),
   block: Type.Optional(Type.String({
     pattern: "^b[0-9]{4}$",
@@ -69,7 +69,7 @@ Use it when:
 - a summary says details are available, or a summary conflicts with current evidence.
 
 Do not call it every turn.
-- action "search": give query. Exact identifiers work best; "quoted phrases" match exactly. Optional block: a visible bNNNN label, to search only that block. Use offset to page.
+- action "search": give query. Exact identifiers, paths, and error text match exactly. Plain words also match word forms and small typos; those hits are marked "matched approximately". Different words for the same idea are NOT matched, so retry with other terms. "Quoted phrases" match exactly. Optional block: a visible bNNNN label, to search only that block. Use offset to page.
 - action "read": give source, a ref from a search result (e:... entry or s:... summary). Use offset to continue a long source.
 - If a search finds nothing, retry with different or exact words. No match does not prove absence.
 

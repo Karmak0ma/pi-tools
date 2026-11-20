@@ -4,7 +4,7 @@ import { createEnvelope, OPERATION_CUSTOM_TYPE, type CreatedBlock, type OpEnvelo
 import { emptyState, markAvailability, reduceEnvelope, type ReducedState } from "../../src/state/reducer.ts";
 import { reconstructFromBranch } from "../../src/state/reconstruct.ts";
 import { buildSearchCorpus } from "../../src/retrieval/corpus.ts";
-import { MAX_RESULT_CHARS, readSource, renderRead, renderSearch, searchCorpus } from "../../src/retrieval/search.ts";
+import { MAX_RESULT_CHARS, readSource, renderRead, renderSearch, searchCorpus, stem } from "../../src/retrieval/search.ts";
 
 // Entries are built as Pi stores them. Blocks are applied through the real
 // reducer, so coverage and summary semantics match production state.
@@ -260,5 +260,90 @@ describe("search_compressed corpus", () => {
     if (!second.ok) throw new Error("unexpected failure");
     expect(second.text).toContain("ENDMARK final");
     expect(second.nextOffset).toBeUndefined();
+  });
+});
+
+describe("search_compressed fuzzy matching", () => {
+  /** One block covers every text, so each text is a searchable entry, `e:u0`, `e:u1`, and so on. */
+  function corpusOf(...texts: string[]) {
+    const entries = texts.map((text, index) => userText(`u${index}`, text));
+    return buildSearchCorpus(entries, apply(emptyState(), block("b1", { entries: entries.map((item) => item.id) })));
+  }
+
+  it.each([
+    ["migrate", "migrated", "migrating", "migration", "migrations"],
+    ["class", "classes"],
+    ["state", "states"],
+    ["setting", "settings"],
+    ["document", "documents", "documented"],
+    ["parse", "parser", "parsed", "parsing"],
+  ])("reduces %s and its word forms to one stem", (...words) => {
+    expect(new Set(words.map((word) => stem(word))).size).toBe(1);
+    // Stripping stops before a stem of three letters, so `rats` does not join `rate`.
+    expect(stem("rats")).not.toBe(stem("rate"));
+  });
+
+  it("finds word forms of a plain word", () => {
+    const corpus = corpusOf("the migration finished", "migrating now", "migrated rows", "unrelated text");
+    expect(searchCorpus(corpus, "migrate")).toMatchObject({ ok: true, matched: 3 });
+  });
+
+  it("finds a typo: one edit for five to eight letters, two edits for nine or more", () => {
+    const corpus = corpusOf("the connection timed out", "lookup failed");
+    expect(searchCorpus(corpus, "conection")).toMatchObject({ ok: true, matched: 1 });
+    // Nine letters, two edits: an insertion and a swap of `oi`.
+    expect(searchCorpus(corpus, "conectoin")).toMatchObject({ ok: true, matched: 1 });
+    // Five letters, two edits from `lookup`.
+    expect(searchCorpus(corpus, "lokap")).toMatchObject({ ok: true, matched: 0 });
+  });
+
+  it("does not fuzz identifiers, numbers, or short words", () => {
+    const corpus = corpusOf("error in app.ts", "bash18 exited", "a car was parked");
+    expect(searchCorpus(corpus, "api.ts")).toMatchObject({ ok: true, matched: 0 });
+    expect(searchCorpus(corpus, "bash17")).toMatchObject({ ok: true, matched: 0 });
+    expect(searchCorpus(corpus, "cat")).toMatchObject({ ok: true, matched: 0 });
+    // The exact forms still match.
+    expect(searchCorpus(corpus, "app.ts")).toMatchObject({ ok: true, matched: 1 });
+    expect(searchCorpus(corpus, "bash18")).toMatchObject({ ok: true, matched: 1 });
+  });
+
+  it("ranks an exact match above an otherwise equal approximate match", () => {
+    // The approximate source comes first in branch order, so only the weights can put the exact one first.
+    const stems = searchCorpus(corpusOf("the migration plan", "the migrate plan"), "migrate");
+    expect(stems.ok && stems.hits.map((hit) => hit.source.ref)).toEqual(["e:u1", "e:u0"]);
+    const typos = searchCorpus(corpusOf("the connection plan", "the conection plan"), "conection");
+    expect(typos.ok && typos.hits.map((hit) => hit.source.ref)).toEqual(["e:u1", "e:u0"]);
+  });
+
+  it("keeps a quoted phrase exact", () => {
+    const corpus = corpusOf("the migration plan", "the migrate plan");
+    expect(searchCorpus(corpus, '"migrate plan"')).toMatchObject({ ok: true, matched: 1 });
+    expect(searchCorpus(corpus, '"migrates plan"')).toMatchObject({ ok: true, matched: 0 });
+  });
+
+  it("marks an approximate hit as approximate, and an exact hit as exact", () => {
+    const result = searchCorpus(corpusOf("the migration plan", "the migrate plan"), "migrate");
+    if (!result.ok) throw new Error("unexpected failure");
+    expect(result.hits.map((hit) => hit.approximate)).toEqual([[], ["migrate~migration"]]);
+    const text = renderSearch(result, "migrate");
+    expect(text).toContain("matched approximately: migrate~migration");
+    expect(text.split("matched approximately").length - 1).toBe(1);
+  });
+
+  it("caps the approximate pairs shown for one hit, and says how many were left out", () => {
+    // Six word forms of `parsing`, and only five are listed.
+    const result = searchCorpus(corpusOf("parse parser parsers parsed parses parsings"), "parsing");
+    if (!result.ok) throw new Error("unexpected failure");
+    const line = renderSearch(result, "parsing").split("\n").find((row) => row.includes("matched approximately")) ?? "";
+    expect(line.split("~").length - 1).toBe(5);
+    expect(line).toContain("(and 1 more)");
+  });
+
+  it("centres the excerpt on the exact match, not on an earlier approximate one", () => {
+    const text = `migration ${"filler ".repeat(200)}migrate here`;
+    const result = searchCorpus(corpusOf(text), "migrate");
+    if (!result.ok) throw new Error("unexpected failure");
+    expect(result.hits[0].excerpt).toContain("migrate here");
+    expect(result.hits[0].excerpt).not.toContain("migration");
   });
 });
