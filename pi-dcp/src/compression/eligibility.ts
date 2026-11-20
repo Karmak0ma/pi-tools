@@ -1,5 +1,7 @@
-import type { ProtocolUnit } from "../identity/types.ts";
-import { unitAlias } from "../identity/snapshot.ts";
+import type { BaselineSnapshot, ProtocolUnit } from "../identity/types.ts";
+import { blockSpan, unitAlias } from "../identity/snapshot.ts";
+import type { ReducedState } from "../state/reducer.ts";
+import { activeBlocksInRange, isSingleBlockRewrite } from "./range.ts";
 
 /**
  * Reasons a unit can never be part of a compression range. Tool-output
@@ -76,38 +78,83 @@ export function blockReasonText(reason: UnitBlockReason): string {
 }
 
 /**
- * Contiguous compressible mNNNN segments, e.g. ["m0001-m0013", "m0015-m0027"].
- * Replaces the old "first alias - last alias" inventory line, which was
- * misleading whenever any unit inside that span was blocked: the model would
- * be told a span was "valid" when it actually straddled a hard boundary.
+ * The compressible runs the model may name right now, written as the labels its
+ * request shows: "m0001-m0040", "b0003-m0120", "b0005-b0007", or one label for a
+ * single unit. This is the only source of the inventory line and of the split
+ * suggestions for a rejected range, so the two cannot disagree.
+ *
+ * Why a visible block is one step of the walk: the model sees a block as one
+ * bNNNN, and the units inside it carry no label. A run that touches a block
+ * therefore starts or ends on its bNNNN, never on a hidden mNNNN.
+ *
+ * Why a block that holds an unselectable unit splits the run: any range that
+ * includes that unit is refused, and a block cannot be taken apart. The block
+ * is left out, and the runs on either side stay separate.
+ *
+ * Why a run that is one block alone is dropped: a range of that block alone is
+ * refused as a single-block rewrite, so offering it would send the model into a
+ * retry loop. isSingleBlockRewrite is the tool's own test, so the two agree.
+ *
+ * Which blocks exist is decided by `state`, the same way the validator decides
+ * it. A block the request does not show has no alias in the snapshot. The model
+ * cannot name it, and the validator refuses any range that reaches its units, so
+ * it is treated as blocked rather than as loose units.
+ *
+ * `from` and `to` must not cut a block. The inventory passes the whole request.
+ * The split path passes a range that resolveCompressionRanges already accepted,
+ * and that resolution rejects any range that cuts a block.
  */
-export function compressibleSegments(units: readonly EligibilityUnit[], eligibility: EligibilityOptions, from = 0, to = units.length - 1): string[] {
-  return compressibleSpans(units, eligibility, from, to).map((span) => formatSegment(span.start, span.end));
-}
-
-/**
- * The same runs as compressibleSegments, as unit indexes. A caller that must
- * test each run (for example, whether it is one whole block) needs the indexes,
- * not the label text.
- */
-export function compressibleSpans(units: readonly EligibilityUnit[], eligibility: EligibilityOptions, from = 0, to = units.length - 1): { start: number; end: number }[] {
-  // `from`/`to` let the error path compute the valid sub-ranges of one
-  // requested range ("split it like this") with the same rules as the
-  // global inventory, so the two can never disagree.
-  const spans: { start: number; end: number }[] = [];
-  let start: number | null = null;
-  for (let index = from; index <= to; index++) {
-    const ok = isUnitCompressible(units[index], index, eligibility);
-    if (ok && start === null) start = index;
-    if (!ok && start !== null) {
-      spans.push({ start, end: index - 1 });
-      start = null;
-    }
+export function compressibleRangeLabels(snapshot: BaselineSnapshot, state: ReducedState, eligibility: EligibilityOptions, from = 0, to = snapshot.units.length - 1): string[] {
+  const aliasByBlockId = new Map([...snapshot.blockAliases.values()].map((item) => [item.blockId, item.alias]));
+  // Same activity test as activeBlocksInRange and aliasBoundary, so the walk sees
+  // every block the validator sees, keyed by its first unit.
+  const blockAt = new Map<number, { end: number; alias?: string }>();
+  for (const [blockId, block] of state.blocks) {
+    if (!block.active || !block.available) continue;
+    const span = blockSpan(snapshot.units, block);
+    if (span) blockAt.set(span.start, { end: span.end, alias: aliasByBlockId.get(blockId) });
   }
-  if (start !== null) spans.push({ start, end: to });
-  return spans;
+
+  const labels: string[] = [];
+  let run: { start: number; end: number; startLabel: string; endLabel: string } | undefined;
+  const closeRun = (): void => {
+    if (!run) return;
+    const consumedBlockIds = activeBlocksInRange(snapshot, state, run.start, run.end).whole;
+    if (!isSingleBlockRewrite(snapshot, state, { start: run.start, end: run.end, consumedBlockIds })) {
+      labels.push(run.startLabel === run.endLabel ? run.startLabel : `${run.startLabel}-${run.endLabel}`);
+    }
+    run = undefined;
+  };
+
+  // Walk the request one step at a time: a block is one step, every other unit
+  // is one step. A block the model cannot name is never offered. A block that
+  // runs past `to` cannot be taken whole either. Neither is cut into pieces.
+  // Today no caller can reach the second case: resolveCompressionRanges rejects
+  // any range that cuts a block before splits are computed. The check stays so
+  // that a future caller cannot get a run that quietly leaves the window.
+  for (let index = from; index <= to;) {
+    const block = blockAt.get(index);
+    const end = block?.end ?? index;
+    const offerable = block === undefined || (block.alias !== undefined && end <= to);
+    if (!offerable || !spanIsCompressible(snapshot.units, index, end, eligibility)) {
+      closeRun();
+    } else {
+      run = {
+        start: run?.start ?? index,
+        end,
+        startLabel: run?.startLabel ?? block?.alias ?? unitAlias(index),
+        endLabel: block?.alias ?? unitAlias(end),
+      };
+    }
+    index = end + 1;
+  }
+  closeRun();
+  return labels;
 }
 
-export function formatSegment(start: number, end: number): string {
-  return start === end ? unitAlias(start) : `${unitAlias(start)}-${unitAlias(end)}`;
+function spanIsCompressible(units: readonly EligibilityUnit[], start: number, end: number, eligibility: EligibilityOptions): boolean {
+  for (let index = start; index <= end; index++) {
+    if (!isUnitCompressible(units[index], index, eligibility)) return false;
+  }
+  return true;
 }

@@ -23,6 +23,27 @@ export function blockAlias(ordinal: number): string {
 }
 
 /**
+ * The first and last unit a block covers, or undefined when no unit holds one
+ * of its effective entries.
+ *
+ * This is the one definition of a block's span. Range resolution (range.ts),
+ * the rendered replacement (transform/blocks.ts), the alias order
+ * (orderedActiveBlocks), and the compress inventory (eligibility.ts) all call
+ * it. Two definitions could disagree about where a block ends, and then the
+ * inventory would advertise a label the request does not show, or hide one it does.
+ */
+export function blockSpan(units: readonly { entryIds: readonly string[] }[], block: Pick<ReducedBlock, "coverage">): { start: number; end: number } | undefined {
+  let start = -1;
+  let end = -1;
+  for (let index = 0; index < units.length; index++) {
+    if (!block.coverage.effectiveEntryIds.some((entryId) => units[index].entryIds.includes(entryId))) continue;
+    if (start < 0) start = index;
+    end = index;
+  }
+  return start < 0 ? undefined : { start, end };
+}
+
+/**
  * The active, available blocks in alias order: by the earliest unit each one
  * covers, then by blockId. Aliases are positional, so appending history never
  * renumbers an existing block. A block created earlier in history can renumber
@@ -32,17 +53,11 @@ export function blockAlias(ordinal: number): string {
  * This is the only ordering rule. createSnapshot uses it, and the compress
  * result uses it to name a new block with the alias the next request shows.
  */
-export function orderedActiveBlocks(units: readonly { entryIds: readonly string[] }[], state: ReducedState): { blockId: string; block: ReducedBlock; indexes: number[] }[] {
+export function orderedActiveBlocks(units: readonly { entryIds: readonly string[] }[], state: ReducedState): { blockId: string; block: ReducedBlock; span: { start: number; end: number } | undefined }[] {
   return [...state.blocks.entries()]
     .filter(([, block]) => block.active && block.available)
-    .map(([blockId, block]) => ({
-      blockId,
-      block,
-      indexes: units
-        .map((unit, index) => block.coverage.effectiveEntryIds.some((entryId) => unit.entryIds.includes(entryId)) ? index : -1)
-        .filter((index) => index >= 0),
-    }))
-    .sort((a, b) => (a.indexes[0] ?? Number.MAX_SAFE_INTEGER) - (b.indexes[0] ?? Number.MAX_SAFE_INTEGER) || a.blockId.localeCompare(b.blockId));
+    .map(([blockId, block]) => ({ blockId, block, span: blockSpan(units, block) }))
+    .sort((a, b) => (a.span?.start ?? Number.MAX_SAFE_INTEGER) - (b.span?.start ?? Number.MAX_SAFE_INTEGER) || a.blockId.localeCompare(b.blockId));
 }
 
 export function modelKey(model: Model<any> | undefined, contextWindow = 0): ModelKey {
@@ -92,7 +107,7 @@ export function createSnapshot(options: {
   const activeBlocks = orderedActiveBlocks(units, options.state);
 
   for (let index = 0; index < activeBlocks.length; index++) {
-    const { blockId, block, indexes } = activeBlocks[index];
+    const { blockId, block, span } = activeBlocks[index];
     const ordinal = index + 1;
     if (ordinal > 9999) throw new Error("alias_overflow");
     const alias = blockAlias(ordinal);
@@ -102,7 +117,7 @@ export function createSnapshot(options: {
       topic: block.topic,
       estimatedSummaryTokens: block.estimatedSummaryTokens,
     });
-    if (indexes.length) blockRanges.set(blockId, { start: Math.min(...indexes), end: Math.max(...indexes) });
+    if (span) blockRanges.set(blockId, span);
   }
 
   const projectionHash = hashJson(options.index.entries.map((entry) => ({

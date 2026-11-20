@@ -29,7 +29,7 @@ describe("captured 2026-08-16 regression", () => {
     expect(text).toContain("m0227");
     // m0005 is excluded (not settled / a turn-protected unit in this capture);
     // the honest report is two segments, not one misleading first-last span.
-    expect(text).toContain("Compressible labels right now: m0001-m0004, m0006.");
+    expect(text).toContain("Compressible ranges right now: m0001-m0004, m0006.");
   });
 
   it("starts unavailable before any request has published a baseline", () => {

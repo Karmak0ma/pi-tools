@@ -1,4 +1,5 @@
 import type { BaselineSnapshot, ProtocolUnit } from "../identity/types.ts";
+import { blockSpan } from "../identity/snapshot.ts";
 import type { ReducedState } from "../state/reducer.ts";
 
 export interface ResolvedRange {
@@ -44,8 +45,8 @@ function aliasBoundary(snapshot: BaselineSnapshot, state: ReducedState, alias: s
   if (!blockAlias) return undefined;
   const block = state.blocks.get(blockAlias.blockId);
   if (!block || !block.active || !block.available) return undefined;
-  const indexes = snapshot.units.map((candidate, index) => block.coverage.effectiveEntryIds.some((id) => candidate.entryIds.includes(id)) ? index : -1).filter((index) => index >= 0);
-  return indexes.length ? (end ? indexes.at(-1) : indexes[0]) : undefined;
+  const span = blockSpan(snapshot.units, block);
+  return span ? (end ? span.end : span.start) : undefined;
 }
 
 /**
@@ -61,12 +62,10 @@ export function activeBlocksInRange(snapshot: BaselineSnapshot, state: ReducedSt
   const partial: string[] = [];
   for (const [id, block] of state.blocks) {
     if (!block.active || !block.available) continue;
-    const indexes = snapshot.units.map((unit, index) => block.coverage.effectiveEntryIds.some((entryId) => unit.entryIds.includes(entryId)) ? index : -1).filter((index) => index >= 0);
-    if (!indexes.length) continue;
-    const first = Math.min(...indexes);
-    const last = Math.max(...indexes);
-    if (last < start || first > end) continue;
-    if (first >= start && last <= end) whole.push(id);
+    const span = blockSpan(snapshot.units, block);
+    if (!span) continue;
+    if (span.end < start || span.start > end) continue;
+    if (span.start >= start && span.end <= end) whole.push(id);
     else partial.push(id);
   }
   return { whole, partial };

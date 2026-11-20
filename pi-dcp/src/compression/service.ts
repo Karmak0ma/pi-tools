@@ -3,12 +3,12 @@ import { hashJson, randomId, sha256 } from "../util/hash.ts";
 import type { BaselineSnapshot } from "../identity/types.ts";
 import type { ReducedState } from "../state/reducer.ts";
 import { createEnvelope, MAX_NESTED_DEPTH, type CompressionCreated, type CreatedBlock } from "../state/operations.ts";
-import { activeBlocksInRange, isSingleBlockRewrite, resolveCompressionRanges, type ResolvedRange } from "./range.ts";
+import { isSingleBlockRewrite, resolveCompressionRanges } from "./range.ts";
 import { validateSummary, type SummaryValidation } from "./validate.ts";
 import { normalizeCompressionParams, type CompressionParams } from "./schema.ts";
 import type { CanonicalIndex } from "../identity/types.ts";
 import { appendProtectedSections, collectProtectedToolSections, extractProtectedSection, type ProtectionOptions } from "./protected.ts";
-import { buildEligibility, compressibleSpans, formatSegment, unitBlockReason, type EligibilityOptions, type UnitBlockReason } from "./eligibility.ts";
+import { buildEligibility, compressibleRangeLabels, unitBlockReason, type UnitBlockReason } from "./eligibility.ts";
 import { unitAlias } from "../identity/snapshot.ts";
 import { estimateTokens } from "../tokens/estimate.ts";
 
@@ -63,7 +63,10 @@ export function buildCompressionEnvelope(options: CompressionBuildOptions): Comp
       // The model's own labels, not unit aliases. A block-bounded range would
       // otherwise be reported with m-labels that the model never wrote.
       const { startId, endId } = params.content[range.rangeIndex];
-      splits.push({ rangeIndex: range.rangeIndex, requested: `${startId}-${endId}`, segments: splitSegments(options, eligibility, range), blockBounded: isBlockLabel(startId) || isBlockLabel(endId) });
+      // The same runs the inventory advertises. A run that is one block alone is
+      // left out inside compressibleRangeLabels, so a retry never offers it.
+      const segments = compressibleRangeLabels(options.snapshot, options.state, eligibility, range.start, range.end);
+      splits.push({ rangeIndex: range.rangeIndex, requested: `${startId}-${endId}`, segments, blockBounded: isBlockLabel(startId) || isBlockLabel(endId) });
     }
   }
   if (blocked.length) return { ok: false, reason: "content_protected", rangeIndex: blocked[0].rangeIndex, id: blocked[0].id, cause: blocked[0].cause, blocked, splits };
@@ -133,17 +136,6 @@ export function buildCompressionEnvelope(options: CompressionBuildOptions): Comp
 
 function isBlockLabel(alias: string): boolean {
   return alias.startsWith("b");
-}
-
-/**
- * The replacement ranges offered for one rejected range. A run that is exactly one
- * block is left out, because a retry with it would be refused as a single-block
- * rewrite. Offering it would send the model into a loop, so that block is left as it is.
- */
-function splitSegments(options: CompressionBuildOptions, eligibility: EligibilityOptions, range: ResolvedRange): string[] {
-  return compressibleSpans(options.snapshot.units, eligibility, range.start, range.end)
-    .filter((span) => !isSingleBlockRewrite(options.snapshot, options.state, { ...span, consumedBlockIds: activeBlocksInRange(options.snapshot, options.state, span.start, span.end).whole }))
-    .map((span) => formatSegment(span.start, span.end));
 }
 
 /**

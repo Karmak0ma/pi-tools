@@ -23,7 +23,7 @@ describe("actionable compression errors", () => {
     expect(text).toContain('"m0227"');
     // m0002 ("current") is the live user turn, excluded from the
     // compressible inventory even though it has a valid alias.
-    expect(text).toContain("Compressible labels right now: m0001.");
+    expect(text).toContain("Compressible ranges right now: m0001.");
     expect(text).toContain("Re-issue compress");
   });
 

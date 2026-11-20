@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { BaselineSnapshot, ProtocolUnit } from "../identity/types.ts";
+import { blockSpan } from "../identity/snapshot.ts";
 import type { ReducedState } from "../state/reducer.ts";
 import { formatLabelTag } from "./labels.ts";
 import { SEARCH_TOOL_NAME } from "../retrieval/corpus.ts";
@@ -11,16 +12,15 @@ export function activeBlockReplacements(messages: readonly AgentMessage[], units
   for (const blockId of snapshot.activeBlockIds) {
     const block = state.blocks.get(blockId);
     if (!block?.active || !block.available) continue;
-    const indexes = units
-      .map((unit, index) => block.coverage.effectiveEntryIds.some((entryId) => unit.entryIds.includes(entryId)) ? index : -1)
-      .filter((index) => index >= 0);
-    if (!indexes.length) continue;
-    const start = Math.min(...indexes);
-    const end = Math.max(...indexes);
+    // Use the span that range validation and the inventory use (blockSpan). If
+    // the two differed, a block could render over units that a range can never
+    // name, or hide units that a range can still select.
+    const span = blockSpan(units, block);
+    if (!span) continue;
     const alias = [...snapshot.blockAliases.values()].find((item) => item.blockId === blockId)?.alias || "b????";
     replacements.push({
-      start,
-      end,
+      start: span.start,
+      end: span.end,
       blockId,
       message: {
         role: "custom",

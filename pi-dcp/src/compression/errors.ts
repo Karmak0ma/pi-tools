@@ -1,6 +1,6 @@
 import type { BaselineSnapshot } from "../identity/types.ts";
 import { latestBaseline, type DcpRuntime } from "../runtime.ts";
-import { blockReasonText, buildEligibility, compressibleSegments, type UnitBlockReason } from "./eligibility.ts";
+import { blockReasonText, buildEligibility, compressibleRangeLabels, type UnitBlockReason } from "./eligibility.ts";
 import { MAX_NESTED_DEPTH } from "../state/operations.ts";
 
 export interface CompressionErrorExtra {
@@ -38,7 +38,7 @@ export function buildErrorText(runtime: DcpRuntime, reason: string, extra: Compr
     return lines.join("\n");
   }
   if (reason === "range_invalid" || reason === "range_overlap") {
-    lines.push("Re-issue compress with labels from this list.");
+    lines.push("Re-issue compress with ranges from this list (each item is startId-endId, or one label for a single unit).");
     appendInventory(lines, baseline, runtime);
     return lines.join("\n");
   }
@@ -131,12 +131,18 @@ function guidanceForReadiness(reason = "state_invalidated"): string {
 
 function appendInventory(lines: string[], baseline: BaselineSnapshot | undefined, runtime: DcpRuntime): void {
   if (!baseline) return;
-  // Report the compressible mNNNN segments, not a first-last span: a span can
-  // straddle a BLOCKED unit and advertise a range the model is not actually
-  // allowed to select in one call.
+  // Report runs, not a first-last span: a span can straddle a BLOCKED unit and
+  // advertise a range the model is not allowed to select in one call. The runs
+  // are written in the labels the request shows (a block is its bNNNN, never the
+  // mNNNN units inside it) and drop single-block runs, which the tool refuses.
+  // runtime.reduced is the same state the tool validates against.
   const eligibility = buildEligibility(baseline.units, { turnProtection: runtime.config.turnProtection, protectUserMessages: runtime.config.compress.protectUserMessages });
-  const segments = compressibleSegments(baseline.units, eligibility);
-  lines.push(`Compressible labels right now: ${segments.length ? segments.join(", ") : "none"}.`);
+  // Known gap, not handled here: a unit with no provider-visible content gets no
+  // inline label (see injectInlineLabels in transform/labels.ts), but this list
+  // can still name it. The random test in compressible-inventory.test.ts builds
+  // only text messages for that reason.
+  const ranges = compressibleRangeLabels(baseline, runtime.reduced, eligibility);
+  lines.push(`Compressible ranges right now: ${ranges.length ? ranges.join(", ") : "none"}.`);
   const blocks = [...baseline.blockAliases.values()].filter((block) => {
     const state = runtime.reduced.blocks.get(block.blockId);
     return state ? state.active && state.available : baseline.activeBlockIds.includes(block.blockId);
