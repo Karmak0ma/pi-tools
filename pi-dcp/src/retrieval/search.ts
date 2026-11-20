@@ -1,14 +1,19 @@
+import MiniSearch, { type SearchOptions as EngineOptions } from "minisearch";
+import { stemmer } from "stemmer";
 import type { Corpus, CorpusSource } from "./corpus.ts";
 
 /**
- * Deterministic keyword search over the compressed-history corpus, and paged
- * reads of one source.
+ * Keyword search over the compressed-history corpus, and paged reads of one source.
  *
  * There are no embeddings and no model calls. The result must be reproducible,
  * cheap, and explainable. Summaries most often lose exact identifiers (paths,
  * symbols, error codes, numbers), and a keyword match finds those exactly.
- * Plain words also match word forms and small typos; identifiers never do.
- * See "Fuzzy matching" below for the rules and the reasons for them.
+ *
+ * MiniSearch owns the inverted index, BM25 ranking, and typo tolerance. This
+ * file owns the rules that MiniSearch cannot know: which tokens are identifiers
+ * (see "Term keys"), how a quoted phrase must appear, which document word a
+ * query word matched (for the `term~form` labels), and where an excerpt is
+ * centred.
  *
  * Output size is capped here, not by callers, so every path returns a bounded
  * tool result.
@@ -44,6 +49,11 @@ export interface SearchOptions {
   blockId?: string;
   offset?: number;
   limit?: number;
+  /**
+   * An index built from this corpus's sources (see searchIndexFor). When omitted, a
+   * full index is built for this one search, which is correct but costs a build.
+   */
+  index?: SearchIndex;
 }
 
 export interface SearchHit {
@@ -80,12 +90,13 @@ export interface Failure {
 }
 
 /**
- * Search the corpus. The ranking is: distinct query terms matched, then exact
- * phrase matches, then term frequency, then branch order. A term counts by the
- * weight of its best match: 1.0 for an exact match, less for a word form or a
- * typo (see WEIGHT_STEM). The first key is the primary one because a source that
- * matches two different terms is much more likely to be the relevant one than a
- * source that repeats one term many times.
+ * Search the corpus. Each query word is looked up in the index, and the word
+ * scores add up per source. A quoted phrase must appear in a source, so phrases
+ * filter and words rank.
+ *
+ * Ranking: the sum of the BM25 scores of the query words, so a rare word counts
+ * more than a common one, and a source that matches more words scores higher.
+ * Branch order breaks ties.
  */
 export function searchCorpus(corpus: Corpus, query: string, options: SearchOptions = {}): SearchResult | Failure {
   const parsed = parseQuery(query);
@@ -96,8 +107,8 @@ export function searchCorpus(corpus: Corpus, query: string, options: SearchOptio
   const offset = Math.max(0, Math.floor(options.offset ?? 0));
   const inScope = (scopeBlockIds: readonly string[]): boolean => options.blockId === undefined || scopeBlockIds.includes(options.blockId);
 
-  const ranked = scoreSources(corpus, parsed, inScope);
-  ranked.sort(compareRanked);
+  const termHits = parsed.terms.length ? searchWords((options.index ?? searchIndexFor(corpus)).engine, parsed.terms) : new Map<number, TermHit>();
+  const ranked = rank(corpus, parsed.phrases, inScope, termHits);
 
   // Pages are cut by size as well as by count. A page of twenty long excerpts
   // could exceed the result cap, so the page ends early and `nextOffset` names
@@ -105,7 +116,11 @@ export function searchCorpus(corpus: Corpus, query: string, options: SearchOptio
   const hits: SearchHit[] = [];
   let used = 0;
   for (const item of ranked.slice(offset, offset + limit)) {
-    const hit: SearchHit = { source: item.source, excerpt: excerptAround(item.source.text, item.score.position), approximate: item.score.approximate };
+    // Excerpts and labels are computed for page hits only. Scanning every
+    // match of every source would cost far more than the page shows.
+    const source = corpus.sources[item.index];
+    const detail = describeHit(source.text, parsed.terms, termHits.get(item.index)?.matched, item.phrase);
+    const hit: SearchHit = { source, excerpt: excerptAround(source.text, detail.position), approximate: detail.approximate };
     const cost = renderHitLine(hit, offset + hits.length + 1).length + 1;
     if (hits.length > 0 && used + cost > HIT_BUDGET_CHARS) break;
     hits.push(hit);
@@ -121,6 +136,7 @@ export function searchCorpus(corpus: Corpus, query: string, options: SearchOptio
     unavailable: countUnavailable(corpus, inScope),
   };
 }
+
 
 /**
  * Return one page of a source. Only refs in the corpus are accepted; this is
@@ -200,7 +216,7 @@ function parseQuery(query: string): ParsedQuery {
     if (normalized) phrases.push(normalized);
     return " ";
   });
-  // Query tokens stay whole. Only document tokens are split (see documentKeys),
+  // Query tokens stay whole. Only document tokens are split (see tokenPieces),
   // so an exact identifier such as `bash17:0` is not diluted into `0`.
   const terms = [...new Set([...bare.matchAll(TOKEN_PATTERN)].map((match) => normalizeToken(match[0])).filter(Boolean))];
   return { terms, phrases: [...new Set(phrases)] };
@@ -217,9 +233,6 @@ function normalizeToken(raw: string): string {
  * (`src/app.ts:12`) both find `src/app.ts:12:4`. Prefixes stop at a colon, so a
  * bare number such as `0` does not match every `line:0` token. Query tokens are
  * not split, so a query for `bash17:0` still means that exact token.
- *
- * Only colon tokens reach this function. Ordinary tokens are matched directly,
- * because the vocabulary build runs over every token of every source on each search.
  */
 function colonPrefixes(whole: string): string[] {
   const pieces = whole.split(":");
@@ -234,454 +247,264 @@ function colonPrefixes(whole: string): string[] {
 /** Keep a source only if the block filter allows it. */
 type InScope = (scopeBlockIds: readonly string[]) => boolean;
 
-/**
- * Match weights, in tenths. An exact match counts 1.0, a word-form (stem)
- * match 0.7, and a typo match 0.5. Integers keep the sums exact, so equal
- * matches tie exactly. Weights only order results: a source with an exact match
- * for a term always outranks an otherwise equal source with only an approximate
- * match, and an approximate match never turns a miss into a hit.
- */
-const WEIGHT_EXACT = 10;
-const WEIGHT_STEM = 7;
-const WEIGHT_TYPO = 5;
-
 /*
- * Fuzzy matching: word forms (stems) and typos. Both are cheap, local, and
- * deterministic, and both are deliberately narrow. Code history is full of
- * identifiers, and a fuzzy match on an identifier points at the wrong file or the
- * wrong job, so only plain words qualify (see isFuzzyWord).
+ * Term keys. The index stores keys, not words, and a query word becomes keys
+ * in exactly the same way, so both sides always reduce the same way.
+ *
+ * A plain word (letters only, five or more) is stored under its own text and
+ * under its stem. A query for `migrate` therefore reaches `migration` through
+ * the shared stem `migrat`. Everything else (identifiers, numbers, and short
+ * words) is stored under one key that has EXACT_PREFIX, so it matches only
+ * itself.
+ *
+ * Why the prefixes: MiniSearch compares a query word with every stored key, not
+ * only plain words. A typo search must not reach identifiers, short words, or
+ * stems. The prefixes are non-letters, so a prefixed key is at least two edits
+ * from any plain query word, and a one-edit typo never reaches one.
  */
+const EXACT_PREFIX = "~~";
+const STEM_PREFIX = "~#";
+const PLAIN_WORD = /^\p{L}{5,}$/u;
+
+function isPlainWord(token: string): boolean {
+  return PLAIN_WORD.test(token);
+}
 
 /**
- * Fuzzy matching applies only to plain words: letters only, at least five of
- * them. Identifiers do not qualify. In `api.ts` or `bash17`, changing one
- * character names another file or job, not a typo. In a short word such as
- * `cat`, one changed letter gives another word (`car`). Such tokens match
- * exactly and nothing else.
+ * The keys for one token. The first key is the token's own key, so an exact
+ * match is a match on `keys[0]`. A token with no stem has only that key.
  */
-const MIN_FUZZY_LENGTH = 5;
-const PLAIN_WORD = /^\p{L}+$/u;
+export function termKeys(token: string): string[] {
+  if (!isPlainWord(token)) return [EXACT_PREFIX + token];
+  return [token, STEM_PREFIX + stemmer(token)];
+}
 
 /**
- * True when a word may take part in stem and typo matches. It runs for each
- * token that is not yet stored while fuzzy matching is on, so ASCII is checked in
- * a loop that stops at the first non-letter. Labels such as `bash17` fail early.
- * Other text falls back to the Unicode-aware pattern.
+ * Relative weights, applied by MiniSearch on top of BM25. An exact key counts
+ * 1.0. A stem counts WEIGHT_STEM, through boostTerm. A typo counts WEIGHT_TYPO,
+ * through the fuzzy weight, and MiniSearch also scales that by the length of
+ * the matched word. A source with an exact match therefore outranks an
+ * otherwise equal source with only a stem or a typo match.
  */
-function isFuzzyWord(key: string): boolean {
-  if (key.length < MIN_FUZZY_LENGTH) return false;
-  for (let index = 0; index < key.length; index++) {
-    const code = key.charCodeAt(index);
-    if (code >= 0x80) return PLAIN_WORD.test(key);
-    const isLetter = (code >= 0x61 && code <= 0x7a) || (code >= 0x41 && code <= 0x5a);
-    if (!isLetter) return false;
+const WEIGHT_STEM = 0.7;
+const WEIGHT_TYPO = 0.5;
+
+/**
+ * Edits allowed for a typo, for every plain word. An earlier version allowed two
+ * edits for nine or more letters. A two-edit neighbour such as `convention` for
+ * `conection` then ranked above the correct `connection` when that source was
+ * longer, because BM25 length normalisation outweighed the lower typo weight.
+ * One edit keeps those neighbours out of the results.
+ */
+const TYPO_EDITS = 1;
+
+/**
+ * Options for one word lookup. The query word is already one whole token, so
+ * it is not split at colons. Prefix search is off, so its weight is unused, but
+ * MiniSearch requires both weights.
+ *
+ * Fuzzy applies only to a plain query key, never to a prefixed one. A plain key
+ * is letters only, so it is at least two edits from every prefixed key: a typo
+ * cannot reach an identifier, a short word, or a stem.
+ */
+const WORD_SEARCH: EngineOptions = {
+  tokenize: (word) => [word],
+  prefix: false,
+  fuzzy: (term) => (isPlainWord(term) ? TYPO_EDITS : false),
+  boostTerm: (term) => (term.startsWith(STEM_PREFIX) ? WEIGHT_STEM : 1),
+  weights: { fuzzy: WEIGHT_TYPO, prefix: WEIGHT_TYPO },
+  combineWith: "OR",
+};
+
+/** One indexed source. `id` is its position in `corpus.sources`, so a hit maps back directly. */
+interface IndexedSource {
+  id: number;
+  text: string;
+}
+
+/**
+ * True when a query has plain words, which need the index. A query of only quoted
+ * phrases is a plain scan of the text, so the caller need not build an index for it.
+ */
+export function searchNeedsIndex(query: string): boolean {
+  return parseQuery(query).terms.length > 0;
+}
+
+/** A search index, with the sources it was built from so that a later corpus can be checked against it. */
+export interface SearchIndex {
+  sources: readonly CorpusSource[];
+  engine: MiniSearch<IndexedSource>;
+}
+
+/**
+ * The index for a corpus. A previous index is returned unchanged when it was
+ * built from the same sources (ref and text, in the same order). The index depends
+ * on nothing else: topic, label, scope, and the unavailable map do not change what
+ * is indexed, and they are read from the corpus on every search. So that
+ * comparison is the whole invalidation rule, and a search that changes no source
+ * costs only the comparison. The tool adapter keeps the last index per session
+ * (see tool.ts).
+ */
+export function searchIndexFor(corpus: Corpus, previous?: SearchIndex): SearchIndex {
+  if (previous && sameIndexedText(previous.sources, corpus.sources)) return previous;
+  const engine = new MiniSearch<IndexedSource>({
+    fields: ["text"],
+    idField: "id",
+    tokenize: (text) => [...tokenPieces(text)].map((token) => token.piece),
+    processTerm: termKeys,
+  });
+  engine.addAll(corpus.sources.map((source, id) => ({ id, text: source.text })));
+  return { sources: corpus.sources, engine };
+}
+
+/** True when both lists hold the same refs and the same texts in the same order, so one index serves both. */
+function sameIndexedText(a: readonly CorpusSource[], b: readonly CorpusSource[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].ref !== b[i].ref || a[i].text !== b[i].text) return false;
   }
   return true;
 }
 
 /**
- * Expansions kept per query term. A common word can have hundreds of close
- * neighbours in a large session, and keeping the nearest fifty bounds the scoring
- * work in the worst case. Exact matches sort first, so the cut never drops them.
+ * Each token of a text, with its position. A colon token also yields its
+ * prefixes at the same position, so each prefix is found on its own (see
+ * colonPrefixes). Positions are used only for excerpts and labels.
  */
-const MAX_EXPANSIONS_PER_TERM = 50;
-
-/**
- * One edit suits a word of five to eight letters. A longer word can take two
- * edits and still be recognisable, so the limit grows with the length.
- */
-function typoLimit(term: string): number {
-  return term.length >= 9 ? 2 : 1;
-}
-
-/**
- * Shortest stem that stemming may produce. Shorter stems merge unrelated words:
- * without this, `rats` would reduce to `rat`, the stem of `rate`.
- */
-const MIN_STEM_LENGTH = 4;
-
-/**
- * Suffixes that stem() strips, tried in this order on each pass. `es` is tried
- * before `s`, so `matches` loses `es` and not only the `s`.
- */
-const STEM_SUFFIXES = ["ment", "ing", "ion", "er", "ed", "ly", "es", "s"];
-
-/**
- * A light suffix stripper, not a Porter stemmer. It maps word forms to one
- * stem, so `migrate`, `migrated`, `migrating`, `migration`, and `migrations` all
- * reach `migrat`. Query words and document words go through this same function,
- * so both sides always reduce the same way.
- *
- * Suffixes are stripped repeatedly because they stack: `documents` loses its `s`
- * and then `ment` (`docu`), and `settings` loses `s` and then `ing` (`sett`).
- * The silent `e` goes last, after the suffixes, so `management` (which becomes
- * `manage`) and `manage` both reach `manag`.
- *
- * Known misses, accepted to keep this small: `configure` and `configuration` do
- * not meet, and `library` and `libraries` do not meet.
- */
-export function stem(word: string): string {
-  let base = word;
-  for (let stripped = true; stripped; ) {
-    stripped = false;
-    for (const suffix of STEM_SUFFIXES) {
-      if (!base.endsWith(suffix) || base.length - suffix.length < MIN_STEM_LENGTH) continue;
-      // `class` and `process` are not plurals.
-      if (suffix === "s" && base.endsWith("ss")) continue;
-      base = base.slice(0, -suffix.length);
-      stripped = true;
-      break;
-    }
+function* tokenPieces(text: string): Generator<{ piece: string; position: number }> {
+  for (const match of text.matchAll(TOKEN_PATTERN)) {
+    const whole = normalizeToken(match[0]);
+    if (!whole) continue;
+    const pieces = whole.includes(":") ? colonPrefixes(whole) : [whole];
+    for (const piece of pieces) yield { piece, position: match.index };
   }
-  if (base.endsWith("e") && base.length - 1 >= MIN_STEM_LENGTH) base = base.slice(0, -1);
-  return base;
+}
+
+/** What one source matched: its score, and for each query word, the keys of the source that word matched. */
+interface TermHit {
+  score: number;
+  matched: Map<number, string[]>;
 }
 
 /**
- * Optimal string alignment distance: insertions, deletions, substitutions, and
- * swaps of two adjacent letters, each counted once. So `recieve` is one edit from
- * `receive`. It returns `limit + 1` as soon as the distance must exceed `limit`.
- * Once a whole row of the table exceeds the limit, no later row can come back
- * under it, so the rest of the table is skipped. Unrelated words cost little.
+ * Look up each query word on its own. A combined query would merge the matched
+ * keys of all words, and then a hit could not say which word matched which
+ * document word. Each word's `match` gives exactly those keys.
  */
-function boundedDistance(a: string, b: string, limit: number): number {
-  if (Math.abs(a.length - b.length) > limit) return limit + 1;
-  let grandparent: number[] = [];
-  let parent = Array.from({ length: b.length + 1 }, (_unused, column) => column);
-  for (let row = 1; row <= a.length; row++) {
-    const current = [row];
-    let rowMinimum = row;
-    for (let column = 1; column <= b.length; column++) {
-      const substitution = parent[column - 1] + (a[row - 1] === b[column - 1] ? 0 : 1);
-      let value = Math.min(parent[column] + 1, current[column - 1] + 1, substitution);
-      if (row > 1 && column > 1 && a[row - 1] === b[column - 2] && a[row - 2] === b[column - 1]) {
-        value = Math.min(value, grandparent[column - 2] + 1);
+function searchWords(engine: MiniSearch<IndexedSource>, words: readonly string[]): Map<number, TermHit> {
+  const hits = new Map<number, TermHit>();
+  words.forEach((word, position) => {
+    for (const result of engine.search(word, WORD_SEARCH)) {
+      const id = result.id as number;
+      let hit = hits.get(id);
+      if (!hit) {
+        hit = { score: 0, matched: new Map() };
+        hits.set(id, hit);
       }
-      current.push(value);
-      if (value < rowMinimum) rowMinimum = value;
+      hit.score += result.score;
+      hit.matched.set(position, Object.keys(result.match));
     }
-    if (rowMinimum > limit) return limit + 1;
-    grandparent = parent;
-    parent = current;
-  }
-  return parent[b.length] <= limit ? parent[b.length] : limit + 1;
-}
-
-interface Score {
-  /** Weighted distinct terms: each term's best weight once, and each phrase at the exact weight. */
-  distinct: number;
-  phrases: number;
-  /** Occurrences of the best-weight match of each term. */
-  occurrences: number;
-  /** Start of the best match. The excerpt centres on it. */
-  position: number;
-  /** `term~form` pairs for terms whose best match in this source is approximate. */
-  approximate: string[];
+  });
+  return hits;
 }
 
 interface Ranked {
-  source: CorpusSource;
-  score: Score;
   index: number;
+  score: number;
+  /** Earliest position of the quoted phrases in the source, when phrases were required. */
+  phrase?: number;
 }
 
 /**
- * The tokens that a search can match, built once per search over the in-scope
- * sources.
- *
- * Each stored token text gets an integer id the first time it is seen. An entry
- * then records one (token, source) pair: the token id, the source, how often the
- * token occurs there, and its first position there. Entries are kept in flat
- * parallel arrays, not one object per token, because a session can hold tens of
- * thousands of distinct words and an object per word is what made this slow.
- *
- * Query terms are expanded against the unique texts, not against every
- * occurrence, so the expensive comparison runs once per unique token. Scoring is
- * then one pass over the entries.
+ * The sources that are results, best first. A quoted phrase is a required
+ * filter: every phrase must appear. Words then rank the sources that contain
+ * the phrases. Without phrases, any word can match. Scope is applied here, before
+ * the caller pages the result.
  */
-interface Vocabulary {
-  /** Stored token text, by id. */
-  keys: string[];
-  ids: Map<string, number>;
-  /** Index into the entry arrays of each token's most recent entry, by id. */
-  lastEntry: number[];
-  entryIds: number[];
-  entrySources: number[];
-  entryCounts: number[];
-  /** First occurrence of the token in its source. The excerpt centres on the best one. */
-  entryPositions: number[];
-  /** Plain words by stem, for word-form matches. */
-  byStem: Map<string, string[]>;
-  /** Plain words, for typo matches. */
-  plainWords: string[];
+function rank(corpus: Corpus, phrases: readonly string[], inScope: InScope, termHits: ReadonlyMap<number, TermHit>): Ranked[] {
+  const ranked: Ranked[] = [];
+  if (phrases.length) {
+    for (const [index, phrase] of phrasePositions(corpus, phrases, inScope)) {
+      ranked.push({ index, score: termHits.get(index)?.score ?? 0, phrase });
+    }
+  } else {
+    for (const [index, hit] of termHits) {
+      if (inScope(corpus.sources[index].scopeBlockIds)) ranked.push({ index, score: hit.score });
+    }
+  }
+  // Branch order breaks ties, so the same query always gives the same order.
+  return ranked.sort((a, b) => b.score - a.score || a.index - b.index);
 }
 
 /**
- * Index the tokens of the in-scope sources. A token is stored only if it can
- * match something: a query term (an exact match), or, when some query term can
- * take a fuzzy match, a plain word (a candidate for a word form or a typo). Every
- * other token, such as the line label `bash17:0`, matches no query that does not
- * name it, so it is skipped. A query of identifiers alone therefore pays for
- * almost no vocabulary, and the ordinary words of the session are not stored.
+ * The in-scope sources that contain every phrase, with the earliest position of
+ * the phrases in each. A phrase is an exact substring of the lowercased text, so
+ * it is case-insensitive, as it was before MiniSearch. It needs no index.
  */
-function buildVocabulary(corpus: Corpus, terms: readonly string[], inScope: InScope): Vocabulary {
-  const vocabulary: Vocabulary = {
-    keys: [],
-    ids: new Map(),
-    lastEntry: [],
-    entryIds: [],
-    entrySources: [],
-    entryCounts: [],
-    entryPositions: [],
-    byStem: new Map(),
-    plainWords: [],
-  };
-  const wanted = new Set(terms);
-  const fuzzy = terms.some(isFuzzyWord);
+function phrasePositions(corpus: Corpus, phrases: readonly string[], inScope: InScope): Map<number, number> {
+  const found = new Map<number, number>();
   corpus.sources.forEach((source, index) => {
     if (!inScope(source.scopeBlockIds)) return;
-    // A plain loop, without a helper closure per token: it runs over every token
-    // of every in-scope source on each search.
-    for (const match of source.text.matchAll(TOKEN_PATTERN)) {
-      const whole = normalizeToken(match[0]);
-      if (!whole) continue;
-      if (whole.includes(":")) {
-        for (const key of colonPrefixes(whole)) addOccurrence(vocabulary, wanted, fuzzy, key, index, match.index);
-      } else {
-        addOccurrence(vocabulary, wanted, fuzzy, whole, index, match.index);
-      }
+    // Lowercasing copies the whole text, so it is paid only when a phrase was asked for.
+    const lower = source.text.toLowerCase();
+    let first = Number.POSITIVE_INFINITY;
+    for (const phrase of phrases) {
+      const at = lower.indexOf(phrase);
+      if (at < 0) return;
+      first = Math.min(first, at);
     }
+    found.set(index, first);
   });
-  return vocabulary;
+  return found;
 }
 
-function addOccurrence(vocabulary: Vocabulary, wanted: ReadonlySet<string>, fuzzy: boolean, key: string, source: number, position: number): void {
-  let id = vocabulary.ids.get(key);
-  if (id === undefined) {
-    const plain = fuzzy && isFuzzyWord(key);
-    if (!plain && !wanted.has(key)) return;
-    id = vocabulary.keys.length;
-    vocabulary.keys.push(key);
-    vocabulary.ids.set(key, id);
-    vocabulary.lastEntry.push(-1);
-    if (plain) registerPlainWord(vocabulary, key);
-  }
-  // Sources arrive in order, so a repeat within one source is the token's last entry.
-  const last = vocabulary.lastEntry[id];
-  if (last >= 0 && vocabulary.entrySources[last] === source) {
-    vocabulary.entryCounts[last]++;
-  } else {
-    vocabulary.lastEntry[id] = vocabulary.entryIds.length;
-    vocabulary.entryIds.push(id);
-    vocabulary.entrySources.push(source);
-    vocabulary.entryCounts.push(1);
-    vocabulary.entryPositions.push(position);
-  }
-}
-
-function registerPlainWord(vocabulary: Vocabulary, key: string): void {
-  vocabulary.plainWords.push(key);
-  const root = stem(key);
-  const group = vocabulary.byStem.get(root);
-  if (group) group.push(key);
-  else vocabulary.byStem.set(root, [key]);
-}
-
-/** A stored token that answers one query term. `distance` orders typo matches; it is 0 for exact and stem matches. */
-interface Candidate {
-  key: string;
-  weight: number;
-  distance: number;
-}
-
-/**
- * Every stored token that answers one query term: the exact token, its word
- * forms, and its typos. The nearest MAX_EXPANSIONS_PER_TERM are kept, strongest
- * match first, then fewest edits, then alphabetical so the result is stable.
- */
-function expandTerm(vocabulary: Vocabulary, term: string): Candidate[] {
-  const found: Candidate[] = [];
-  if (vocabulary.ids.has(term)) found.push({ key: term, weight: WEIGHT_EXACT, distance: 0 });
-  if (!isFuzzyWord(term)) return found;
-
-  const root = stem(term);
-  for (const key of vocabulary.byStem.get(root) ?? []) {
-    if (key !== term) found.push({ key, weight: WEIGHT_STEM, distance: 0 });
-  }
-  const limit = typoLimit(term);
-  for (const key of vocabulary.plainWords) {
-    if (key === term || Math.abs(key.length - term.length) > limit) continue;
-    const distance = boundedDistance(term, key, limit);
-    // A word form was listed above at its higher weight, so it is not repeated as a typo.
-    if (distance <= limit && stem(key) !== root) found.push({ key, weight: WEIGHT_TYPO, distance });
-  }
-  found.sort((a, b) => b.weight - a.weight || a.distance - b.distance || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  return found.slice(0, MAX_EXPANSIONS_PER_TERM);
-}
-
-interface TermMatch {
-  /** Index of the query term. */
-  term: number;
-  weight: number;
-}
-
-/** The query terms that each stored token answers, indexed by token id. */
-function matchesById(vocabulary: Vocabulary, terms: readonly string[]): (TermMatch[] | undefined)[] {
-  const byId: (TermMatch[] | undefined)[] = new Array(vocabulary.keys.length);
-  terms.forEach((term, index) => {
-    for (const candidate of expandTerm(vocabulary, term)) {
-      // Every candidate is a stored text, so it has an id.
-      const id = vocabulary.ids.get(candidate.key)!;
-      const match: TermMatch = { term: index, weight: candidate.weight };
-      const list = byId[id];
-      if (list) list.push(match);
-      else byId[id] = [match];
-    }
-  });
-  return byId;
-}
-
-/** What one source has matched so far. */
-interface Accumulator {
-  /** Per query term: the best weight matched in this source, 0 for none. */
-  best: number[];
-  /** Per query term: occurrences of tokens at that best weight. */
-  occurrences: number[];
-  phrases: number;
-  /** Best weight matched here, and the earliest position at that weight. */
-  top: number;
+/** Where an excerpt centres, and the `term~form` pairs for query words that matched only approximately. */
+interface HitDetail {
   position: number;
-  /** Ids of the approximate tokens matched here. Only terms that stayed approximate are shown. */
-  approximate: Set<number>;
-}
-
-function accumulatorFor(all: (Accumulator | undefined)[], source: number, termCount: number): Accumulator {
-  let acc = all[source];
-  if (!acc) {
-    acc = {
-      best: new Array<number>(termCount).fill(0),
-      occurrences: new Array<number>(termCount).fill(0),
-      phrases: 0,
-      top: 0,
-      position: Number.POSITIVE_INFINITY,
-      approximate: new Set(),
-    };
-    all[source] = acc;
-  }
-  return acc;
+  approximate: string[];
 }
 
 /**
- * Keep the highest weight seen so far, and the earliest position at that weight.
- * The excerpt centres on an exact match even when an approximate one comes first
- * in the text.
+ * Find the excerpt centre and the approximate labels of one hit.
+ *
+ * The excerpt centres on the earliest exact match, a query word or a phrase, so
+ * a typo that comes earlier in the text does not pull the excerpt away from the
+ * real hit. Only when nothing matches exactly does it centre on the earliest
+ * approximate match.
+ *
+ * A query word gets labels only when the source has no exact form of it. This
+ * is the rule that keeps `matched approximately` from appearing on a hit that
+ * also has the exact word. The index stores stems, not surface words, so a
+ * stem match is turned back into the words of this source by scanning the text.
  */
-function noteMatch(acc: Accumulator, weight: number, position: number): void {
-  if (weight > acc.top) {
-    acc.top = weight;
-    acc.position = position;
-  } else if (weight === acc.top && position < acc.position) {
-    acc.position = position;
-  }
-}
-
-function sum(values: readonly number[]): number {
-  let total = 0;
-  for (const value of values) total += value;
-  return total;
-}
-
-/**
- * Score every in-scope source that matches a term or a phrase. Terms match
- * through the vocabulary: each query term is expanded once against the unique
- * tokens, and each source is scored from the entries of the tokens that matched.
- * Phrases are exact substrings, so they are still scanned per source.
- */
-function scoreSources(corpus: Corpus, query: ParsedQuery, inScope: InScope): Ranked[] {
-  const termCount = query.terms.length;
-  const accumulators: (Accumulator | undefined)[] = new Array(corpus.sources.length);
-
-  let keys: string[] = [];
-  let matchesOf: (TermMatch[] | undefined)[] = [];
-  if (termCount) {
-    const vocabulary = buildVocabulary(corpus, query.terms, inScope);
-    keys = vocabulary.keys;
-    matchesOf = matchesById(vocabulary, query.terms);
-    const { entryIds, entrySources, entryCounts, entryPositions } = vocabulary;
-    for (let i = 0; i < entryIds.length; i++) {
-      const id = entryIds[i];
-      const termMatches = matchesOf[id];
-      if (!termMatches) continue;
-      const acc = accumulatorFor(accumulators, entrySources[i], termCount);
-      const count = entryCounts[i];
-      // One token can answer several terms. Its best weight here decides where
-      // the excerpt is centred.
-      let tokenWeight = 0;
-      for (const { term, weight } of termMatches) {
-        if (weight > acc.best[term]) {
-          acc.best[term] = weight;
-          acc.occurrences[term] = count;
-        } else if (weight === acc.best[term]) {
-          acc.occurrences[term] += count;
-        }
-        if (weight < WEIGHT_EXACT) acc.approximate.add(id);
-        tokenWeight = Math.max(tokenWeight, weight);
-      }
-      noteMatch(acc, tokenWeight, entryPositions[i]);
-    }
-  }
-
-  if (query.phrases.length) {
-    corpus.sources.forEach((source, index) => {
-      if (!inScope(source.scopeBlockIds)) return;
-      // Lowercasing allocates a copy of the whole text, so it runs only when a
-      // phrase was requested.
-      const lower = source.text.toLowerCase();
-      for (const phrase of query.phrases) {
-        const at = lower.indexOf(phrase);
-        if (at < 0) continue;
-        const acc = accumulatorFor(accumulators, index, termCount);
-        acc.phrases++;
-        noteMatch(acc, WEIGHT_EXACT, at);
-      }
-    });
-  }
-
-  /** The `term~form` pairs to show: terms whose best match in this source is approximate. */
-  const approximateLabels = (acc: Accumulator): string[] => {
-    const labels = new Set<string>();
-    for (const id of acc.approximate) {
-      for (const { term, weight } of matchesOf[id]!) {
-        if (weight < WEIGHT_EXACT && acc.best[term] < WEIGHT_EXACT) labels.add(`${query.terms[term]}~${keys[id]}`);
-      }
-    }
-    return [...labels];
-  };
-
-  const ranked: Ranked[] = [];
-  accumulators.forEach((acc, index) => {
-    if (!acc) return;
-    ranked.push({
-      source: corpus.sources[index],
-      index,
-      score: {
-        // A phrase counts as one exact term, as it did before weights existed.
-        distinct: sum(acc.best) + acc.phrases * WEIGHT_EXACT,
-        phrases: acc.phrases,
-        occurrences: sum(acc.occurrences),
-        position: acc.position,
-        approximate: approximateLabels(acc),
-      },
-    });
+function describeHit(text: string, words: readonly string[], matched: ReadonlyMap<number, readonly string[]> | undefined, phrase: number | undefined): HitDetail {
+  const ownKeys = new Set(words.map((word) => termKeys(word)[0]));
+  const approximateWords: number[] = [];
+  words.forEach((word, position) => {
+    const keys = matched?.get(position);
+    if (keys && !keys.includes(termKeys(word)[0])) approximateWords.push(position);
   });
-  return ranked;
-}
 
-function compareRanked(a: Ranked, b: Ranked): number {
-  return b.score.distinct - a.score.distinct
-    || b.score.phrases - a.score.phrases
-    || b.score.occurrences - a.score.occurrences
-    || a.index - b.index;
+  let exactAt = phrase ?? Number.POSITIVE_INFINITY;
+  let approximateAt = Number.POSITIVE_INFINITY;
+  const labels = new Set<string>();
+  for (const { piece, position } of tokenPieces(text)) {
+    // Tokens come in text order, so once one is past the best exact match, and
+    // no label is left to find, the rest of the text cannot change the result.
+    if (approximateWords.length === 0 && position > exactAt) break;
+    const [own, stem] = termKeys(piece);
+    if (ownKeys.has(own) && position < exactAt) exactAt = position;
+    for (const word of approximateWords) {
+      const keys = matched!.get(word)!;
+      // A typo matches the piece itself. A word form matches its stem key.
+      if (!keys.includes(own) && !(stem !== undefined && keys.includes(stem))) continue;
+      labels.add(`${words[word]}~${piece}`);
+      approximateAt = Math.min(approximateAt, position);
+    }
+  }
+
+  const position = Number.isFinite(exactAt) ? exactAt : Number.isFinite(approximateAt) ? approximateAt : 0;
+  return { position, approximate: [...labels] };
 }
 
 function excerptAround(text: string, position: number): string {

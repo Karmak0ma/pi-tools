@@ -4,7 +4,7 @@ import { createEnvelope, OPERATION_CUSTOM_TYPE, type CreatedBlock, type OpEnvelo
 import { emptyState, markAvailability, reduceEnvelope, type ReducedState } from "../../src/state/reducer.ts";
 import { reconstructFromBranch } from "../../src/state/reconstruct.ts";
 import { buildSearchCorpus } from "../../src/retrieval/corpus.ts";
-import { MAX_RESULT_CHARS, readSource, renderRead, renderSearch, searchCorpus, stem } from "../../src/retrieval/search.ts";
+import { MAX_RESULT_CHARS, readSource, renderRead, renderSearch, searchCorpus, searchIndexFor, termKeys } from "../../src/retrieval/search.ts";
 
 // Entries are built as Pi stores them. Blocks are applied through the real
 // reducer, so coverage and summary semantics match production state.
@@ -101,7 +101,8 @@ describe("search_compressed corpus", () => {
     const children = searchCorpus(corpus, "tokenparser");
     expect(children).toMatchObject({ ok: true, matched: 2 });
     if (!children.ok) throw new Error("unexpected failure");
-    expect(children.hits.map((hit) => hit.source.ref)).toEqual(["e:e1", "e:e2"]);
+    // Both sources are covered. Their order is by BM25, and the shorter one ranks first, so the order is not asserted here.
+    expect(children.hits.map((hit) => hit.source.ref).sort()).toEqual(["e:e1", "e:e2"]);
     expect(children.hits[0].source.topic).toBe("topic b2");
 
     // The merged-away child's summary is searchable; the active merged summary is not.
@@ -215,6 +216,10 @@ describe("search_compressed corpus", () => {
     expect(searchCorpus(corpus, "src/app.ts")).toMatchObject({ ok: true, matched: 2 });
     expect(searchCorpus(corpus, "src/app.ts:12")).toMatchObject({ ok: true, matched: 1 });
     expect(searchCorpus(corpus, "src/app.ts:12:4")).toMatchObject({ ok: true, matched: 1 });
+    // A query location is not split: `:12:4` does not match the `:12:9` location, but its path and line do.
+    const other = buildSearchCorpus([toolResult("r3", "bash", "TypeError at src/app.ts:12:9")], apply(emptyState(), block("b2", { entries: ["r3"] })));
+    expect(searchCorpus(other, "src/app.ts:12:4")).toMatchObject({ ok: true, matched: 0 });
+    expect(searchCorpus(other, "src/app.ts:12")).toMatchObject({ ok: true, matched: 1 });
     expect(searchCorpus(corpus, "12")).toMatchObject({ ok: true, matched: 0 });
     expect(searchCorpus(corpus, '"user.id lookup"')).toMatchObject({ ok: true, matched: 1 });
     const ranked = searchCorpus(corpus, "lookup later");
@@ -276,11 +281,10 @@ describe("search_compressed fuzzy matching", () => {
     ["state", "states"],
     ["setting", "settings"],
     ["document", "documents", "documented"],
-    ["parse", "parser", "parsed", "parsing"],
-  ])("reduces %s and its word forms to one stem", (...words) => {
-    expect(new Set(words.map((word) => stem(word))).size).toBe(1);
-    // Stripping stops before a stem of three letters, so `rats` does not join `rate`.
-    expect(stem("rats")).not.toBe(stem("rate"));
+    ["parse", "parsed", "parsing", "parses"],
+    ["configure", "configuration", "configured"],
+  ])("gives %s and its word forms one shared stem key", (...words) => {
+    expect(new Set(words.map((word) => termKeys(word)[1])).size).toBe(1);
   });
 
   it("finds word forms of a plain word", () => {
@@ -288,13 +292,28 @@ describe("search_compressed fuzzy matching", () => {
     expect(searchCorpus(corpus, "migrate")).toMatchObject({ ok: true, matched: 3 });
   });
 
-  it("finds a typo: one edit for five to eight letters, two edits for nine or more", () => {
+  it("finds a typo of one edit, and no more", () => {
     const corpus = corpusOf("the connection timed out", "lookup failed");
     expect(searchCorpus(corpus, "conection")).toMatchObject({ ok: true, matched: 1 });
-    // Nine letters, two edits: an insertion and a swap of `oi`.
-    expect(searchCorpus(corpus, "conectoin")).toMatchObject({ ok: true, matched: 1 });
+    // Two edits (a deletion and a substitution) are not matched, at any length.
+    expect(searchCorpus(corpus, "conextion")).toMatchObject({ ok: true, matched: 0 });
     // Five letters, two edits from `lookup`.
     expect(searchCorpus(corpus, "lokap")).toMatchObject({ ok: true, matched: 0 });
+  });
+
+  it("does not let a two-edit neighbour of a typo outrank the real word", () => {
+    // `convention`, `collection`, and the others are two edits from `conection`.
+    // The real word is in the longest source, which BM25 would otherwise rank last.
+    const corpus = corpusOf("the connection timed out here now", "the convention changed", "the condition held", "the collection grew", "the correction landed");
+    const result = searchCorpus(corpus, "conection");
+    expect(result).toMatchObject({ ok: true, matched: 1 });
+    expect(result.ok && result.hits[0].source.ref).toBe("e:u0");
+  });
+
+  it("finds a configure as a word form of configuration", () => {
+    const corpus = corpusOf("the configuration file was changed");
+    expect(searchCorpus(corpus, "configure")).toMatchObject({ ok: true, matched: 1 });
+    expect(searchCorpus(corpus, "configured")).toMatchObject({ ok: true, matched: 1 });
   });
 
   it("does not fuzz identifiers, numbers, or short words", () => {
@@ -305,6 +324,18 @@ describe("search_compressed fuzzy matching", () => {
     // The exact forms still match.
     expect(searchCorpus(corpus, "app.ts")).toMatchObject({ ok: true, matched: 1 });
     expect(searchCorpus(corpus, "bash18")).toMatchObject({ ok: true, matched: 1 });
+  });
+
+  it("keeps a stem apart from a short word with the same letters", () => {
+    // `agreed` stems to `agre`, which is also a short word. The stem key and the exact key differ, so neither finds the other.
+    expect(searchCorpus(corpusOf("the agre note"), "agreed")).toMatchObject({ ok: true, matched: 0 });
+    expect(searchCorpus(corpusOf("we agreed"), "agre")).toMatchObject({ ok: true, matched: 0 });
+  });
+
+  it("does not use identifiers or short words as typo targets", () => {
+    // `error5` is one edit from `errors`, and `rate` is one edit from `rates`. Neither is a typo of the other.
+    expect(searchCorpus(corpusOf("error5 happened"), "errors")).toMatchObject({ ok: true, matched: 0 });
+    expect(searchCorpus(corpusOf("rate limit"), "rates")).toMatchObject({ ok: true, matched: 0 });
   });
 
   it("ranks an exact match above an otherwise equal approximate match", () => {
@@ -327,16 +358,51 @@ describe("search_compressed fuzzy matching", () => {
     expect(result.hits.map((hit) => hit.approximate)).toEqual([[], ["migrate~migration"]]);
     const text = renderSearch(result, "migrate");
     expect(text).toContain("matched approximately: migrate~migration");
+    // Labels show surface words only, never the internal stem or identifier keys.
+    expect(result.hits.flatMap((hit) => hit.approximate).some((label) => label.includes("~#") || label.includes("~~"))).toBe(false);
     expect(text.split("matched approximately").length - 1).toBe(1);
   });
 
   it("caps the approximate pairs shown for one hit, and says how many were left out", () => {
-    // Six word forms of `parsing`, and only five are listed.
-    const result = searchCorpus(corpusOf("parse parser parsers parsed parses parsings"), "parsing");
+    // Six word forms of `migrate`, and only five are listed.
+    const result = searchCorpus(corpusOf("migrated migrating migration migrations migrator migrates"), "migrate");
     if (!result.ok) throw new Error("unexpected failure");
-    const line = renderSearch(result, "parsing").split("\n").find((row) => row.includes("matched approximately")) ?? "";
+    const line = renderSearch(result, "migrate").split("\n").find((row) => row.includes("matched approximately")) ?? "";
     expect(line.split("~").length - 1).toBe(5);
     expect(line).toContain("(and 1 more)");
+  });
+
+  it("ranks a rare exact word above a common word that repeats in one source", () => {
+    // Ten sources hold `common` once, and one holds it four times. The rare word appears only in the last source.
+    const corpus = corpusOf(
+      ...Array.from({ length: 10 }, (_unused, index) => `common note ${index}`),
+      "common common common common",
+      "rareword once",
+    );
+    const result = searchCorpus(corpus, "common rareword");
+    if (!result.ok) throw new Error("unexpected failure");
+    expect(result.hits[0].source.ref).toBe("e:u11");
+    expect(result.hits[1].source.ref).toBe("e:u10");
+  });
+
+  it("requires a quoted phrase, and lets the other words rank the sources that have it", () => {
+    const corpus = corpusOf("the lookup failed with error", "the user.id lookup worked", "error in user.id lookup again");
+    // The first source has `error` but not the phrase, so it is not a result. The second has the phrase and no `error`,
+    // and it is still a result: the words rank the sources that have the phrase, they do not filter them.
+    const result = searchCorpus(corpus, '"user.id lookup" error');
+    if (!result.ok) throw new Error("unexpected failure");
+    expect(result.hits.map((hit) => hit.source.ref)).toEqual(["e:u2", "e:u1"]);
+  });
+
+  it("never serves a stale index: a changed source is found by its new text only", () => {
+    // An equal corpus reuses the previous index, and a changed source builds a new one, so each search sees its own corpus.
+    const first = searchIndexFor(corpusOf("alphaword here"));
+    expect(searchIndexFor(corpusOf("alphaword here"), first)).toBe(first);
+    expect(searchIndexFor(corpusOf("betaword here"), first)).not.toBe(first);
+    expect(searchCorpus(corpusOf("alphaword here"), "alphaword")).toMatchObject({ ok: true, matched: 1 });
+    expect(searchCorpus(corpusOf("betaword here"), "alphaword")).toMatchObject({ ok: true, matched: 0 });
+    expect(searchCorpus(corpusOf("betaword here"), "betaword")).toMatchObject({ ok: true, matched: 1 });
+    expect(searchCorpus(corpusOf("alphaword here"), "alphaword")).toMatchObject({ ok: true, matched: 1 });
   });
 
   it("centres the excerpt on the exact match, not on an earlier approximate one", () => {

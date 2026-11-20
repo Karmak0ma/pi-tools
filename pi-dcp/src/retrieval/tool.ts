@@ -3,8 +3,8 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 import { isEnabledForModel } from "../config/models.ts";
 import { latestBaseline, type DcpRuntime } from "../runtime.ts";
-import { buildSearchCorpus, SEARCH_TOOL_NAME } from "./corpus.ts";
-import { readSource, renderRead, renderSearch, searchCorpus } from "./search.ts";
+import { buildSearchCorpus, SEARCH_TOOL_NAME, type Corpus } from "./corpus.ts";
+import { readSource, renderRead, renderSearch, searchCorpus, searchIndexFor, searchNeedsIndex, type SearchIndex } from "./search.ts";
 
 /**
  * Read-only model tool over the original history behind compressed context.
@@ -23,7 +23,7 @@ export const SearchCompressedParameters = Type.Object({
   query: Type.Optional(Type.String({
     minLength: 1,
     maxLength: 500,
-    description: "For action search. Exact identifiers, paths, and error text match exactly. Plain words also match word forms and small typos. \"Quoted phrases\" match exactly.",
+    description: "For action search. Exact identifiers, paths, and error text match exactly. Plain words also match word forms and small typos. \"Quoted phrases\" must appear exactly.",
   })),
   block: Type.Optional(Type.String({
     pattern: "^b[0-9]{4}$",
@@ -69,7 +69,7 @@ Use it when:
 - a summary says details are available, or a summary conflicts with current evidence.
 
 Do not call it every turn.
-- action "search": give query. Exact identifiers, paths, and error text match exactly. Plain words also match word forms and small typos; those hits are marked "matched approximately". Different words for the same idea are NOT matched, so retry with other terms. "Quoted phrases" match exactly. Optional block: a visible bNNNN label, to search only that block. Use offset to page.
+- action "search": give query. Exact identifiers, paths, and error text match exactly. Plain words also match word forms and small typos; those hits are marked "matched approximately". Rarer words weigh more. Different words for the same idea are NOT matched, so retry with other terms. "Quoted phrases" must appear exactly. Optional block: a visible bNNNN label, to search only that block. Use offset to page.
 - action "read": give source, a ref from a search result (e:... entry or s:... summary). Use offset to continue a long source.
 - If a search finds nothing, retry with different or exact words. No match does not prove absence.
 
@@ -128,7 +128,9 @@ export function executeSearchCompressed(params: SearchCompressedParams, ctx: Ext
       return failure("search", `Block ${params.block} is not visible in the latest context. Search without block, or use a bNNNN label from the current context.`);
     }
   }
-  const result = searchCorpus(corpus, params.query!, { blockId, offset: params.offset, limit: params.limit });
+  // A phrase-only query never reads the index, so it must not pay for a rebuild.
+  const index = searchNeedsIndex(params.query!) ? indexFor(corpus, runtime) : undefined;
+  const result = searchCorpus(corpus, params.query!, { blockId, offset: params.offset, limit: params.limit, index });
   if (!result.ok) return failure("search", result.message);
   return success(renderSearch(result, params.query!, params.block), { action: "search", matched: result.matched, nextOffset: result.nextOffset });
 }
@@ -170,6 +172,21 @@ function visibleBlockId(runtime: DcpRuntime, alias: string): string | undefined 
   const baseline = latestBaseline(runtime);
   if (!baseline || baseline.generation !== runtime.generation) return undefined;
   return baseline.blockAliases.get(alias)?.blockId;
+}
+
+/**
+ * The search index of the latest corpus, kept per runtime. A repeated search, or
+ * a page of one, reuses it when the sources are unchanged. The index is rebuilt
+ * when a source changes, and it is released with the runtime, so it lives no
+ * longer than the session that built it. A search result is appended to the
+ * branch, so keying on the branch would rebuild the index after every search.
+ */
+const searchIndexes = new WeakMap<DcpRuntime, SearchIndex>();
+
+function indexFor(corpus: Corpus, runtime: DcpRuntime): SearchIndex {
+  const index = searchIndexFor(corpus, searchIndexes.get(runtime));
+  searchIndexes.set(runtime, index);
+  return index;
 }
 
 function success(text: string, details: SearchCompressedDetails): ToolOutput {
