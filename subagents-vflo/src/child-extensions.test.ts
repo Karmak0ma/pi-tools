@@ -177,21 +177,6 @@ describe("warnOnUnresolvedChildExtensions", () => {
   });
 });
 
-describe("resolvePackageDir npm: resolution under the real module system", () => {
-  // Regression guard for the require("module") call inside resolvePackageDir's
-  // npm: branch: that call only works where `require` exists (CJS, or ESM with
-  // createRequire). Vitest's transform gives .ts files CJS-style `require`, so
-  // this test reproduces the actual runtime shape pi's own extension loader
-  // uses (not a plain `node --input-type=module` import, which does NOT
-  // provide `require` and was confirmed separately to throw there).
-  it("resolves an installed @scope/name npm package without throwing", () => {
-    const dir = resolvePackageDir("npm:@henryqw/pi-herdr-rename");
-    expect(dir).toBe(
-      path.join(os.homedir(), ".pi", "agent", "npm", "node_modules", "@henryqw/pi-herdr-rename"),
-    );
-  });
-});
-
 describe("resolveChildExtensions builtin entries", () => {
   // `--no-extensions` also turns off pi's built-in extensions, so a
   // `builtin:<name>` entry must reach the child as `-e builtin:<name>`

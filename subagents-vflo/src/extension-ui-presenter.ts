@@ -279,7 +279,7 @@ export class ChildUIDialogComponent implements Component {
     }
   }
 
-  render(width: number): string[] {
+  render(width: number): readonly string[] {
     if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
     this.cachedWidth = width;
     const safeWidth = Math.max(12, width);

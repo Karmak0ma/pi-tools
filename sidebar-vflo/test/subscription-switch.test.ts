@@ -30,7 +30,7 @@ const report = (providerId: string, hours: number, remaining: number): SharedPro
 async function harness() {
 	const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
 	let model = { provider: "anthropic", id: "claude", name: "Claude" };
-	let overlay!: { render(width: number): string[] };
+	let overlay!: { render(width: number): readonly string[] };
 	const ctx = {
 		get model() { return model; },
 		mode: "tui", hasUI: true, thinkingLevel: "medium", cwd: "/fixture",

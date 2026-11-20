@@ -16,7 +16,7 @@ function createFakeTui() {
   } as any;
 }
 
-function elapsedLine(lines: string[]): string | undefined {
+function elapsedLine(lines: readonly string[]): string | undefined {
   return lines.find((line) => line.includes("Elapsed"));
 }
 

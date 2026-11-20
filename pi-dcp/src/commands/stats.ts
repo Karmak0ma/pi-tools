@@ -36,7 +36,7 @@ export async function statsCommand(ctx: ExtensionCommandContext, runtime: DcpRun
     let selectedTab = 0;
     const matches = (data: string, binding: string, fallback: string): boolean => !!keybindings?.matches?.(data, binding) || matchesKey(data, fallback as any);
     return {
-      render(width: number): string[] {
+      render(width: number): readonly string[] {
         const totals = selectedTab === 0 ? session : ledger.totals;
         const scope = selectedTab === 0 ? "Current session" : "All sessions";
         const table = formatStatsTable(totals);

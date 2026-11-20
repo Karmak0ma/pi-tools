@@ -14,7 +14,7 @@ export class FallbackTextComponent implements Component {
     this.lines = lines;
   }
 
-  render(width: number): string[] {
+  render(width: number): readonly string[] {
     return this.lines.map((l) => truncateToWidth(l, width));
   }
 

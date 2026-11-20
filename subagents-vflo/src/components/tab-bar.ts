@@ -55,7 +55,7 @@ export class TabBarComponent implements Component {
     this.cachedLines = null;
   }
 
-  render(width: number): string[] {
+  render(width: number): readonly string[] {
     if (this.cachedLines && this.cachedWidth === width) {
       return this.cachedLines;
     }

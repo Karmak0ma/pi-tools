@@ -40,7 +40,7 @@ class RightAlignedTimestamp implements Component {
 
 	invalidate(): void {}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		const text = truncateToWidth(this.text, width);
 		return [`${" ".repeat(Math.max(0, width - visibleWidth(text)))}${text}`];
 	}
@@ -144,6 +144,10 @@ export default function (pi: ExtensionAPI) {
 	pi.registerMarkdownTransformer((markdown, context) => {
 		if (context.messageType === "assistant-thinking" || !markdown.trim()) return markdown;
 
+		// Since pi 1.6.0 the transformer also runs for custom, summary and
+		// changelog messages. Only user/assistant messages carry a tracked
+		// timestamp, so leave every other kind untouched.
+		if (context.messageType !== "user" && context.messageType !== "assistant") return markdown;
 		const role = context.messageType;
 		const timestamp = timestamps.getMessageTimestamp(role, markdown);
 		return appendTimestamp(markdown, timestamp, timestampSettings.get(), context.availableWidth);

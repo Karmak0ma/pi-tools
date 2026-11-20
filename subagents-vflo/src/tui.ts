@@ -272,7 +272,7 @@ export class SubagentTuiManager {
         }
 
         return {
-          render: (width: number): string[] => {
+          render: (width: number): readonly string[] => {
             // A dialog overlay — ask_user_question, for example — has taken
             // keyboard focus. The user is looking at the main agent view now,
             // so the inspector leaves instead of lingering invisibly and

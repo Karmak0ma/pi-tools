@@ -15,8 +15,17 @@ import {
   AssistantMessageComponent,
   ToolExecutionComponent,
   UserMessageComponent,
+  createBashToolDefinition,
+  createEditToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
+  createPowerShellToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
   getMarkdownTheme,
 } from "@earendil-works/pi-coding-agent";
+import type { ToolDefinition, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import type { RuntimeSubagentInstance } from "../tracker.js";
 import type { SubagentTracker } from "../tracker.js";
@@ -39,6 +48,8 @@ interface TabState {
   activeToolExecutions: Map<string, ToolExecutionComponent>;
   /** All tool components, including completed calls no longer in the active map. */
   toolExecutions: Set<ToolExecutionComponent>;
+  /** Built-in renderers are resolved once per tab; unknown tools keep the generic fallback. */
+  toolRenderers: Map<string, ToolRenderers>;
   dirty: boolean;
 }
 
@@ -50,8 +61,40 @@ function createTabState(): TabState {
     activeAssistantText: "",
     activeToolExecutions: new Map(),
     toolExecutions: new Set(),
+    toolRenderers: new Map(),
     dirty: true,
   };
+}
+
+const builtInToolRendererFactories: Record<string, (cwd: string) => ToolDefinition<any, any, any>> = {
+  bash: createBashToolDefinition,
+  edit: createEditToolDefinition,
+  find: createFindToolDefinition,
+  grep: createGrepToolDefinition,
+  ls: createLsToolDefinition,
+  powershell: createPowerShellToolDefinition,
+  read: createReadToolDefinition,
+  write: createWriteToolDefinition,
+};
+
+function getToolRenderers(tab: TabState, toolName: string, cwd: string): ToolRenderers | undefined {
+  const cached = tab.toolRenderers.get(toolName);
+  if (cached) return cached;
+
+  const createDefinition = builtInToolRendererFactories[toolName];
+  if (!createDefinition) return undefined;
+
+  // ToolExecutionComponent no longer looks up built-in renderers in 1.6.0.
+  // Resolve the public definitions here and pass only their rendering hooks;
+  // the inspector displays tool calls but must never execute them.
+  const definition = createDefinition(cwd);
+  const renderers: ToolRenderers = {
+    renderShell: definition.renderShell,
+    renderCall: definition.renderCall,
+    renderResult: definition.renderResult,
+  };
+  tab.toolRenderers.set(toolName, renderers);
+  return renderers;
 }
 
 function registerToolExecution(
@@ -169,7 +212,7 @@ function processNewEvents(
                       toolCallId,
                       part.arguments || {},
                       { showImages: false },
-                      undefined,
+                      getToolRenderers(tab, part.name, cwd),
                       tui,
                       cwd,
                     );
@@ -203,7 +246,7 @@ function processNewEvents(
                 toolCallId,
                 event.args || {},
                 { showImages: false },
-                undefined,
+                getToolRenderers(tab, event.toolName || "unknown", cwd),
                 tui,
                 cwd,
               );
@@ -239,7 +282,7 @@ function processNewEvents(
                 toolCallId,
                 event.args || {},
                 { showImages: false },
-                undefined,
+                getToolRenderers(tab, event.toolName || "unknown", cwd),
                 tui,
                 cwd,
               );
@@ -274,7 +317,7 @@ function processNewEvents(
                 toolCallId,
                 event.args || {},
                 { showImages: false },
-                undefined,
+                getToolRenderers(tab, event.toolName || "unknown", cwd),
                 tui,
                 cwd,
               );
@@ -352,7 +395,7 @@ class StderrComponent implements Component {
     this.cachedLines = null;
   }
 
-  render(width: number): string[] {
+  render(width: number): readonly string[] {
     if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
     this.cachedWidth = width;
 
@@ -389,7 +432,7 @@ class PlaceholderComponent implements Component {
     this.theme = theme;
   }
 
-  render(_width: number): string[] {
+  render(_width: number): readonly string[] {
     return [this.theme.fg("muted", `  ${this.text}`)];
   }
 
@@ -479,7 +522,7 @@ export class InspectorComponent {
 
   // ─── Component Interface ─────────────────────────────────────────────────
 
-  render(width: number): string[] {
+  render(width: number): readonly string[] {
     // Use tui.terminal.rows (respects compositor cluster height) instead of process.stdout.rows
     const termHeight = this.tui?.terminal?.rows || process.stdout.rows || 24;
     const lines: string[] = [];

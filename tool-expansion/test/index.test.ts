@@ -6,7 +6,7 @@ class ToolExecutionComponent {
   setExpanded(expanded: boolean): void {
     this.expanded = expanded;
   }
-  render(): string[] {
+  render(): readonly string[] {
     return [];
   }
 }
@@ -14,7 +14,7 @@ class ToolExecutionComponent {
 function createContext(mode: "tui" | "rpc") {
   let globalExpanded = false;
   let rawInput: ((data: string) => { consume?: boolean } | undefined) | undefined;
-  let widget: { render(width: number): string[]; invalidate(): void } | undefined;
+  let widget: { render(width: number): readonly string[]; invalidate(): void } | undefined;
   let widgetCleared = false;
   const inputListeners = new Set<((data: string) => { consume?: boolean } | undefined)>();
   const tool = new ToolExecutionComponent();
@@ -49,7 +49,7 @@ function createContext(mode: "tui" | "rpc") {
         widgetCleared = true;
         return;
       }
-      widget = (content as (nextTui: unknown, theme: unknown) => { render(width: number): string[]; invalidate(): void })(tui, {});
+      widget = (content as (nextTui: unknown, theme: unknown) => { render(width: number): readonly string[]; invalidate(): void })(tui, {});
     },
   };
   const ctx = {

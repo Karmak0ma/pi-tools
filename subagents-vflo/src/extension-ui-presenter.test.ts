@@ -200,7 +200,7 @@ describe("child extension UI presenter", () => {
       const COLS = 100;
       class Filler {
         constructor(private readonly count: number, private readonly tag: string) {}
-        render(): string[] {
+        render(): readonly string[] {
           return Array.from({ length: this.count }, (_, index) => `${this.tag}${index}`);
         }
         invalidate(): void {}

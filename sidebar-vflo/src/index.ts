@@ -227,7 +227,7 @@ async function openSettings(runtime: Runtime): Promise<void> {
 		const close = () => closeOverlayCustomUi(settingsTui, settingsHandle, done);
 		let selected = 0;
 		const items = panelLabels.length + 1;
-		const render = (width: number): string[] => {
+		const render = (width: number): readonly string[] => {
 			const lines = [theme.bold("Sidebar VFLO settings"), "", "Color preset: " + runtime.config.colorPreset, ""];
 			for (let index = 0; index < items; index += 1) {
 				const isPreset = index === 0;
@@ -317,7 +317,7 @@ function startOverlay(runtime: Runtime): void {
 				// reuse it until one of its inputs really changes.
 				let frame: { key: string; lines: string[]; panelRanges: Runtime["panelRanges"] } | undefined;
 				return {
-					render(width: number): string[] {
+					render(width: number): readonly string[] {
 						sidebarTheme.preset = runtime.config.colorPreset;
 						// Re-derived every frame: Pi may rebind its private fullscreen
 						// input-listener Set (e.g. on a regular <-> fullscreen switch),

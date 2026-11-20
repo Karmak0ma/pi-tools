@@ -9,7 +9,7 @@ class ToolExecutionComponent {
   setExpanded(expanded: boolean): void {
     this.expanded = expanded;
   }
-  render(): string[] {
+  render(): readonly string[] {
     return this.renderedLines;
   }
 }
@@ -18,7 +18,7 @@ class ToolExecutionComponent {
 // rendered into one leaf layout box rather than represented as child boxes.
 class Container {
   constructor(public readonly children: unknown[]) {}
-  render(width: number): string[] {
+  render(width: number): readonly string[] {
     void width;
     return this.children.flatMap((child) =>
       child && typeof child === "object" && "render" in child && typeof child.render === "function"
