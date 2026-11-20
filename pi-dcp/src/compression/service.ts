@@ -3,12 +3,12 @@ import { hashJson, randomId, sha256 } from "../util/hash.ts";
 import type { BaselineSnapshot } from "../identity/types.ts";
 import type { ReducedState } from "../state/reducer.ts";
 import { createEnvelope, MAX_NESTED_DEPTH, type CompressionCreated, type CreatedBlock } from "../state/operations.ts";
-import { resolveCompressionRanges } from "./range.ts";
+import { activeBlocksInRange, isSingleBlockRewrite, resolveCompressionRanges, type ResolvedRange } from "./range.ts";
 import { validateSummary, type SummaryValidation } from "./validate.ts";
 import { normalizeCompressionParams, type CompressionParams } from "./schema.ts";
 import type { CanonicalIndex } from "../identity/types.ts";
 import { appendProtectedSections, collectProtectedToolSections, extractProtectedSection, type ProtectionOptions } from "./protected.ts";
-import { buildEligibility, compressibleSegments, unitBlockReason, type UnitBlockReason } from "./eligibility.ts";
+import { buildEligibility, compressibleSpans, formatSegment, unitBlockReason, type EligibilityOptions, type UnitBlockReason } from "./eligibility.ts";
 import { unitAlias } from "../identity/snapshot.ts";
 import { estimateTokens } from "../tokens/estimate.ts";
 
@@ -30,7 +30,12 @@ export type CompressionBuildFailure = {
   splits?: RangeSplit[];
 };
 export interface BlockedUnit { id: string; rangeIndex: number; cause: UnitBlockReason; }
-export interface RangeSplit { rangeIndex: number; requested: string; segments: string[]; }
+/**
+ * One rejected range and the valid replacement ranges that split around its blockers.
+ * `blockBounded` is true when the model's range starts or ends on a bNNNN block. Then
+ * the error explains that the walls lie between blocks, not inside them.
+ */
+export interface RangeSplit { rangeIndex: number; requested: string; segments: string[]; blockBounded: boolean; }
 export type CompressionBuildResult = { ok: true; envelope: ReturnType<typeof createEnvelope>; blocks: CreatedBlock[]; } | CompressionBuildFailure;
 export function buildCompressionEnvelope(options: CompressionBuildOptions): CompressionBuildResult {
   const params = normalizeCompressionParams(options.params);
@@ -55,11 +60,20 @@ export function buildCompressionEnvelope(options: CompressionBuildOptions): Comp
       if (cause) blocked.push({ id: unitAlias(unitIndex), rangeIndex: range.rangeIndex, cause });
     }
     if (blocked.length > before) {
-      const requested = `${unitAlias(range.start)}-${unitAlias(range.end)}`;
-      splits.push({ rangeIndex: range.rangeIndex, requested, segments: compressibleSegments(options.snapshot.units, eligibility, range.start, range.end) });
+      // The model's own labels, not unit aliases. A block-bounded range would
+      // otherwise be reported with m-labels that the model never wrote.
+      const { startId, endId } = params.content[range.rangeIndex];
+      splits.push({ rangeIndex: range.rangeIndex, requested: `${startId}-${endId}`, segments: splitSegments(options, eligibility, range), blockBounded: isBlockLabel(startId) || isBlockLabel(endId) });
     }
   }
   if (blocked.length) return { ok: false, reason: "content_protected", rangeIndex: blocked[0].rangeIndex, id: blocked[0].id, cause: blocked[0].cause, blocked, splits };
+  // A range that is one block and nothing else would only rewrite that block.
+  // The rule is checked after blockers, so the model first fixes walls and then this.
+  for (const range of ranges.ranges) {
+    if (!isSingleBlockRewrite(options.snapshot, options.state, range)) continue;
+    const id = [...options.snapshot.blockAliases.values()].find((item) => item.blockId === range.consumedBlockIds[0])?.alias;
+    return { ok: false, reason: "single_block_rewrite", rangeIndex: range.rangeIndex, id };
+  }
   const blocks: CreatedBlock[] = [];
   for (let index = 0; index < ranges.ranges.length; index++) {
     const range = ranges.ranges[index]; const authored = params.content[index].summary;
@@ -103,7 +117,9 @@ export function buildCompressionEnvelope(options: CompressionBuildOptions): Comp
     // Cues are rendered with the block, so they count toward its footprint.
     const estimatedSummaryTokens = Math.max(1, Math.ceil([finalSummary, ...recall].join("\n").length / 4));
     const estimatedSourceTokens = estimateCompressionSourceTokens(options, units, range.consumedBlockIds);
-    const block: CreatedBlock = { blockId: randomId(), ordinal: index, topic: params.topic, summary: finalSummary, authoredSummary: authored, estimatedSummaryTokens, estimatedSourceTokens, estimatedSavingsTokens: Math.max(0, estimatedSourceTokens - estimatedSummaryTokens), coverage: { directEntryIds, effectiveEntryIds, directToolCallIds, effectiveToolCallIds }, anchor: { beforeEntryId: options.snapshot.units[range.start - 1]?.entryIds.at(-1), afterEntryId: options.snapshot.units[range.end + 1]?.entryIds[0] }, consumedBlockIds: range.consumedBlockIds, nestedDepth, ...(recall.length ? { recall } : {}) };
+    // A range names its own phase when it can. A blank range topic counts as absent,
+    // so the call topic applies. normalizeCompressionParams has already defaulted it.
+    const block: CreatedBlock = { blockId: randomId(), ordinal: index, topic: params.content[index].topic?.trim() || params.topic, summary: finalSummary, authoredSummary: authored, estimatedSummaryTokens, estimatedSourceTokens, estimatedSavingsTokens: Math.max(0, estimatedSourceTokens - estimatedSummaryTokens), coverage: { directEntryIds, effectiveEntryIds, directToolCallIds, effectiveToolCallIds }, anchor: { beforeEntryId: options.snapshot.units[range.start - 1]?.entryIds.at(-1), afterEntryId: options.snapshot.units[range.end + 1]?.entryIds[0] }, consumedBlockIds: range.consumedBlockIds, nestedDepth, ...(recall.length ? { recall } : {}) };
     blocks.push(block);
   }
   const operation: CompressionCreated = { type: "compression.created", runId: randomId(), mode: "range", toolCallId: options.toolCallId || `legacy-${options.snapshot.hash.slice(0, 16)}`, snapshotHash: options.snapshot.hash, model: { provider: options.model?.provider || "unknown", id: options.model?.id || "unknown", api: options.model?.api || "unknown" }, blocks };
@@ -113,6 +129,21 @@ export function buildCompressionEnvelope(options: CompressionBuildOptions): Comp
   // this limit even when its own summary is short.
   if (JSON.stringify(envelope).length > 256 * 1024) return { ok: false, reason: "summary_invalid", hint: "the stored operation exceeds 256 KiB; merge fewer blocks or shorten the summary" };
   return { ok: true, envelope, blocks };
+}
+
+function isBlockLabel(alias: string): boolean {
+  return alias.startsWith("b");
+}
+
+/**
+ * The replacement ranges offered for one rejected range. A run that is exactly one
+ * block is left out, because a retry with it would be refused as a single-block
+ * rewrite. Offering it would send the model into a loop, so that block is left as it is.
+ */
+function splitSegments(options: CompressionBuildOptions, eligibility: EligibilityOptions, range: ResolvedRange): string[] {
+  return compressibleSpans(options.snapshot.units, eligibility, range.start, range.end)
+    .filter((span) => !isSingleBlockRewrite(options.snapshot, options.state, { ...span, consumedBlockIds: activeBlocksInRange(options.snapshot, options.state, span.start, span.end).whole }))
+    .map((span) => formatSegment(span.start, span.end));
 }
 
 /**

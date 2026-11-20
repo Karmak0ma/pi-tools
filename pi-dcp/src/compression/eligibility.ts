@@ -82,23 +82,32 @@ export function blockReasonText(reason: UnitBlockReason): string {
  * be told a span was "valid" when it actually straddled a hard boundary.
  */
 export function compressibleSegments(units: readonly EligibilityUnit[], eligibility: EligibilityOptions, from = 0, to = units.length - 1): string[] {
+  return compressibleSpans(units, eligibility, from, to).map((span) => formatSegment(span.start, span.end));
+}
+
+/**
+ * The same runs as compressibleSegments, as unit indexes. A caller that must
+ * test each run (for example, whether it is one whole block) needs the indexes,
+ * not the label text.
+ */
+export function compressibleSpans(units: readonly EligibilityUnit[], eligibility: EligibilityOptions, from = 0, to = units.length - 1): { start: number; end: number }[] {
   // `from`/`to` let the error path compute the valid sub-ranges of one
   // requested range ("split it like this") with the same rules as the
   // global inventory, so the two can never disagree.
-  const segments: string[] = [];
+  const spans: { start: number; end: number }[] = [];
   let start: number | null = null;
   for (let index = from; index <= to; index++) {
     const ok = isUnitCompressible(units[index], index, eligibility);
     if (ok && start === null) start = index;
     if (!ok && start !== null) {
-      segments.push(formatSegment(start, index - 1));
+      spans.push({ start, end: index - 1 });
       start = null;
     }
   }
-  if (start !== null) segments.push(formatSegment(start, to));
-  return segments;
+  if (start !== null) spans.push({ start, end: to });
+  return spans;
 }
 
-function formatSegment(start: number, end: number): string {
+export function formatSegment(start: number, end: number): string {
   return start === end ? unitAlias(start) : `${unitAlias(start)}-${unitAlias(end)}`;
 }

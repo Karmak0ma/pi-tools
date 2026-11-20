@@ -4,7 +4,7 @@ export type ReasonCode =
   | "capability_missing" | "config_layer_invalid" | "state_schema_unknown" | "state_conflict"
   | "projection_unsupported" | "join_ambiguous" | "protocol_invalid" | "snapshot_missing"
   | "snapshot_stale" | "snapshot_mismatch" | "range_invalid" | "range_overlap"
-  | "content_protected" | "block_partial" | "nesting_limit_exceeded" | "summary_invalid"
+  | "content_protected" | "single_block_rewrite" | "block_partial" | "nesting_limit_exceeded" | "summary_invalid"
   | "permission_denied" | "permission_unavailable" | "manual_nonce_required" | "tool_collision"
   | "append_best_effort" | "provider_adapter_unsupported" | "startup_error"
   | "legacy_state_ignored" | "baseline_unavailable" | "alias_overflow" | "previous_extension_changed_context"

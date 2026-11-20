@@ -278,8 +278,14 @@ describe("extension capability gate", () => {
       const result = await registered.execute(toolCallId, compressionParams, undefined, undefined, ctx);
       if (succeeds) {
         expect(result.content[0].text).toContain("pi-dcp compressed 1 range(s)");
+        // The result names the stored block, its label, and its summary length, so a
+        // past call shown without summaries is still known to be complete. The topic
+        // falls back to the default when the call omits it.
+        const storedTopic = omitTopic ? "Compressed context" : "old work";
+        expect(result.content[0].text).toContain(`Stored 1 block(s) (labels apply from the next request):\n- b0001 "${storedTopic}": 35 chars`);
         expect(result.details.reason).toBeUndefined();
         expect(result.details.notification).toMatchObject({
+          topic: storedTopic,
           compressionCount: 1,
           toolCount: 0,
           messageCount: 2,

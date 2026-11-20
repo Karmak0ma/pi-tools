@@ -10,6 +10,9 @@ export const CompressionParametersV2 = Type.Object({
     startId: Type.String({ pattern: "^(m|b)[0-9]{4}$" }),
     endId: Type.String({ pattern: "^(m|b)[0-9]{4}$" }),
     summary: Type.String({ minLength: 1, maxLength: 100000 }),
+    // Optional, so one call can store several phases with their own names. The
+    // bounds match the call topic. A range topic overrides the call topic.
+    topic: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
     // Optional, because most ranges need no cues. Omitting it keeps the call
     // shape that the model already uses. The bounds match the stored block.
     recall: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: MAX_RECALL_CUE_CHARS }), {
@@ -35,8 +38,9 @@ export function isCompressionParams(value: unknown): value is CompressionParams 
     return typeof item.startId === "string" && /^(m|b)[0-9]{4}$/.test(item.startId)
       && typeof item.endId === "string" && /^(m|b)[0-9]{4}$/.test(item.endId)
       && typeof item.summary === "string" && item.summary.length >= 1 && item.summary.length <= 100000
+      && (item.topic === undefined || (typeof item.topic === "string" && item.topic.length >= 1 && item.topic.length <= 120))
       && (item.recall === undefined || isRecallCues(item.recall))
-      && Object.keys(item).every((key) => ["startId", "endId", "summary", "recall"].includes(key));
+      && Object.keys(item).every((key) => ["startId", "endId", "summary", "topic", "recall"].includes(key));
   });
 }
 

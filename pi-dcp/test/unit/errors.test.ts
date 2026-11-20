@@ -33,6 +33,32 @@ describe("actionable compression errors", () => {
     expect(text).toContain("Do not merge this range");
   });
 
+  it("says the walls lie between blocks when a rejected range starts or ends on a block", () => {
+    const split = { rangeIndex: 0, requested: "b0001-m0005", segments: ["m0004-m0005"], blockBounded: true };
+    const bounded = buildErrorText(setup(), "content_protected", { blocked: [{ id: "m0003", rangeIndex: 0, cause: "protected_message" }], splits: [split] });
+    expect(bounded).toContain("The BLOCKED units lie between the selected blocks; they are visible in context, not inside blocks.");
+    expect(bounded).toContain("Blocks on different sides of a wall cannot be merged into one range.");
+    expect(bounded).toContain("range 0 (b0001-m0005) -> m0004-m0005");
+
+    // A range of labels only has no such line, so the message stays as short as before.
+    const plain = buildErrorText(setup(), "content_protected", { blocked: [{ id: "m0003", rangeIndex: 0, cause: "protected_message" }], splits: [{ ...split, requested: "m0001-m0005", blockBounded: false }] });
+    expect(plain).not.toContain("lie between the selected blocks");
+  });
+
+  it("says a split with nothing left to merge should be removed and its blocks left alone", () => {
+    const text = buildErrorText(setup(), "content_protected", { blocked: [{ id: "m0003", rangeIndex: 0, cause: "protected_message" }], splits: [{ rangeIndex: 0, requested: "b0001-m0005", segments: [], blockBounded: true }] });
+    expect(text).toContain("no mergeable segment; remove this range and leave its blocks unchanged");
+    // No replacement is offered, so the "Retry now" sentence would be false.
+    expect(text).toContain("No rejected range can be split into a mergeable range.");
+    expect(text).not.toContain("Retry now");
+  });
+
+  it("refuses a single-block rewrite and says to merge the block or leave it", () => {
+    const text = buildErrorText(setup(), "single_block_rewrite", { rangeIndex: 0, id: "b0001" });
+    expect(text).toContain("Range 0 would rewrite block b0001 alone. Nothing was compressed.");
+    expect(text).toContain("Do not rewrite block b0001 alone. Merge it with neighbouring blocks or raw units in one range, or leave it unchanged.");
+  });
+
   it.each([
     ["compression_unavailable", "No aliases were published"],
     ["baseline_unavailable", "No baseline could be recovered"],

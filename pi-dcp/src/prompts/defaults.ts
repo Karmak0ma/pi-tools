@@ -21,6 +21,30 @@ export type GuidanceConfig = Pick<EffectiveConfig, "turnProtection"> & {
 };
 
 /**
+ * Rules for merging blocks. The compress description, the system guidance, and
+ * the /dcp compress request all read these constants, so they cannot disagree.
+ * They hold no config value and no session value: the cached system prompt must
+ * stay byte-stable across turns.
+ *
+ * A range that includes a BLOCKED unit is refused as content_protected. The model
+ * once read these walls as hidden inside blocks, so the rule states where they sit.
+ */
+export const WALL_RULES = [
+  "BLOCKED units are walls. A range never crosses one, even to merge blocks. BLOCKED units lie between blocks, never inside one.",
+  "System messages (written when instructions or tools change) and `!` shell commands are permanent walls. Merge only blocks that lie between the same walls.",
+];
+
+/**
+ * Quality rules for a merged summary. The service refuses a single-block rewrite.
+ * The rule states that up front, so the model does not spend a call on one.
+ */
+export const MERGE_QUALITY_RULES = [
+  "Merge only a range that holds two or more blocks, or a block plus substantial raw units. Never rewrite one block alone; that call is rejected.",
+  "For each phase, keep the goal, outcome, decisions with their main reasons, open issues, and key artifacts (commits, files, commands). Change the wording, not these facts; list dropped detail that future work may need in recall.",
+  "Give each range its own topic that names its phase. Do not reuse one topic for different phases.",
+];
+
+/**
  * The turn-relative half of compression eligibility, stated as a rule.
  *
  * This is the single fact the model cannot read off the inline
@@ -92,7 +116,8 @@ DO NOT COMPRESS IF
 - You may need exact code, error messages, or file contents in the immediate next steps.
 
 MERGE OLDER BLOCKS
-When several older bNNNN blocks cover finished phases, merge adjacent ones into one higher-level summary: put them in one range, with any raw units between them, and write one new summary. Keep user intent, current constraints, decisions with their main reasons, unresolved issues, and the exact details future work needs. Do not copy the child summaries; they remain stored.
+When several older bNNNN blocks cover finished phases, merge adjacent ones into one higher-level summary: put them in one range, with any raw units between them, and write one new summary. Do not copy the child summaries; they remain stored.
+${[...WALL_RULES, ...MERGE_QUALITY_RULES].map((rule) => `- ${rule}`).join("\n")}
 
 COMPRESSED HISTORY IS SEARCHABLE
 Summaries are not complete transcripts. The original messages behind a compressed block, and the summaries of blocks later merged into it, remain searchable with search_compressed. When you compress, write recall cues for useful details the summary leaves out. Search when you revisit or change a decision recorded in a compressed summary, need an exact command, error, number, or wording the summary omits, or a summary conflicts with current evidence. Do not search every turn, and do not guess omitted details.

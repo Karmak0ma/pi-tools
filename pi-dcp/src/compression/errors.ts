@@ -14,7 +14,7 @@ export interface CompressionErrorExtra {
   baseline?: BaselineSnapshot;
   cause?: UnitBlockReason;
   blocked?: readonly { id: string; rangeIndex: number; cause: UnitBlockReason }[];
-  splits?: readonly { rangeIndex: number; requested: string; segments: readonly string[] }[];
+  splits?: readonly { rangeIndex: number; requested: string; segments: readonly string[]; blockBounded?: boolean }[];
 }
 
 /**
@@ -52,11 +52,21 @@ export function buildErrorText(runtime: DcpRuntime, reason: string, extra: Compr
       lines.push("Blocked units in your request:");
       for (const unit of extra.blocked) lines.push(`- ${unit.id} (range ${unit.rangeIndex}) ${blockReasonText(unit.cause)}.`);
     }
+    if (extra.splits?.some((split) => split.blockBounded)) {
+      // A model that writes b-labels often assumes the walls are hidden inside
+      // those blocks. Blocks are never split by a wall, so the walls sit between them.
+      lines.push("The BLOCKED units lie between the selected blocks; they are visible in context, not inside blocks. Blocks on different sides of a wall cannot be merged into one range.");
+    }
     if (extra.splits?.length) {
       // Give the exact replacement ranges: the retry then only needs one
-      // summary per segment, with no label arithmetic by the model.
-      lines.push("Retry now with the blocked units left out. Replace each rejected range with these ranges (one summary each; nothing else in the request changes):");
-      for (const split of extra.splits) lines.push(`- range ${split.rangeIndex} (${split.requested}) -> ${split.segments.length ? split.segments.join(", ") : "no compressible units; remove this range"}`);
+      // summary per segment, with no label arithmetic by the model. When no range
+      // has a segment left, offering a replacement would be false, so say to drop them.
+      const anySegment = extra.splits.some((split) => split.segments.length > 0);
+      lines.push(anySegment
+        ? "Retry now with the blocked units left out. Replace each rejected range with these ranges (one summary each; nothing else in the request changes):"
+        : "No rejected range can be split into a mergeable range. Remove the rejected ranges and re-issue compress with the other ranges, if any:");
+      // An empty list means the only runs left are single blocks, or no unit is compressible. Both mean: nothing to merge here.
+      for (const split of extra.splits) lines.push(`- range ${split.rangeIndex} (${split.requested}) -> ${split.segments.length ? split.segments.join(", ") : "no mergeable segment; remove this range and leave its blocks unchanged"}`);
     } else {
       lines.push(extra.id ? `Drop ${extra.id} from the range, or split around it, and retry now.` : "Choose ranges that exclude blocked units and retry now.");
     }
@@ -65,6 +75,13 @@ export function buildErrorText(runtime: DcpRuntime, reason: string, extra: Compr
   }
   if (reason === "summary_invalid") {
     lines.push(extra.hint || "Fix the summary and retry.");
+    appendInventory(lines, baseline, runtime);
+    return lines.join("\n");
+  }
+  if (reason === "single_block_rewrite") {
+    // A rewrite of one block only shortens its summary. In a live session those
+    // shorter summaries lost detail, so the call is refused and the block stays as it is or merges.
+    lines.push(`Do not rewrite block ${extra.id || "unknown"} alone. Merge it with neighbouring blocks or raw units in one range, or leave it unchanged. Re-issue compress with the corrected ranges.`);
     appendInventory(lines, baseline, runtime);
     return lines.join("\n");
   }
@@ -96,6 +113,7 @@ function diagnosisFor(reason: string, extra: CompressionErrorExtra, runtime: Dcp
       const why = extra.cause ? blockReasonText(extra.cause) : "is protected";
       return `Unit ${unit} ${why}. Nothing was compressed.`;
     }
+    case "single_block_rewrite": return `Range ${extra.rangeIndex ?? "unknown"} would rewrite block ${extra.id || "unknown"} alone. Nothing was compressed.`;
     case "nesting_limit_exceeded": return `Range ${extra.rangeIndex ?? "unknown"} would create a block nested deeper than ${extra.limit ?? MAX_NESTED_DEPTH} levels.`;
     case "summary_invalid": return "The summary is invalid.";
     case "permission_denied": case "permission_unavailable": return "Compression permission is not available.";

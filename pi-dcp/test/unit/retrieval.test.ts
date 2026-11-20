@@ -155,12 +155,14 @@ describe("search_compressed corpus", () => {
     expect(readSource(corpus, "s:b1")).toMatchObject({ ok: false, message: expect.stringContaining("withheld") });
   });
 
-  it("indexes a compress call by its topic only, because its summaries are stored in the block", () => {
-    const compress = assistant("a1", [{ type: "toolCall", id: "c1", name: "compress", arguments: { topic: "Auth work", content: [{ startId: "m0001", endId: "m0002", summary: "compresssecret repeated" }] } }]);
+  it("indexes a compress call by its topics only, because its summaries are stored in the block", () => {
+    const compress = assistant("a1", [{ type: "toolCall", id: "c1", name: "compress", arguments: { topic: "Auth work", content: [{ startId: "m0001", endId: "m0002", summary: "compresssecret repeated", topic: "Parser phase" }] } }]);
     const corpus = buildSearchCorpus([userText("u1", "auth question"), compress], apply(emptyState(), block("b1", { entries: ["u1", "a1"] })));
 
     expect(searchCorpus(corpus, "compresssecret")).toMatchObject({ ok: true, matched: 0 });
     expect(searchCorpus(corpus, "auth")).toMatchObject({ ok: true, matched: 2 });
+    // A range topic is stored only in its block, so the call must index it to stay findable by it.
+    expect(searchCorpus(corpus, "parser")).toMatchObject({ ok: true, matched: 1 });
   });
 
   it("keeps entries searchable while their block is unavailable after native compaction", () => {
@@ -225,6 +227,54 @@ describe("search_compressed corpus", () => {
     const ranked = searchCorpus(corpus, "lookup later");
     expect(ranked.ok && ranked.hits.map((hit) => hit.source.ref)).toEqual(["e:u1", "e:r1"]);
     expect(searchCorpus(corpus, "--- ...")).toMatchObject({ ok: false });
+  });
+
+  it("shows identical copies once, with a count, and lists the most recent refs", () => {
+    // Three copies that match after trim, and one longer text that also matches.
+    const entries = [
+      toolResult("r1", "bash", "npm test: ERR_LOCK_TIMEOUT"),
+      toolResult("r2", "bash", "npm test: ERR_LOCK_TIMEOUT"),
+      toolResult("r3", "bash", "  npm test: ERR_LOCK_TIMEOUT  "),
+      toolResult("r4", "bash", "npm test: ERR_LOCK_TIMEOUT with more words"),
+    ];
+    const corpus = buildSearchCorpus(entries, apply(emptyState(), block("b1", { entries: entries.map((item) => item.id) })));
+
+    const result = searchCorpus(corpus, "ERR_LOCK_TIMEOUT");
+    if (!result.ok) throw new Error("unexpected failure");
+    // Two distinct texts. The shorter one ranks first, and its best copy is the most recent one.
+    expect(result.matched).toBe(2);
+    expect(result.hits[0].source.ref).toBe("e:r3");
+    expect(result.hits[0].copies).toEqual(["e:r2", "e:r1"]);
+    expect(renderSearch(result, "ERR_LOCK_TIMEOUT")).toContain("(+2 identical copies: e:r2, e:r1)");
+    expect(result.hits[1].copies).toEqual([]);
+
+    // The ref list is capped at five, but the count still covers every copy.
+    const many = Array.from({ length: 7 }, (_unused, index) => toolResult(`m${index}`, "bash", "same output ERR_MANY"));
+    const manyCorpus = buildSearchCorpus(many, apply(emptyState(), block("b2", { entries: many.map((item) => item.id) })));
+    const collapsed = searchCorpus(manyCorpus, "ERR_MANY");
+    if (!collapsed.ok) throw new Error("unexpected failure");
+    expect(collapsed.matched).toBe(1);
+    expect(renderSearch(collapsed, "ERR_MANY")).toContain("(+6 identical copies: e:m5, e:m4, e:m3, e:m2, e:m1)");
+  });
+
+  it("pages over distinct texts, not over raw copies", () => {
+    // Three distinct texts, each copied three times: nine sources, three results.
+    const entries = ["needle alpha", "needle beta", "needle gamma"].flatMap((text, group) => [0, 1, 2].map((copy) => toolResult(`g${group}c${copy}`, "bash", text)));
+    const corpus = buildSearchCorpus(entries, apply(emptyState(), block("b1", { entries: entries.map((item) => item.id) })));
+
+    const first = searchCorpus(corpus, "needle", { limit: 2 });
+    if (!first.ok) throw new Error("unexpected failure");
+    expect(first.matched).toBe(3);
+    expect(first.hits).toHaveLength(2);
+    expect(first.nextOffset).toBe(2);
+
+    const second = searchCorpus(corpus, "needle", { limit: 2, offset: first.nextOffset });
+    if (!second.ok) throw new Error("unexpected failure");
+    expect(second.hits).toHaveLength(1);
+    expect(second.nextOffset).toBeUndefined();
+    // Every copy is accounted for once, on exactly one page.
+    const copies = [...first.hits, ...second.hits].map((hit) => hit.copies.length);
+    expect(copies).toEqual([2, 2, 2]);
   });
 
   it("pages results and keeps every page within the result cap", () => {

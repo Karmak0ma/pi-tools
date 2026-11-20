@@ -34,6 +34,33 @@ describe("compress tool-call arguments", () => {
     expect("summary" in part.arguments.content[0]).toBe(false);
   });
 
+  it("keeps each range's own topic when it drops the summary", () => {
+    const state = emptyState();
+    state.compressToolCallIds.add("call-1");
+    const message = {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call-1", name: "compress", arguments: { content: [{ startId: "m0001", endId: "m0002", summary: "long text", topic: "Phase A" }] } }],
+      provider: "test", model: "model", api: "test", stopReason: "toolUse", timestamp: 1,
+    } as unknown as AgentMessage;
+
+    const [redacted] = applyPersistedRedactions([message], state);
+    expect((redacted as any).content[0].arguments.content[0]).toEqual({ startId: "m0001", endId: "m0002", topic: "Phase A" });
+  });
+
+  it("never redacts the success result, which lists the stored blocks", () => {
+    const state = emptyState();
+    state.compressToolCallIds.add("call-1");
+    const result = {
+      role: "toolResult", toolCallId: "call-1", toolName: "compress",
+      content: [{ type: "text", text: "pi-dcp compressed 1 range(s). Stored 1 block(s):\n- b0001 \"closed work\": 10 chars" }],
+      isError: false, timestamp: 2,
+    } as unknown as AgentMessage;
+
+    // The result is the only place a past call's stored content stays visible, so it must come back unchanged.
+    const [message] = applyPersistedRedactions([result], state);
+    expect(message).toBe(result);
+  });
+
   it("rejects the redaction marker as a summary", () => {
     // Backstop for a model that learned the marker in an earlier session.
     expect(validateSummary(compressSummaryMarker())).toEqual({ ok: false, reason: "summary_invalid" });

@@ -207,14 +207,23 @@ function renderAssistant(content: AssistantMessage["content"]): string {
  * A compress call stores its summaries in the block it creates, and those
  * summaries are indexed there. Its arguments would repeat them. The repeat
  * would re-expose summaries that are hidden or visible, and would skip the
- * withholding rule above. Only the topic is kept, so the call is still findable.
+ * withholding rule above. Only the topics are kept, so the call is still findable.
  */
 function renderToolCall(part: ToolCall): string {
   if (part.name === "compress") {
-    const topic = typeof part.arguments.topic === "string" ? part.arguments.topic : "";
-    return `[tool call] compress ${JSON.stringify({ topic })}`;
+    return `[tool call] compress ${JSON.stringify({ topic: compressTopics(part.arguments) })}`;
   }
   return `[tool call] ${part.name} ${JSON.stringify(part.arguments)}`;
+}
+
+/**
+ * The call topic and each range's own topic. A range topic names its phase and
+ * is stored only in its block, so the call would otherwise be unfindable by it.
+ */
+function compressTopics(args: Record<string, unknown>): string {
+  const ranges: unknown[] = Array.isArray(args.content) ? args.content : [];
+  const topics = [args.topic, ...ranges.map((range) => (range && typeof range === "object" ? (range as Record<string, unknown>).topic : undefined))];
+  return [...new Set(topics.filter((topic): topic is string => typeof topic === "string" && topic.length > 0))].join("; ");
 }
 
 function nonEmpty(label: string, text: string): EntryText | undefined {

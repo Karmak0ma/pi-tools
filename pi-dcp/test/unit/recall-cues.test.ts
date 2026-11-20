@@ -18,11 +18,14 @@ const model = { provider: "openai", id: "m", api: "openai-completions", contextW
 const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 const assistant = (content: unknown[], stopReason: string, timestamp: number) => ({ role: "assistant", content, api: "openai-completions", provider: "openai", model: "m", usage, stopReason, timestamp });
 
-// m0001 user and m0002 reply are closed; m0003 is the live user turn.
+// m0001..m0004 are closed; m0005 is the live user turn. A merge needs a block
+// plus raw units, so the merge tests below range over m0003 as well.
 const session = [
   { role: "user", content: "old", timestamp: 1 },
   assistant([{ type: "text", text: "done" }], "stop", 2),
-  { role: "user", content: "latest", timestamp: 3 },
+  { role: "user", content: "middle", timestamp: 3 },
+  assistant([{ type: "text", text: "middle reply" }], "stop", 4),
+  { role: "user", content: "latest", timestamp: 5 },
 ] as any[];
 
 interface RawSession { index: CanonicalIndex; messages: AgentMessage[]; leafId: string }
@@ -143,12 +146,12 @@ describe("recall cues: merging", () => {
     const child = [...state.blocks.values()][0]!;
 
     // The model wrote no cues for the merged block, so it has none.
-    const merged = build(source, state, 2, [{ startId: "b0001", endId: "b0001", summary: "Y" }]);
+    const merged = build(source, state, 2, [{ startId: "b0001", endId: "m0003", summary: "Y" }]);
     if (!merged.ok) throw new Error(merged.reason);
     expect(merged.blocks[0]).not.toHaveProperty("recall");
 
     // Cues the model does write apply to the merged block alone.
-    const withNew = build(source, state, 3, [{ startId: "b0001", endId: "b0001", summary: "Y", recall: ["new cue"] }]);
+    const withNew = build(source, state, 3, [{ startId: "b0001", endId: "m0003", summary: "Y", recall: ["new cue"] }]);
     if (!withNew.ok) throw new Error(withNew.reason);
     expect(withNew.blocks[0]!.recall).toEqual(["new cue"]);
 

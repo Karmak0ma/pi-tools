@@ -2,8 +2,9 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import { Text } from "@earendil-works/pi-tui";
 import { CompressionParameters, isCompressionParams, normalizeCompressionParams } from "./schema.ts";
 import { buildCompressionEnvelope } from "./service.ts";
-import { modelKey, computeSnapshotHash } from "../identity/snapshot.ts";
+import { blockAlias, computeSnapshotHash, modelKey, orderedActiveBlocks } from "../identity/snapshot.ts";
 import type { BaselineSnapshot } from "../identity/types.ts";
+import type { CreatedBlock } from "../state/operations.ts";
 import { projectSessionManager } from "../identity/project.ts";
 import { buildProtocolUnits } from "../identity/protocol.ts";
 import { reduceEnvelope } from "../state/reducer.ts";
@@ -14,7 +15,19 @@ import { clearBaselines, findBaselineForParent, latestBaseline, noteSuccessfulCo
 import { persistSavingsBestEffort } from "../stats.ts";
 import { buildErrorText } from "./errors.ts";
 import { isEnabledForModel } from "../config/models.ts";
-import { selectionRules } from "../prompts/defaults.ts";
+import { MERGE_QUALITY_RULES, WALL_RULES, selectionRules } from "../prompts/defaults.ts";
+
+/** The merge rules as description bullets. Built once: the text is static. */
+const MERGE_RULE_BULLETS = [...WALL_RULES, ...MERGE_QUALITY_RULES].map((rule) => `- ${rule}`).join("\n");
+
+/** Cap on the receipt's topic line. Several ranges can each carry a long topic, and the joined line would wrap. */
+const MAX_RECEIPT_TOPIC_CHARS = 120;
+
+/**
+ * Upper bound on the stored-block list in the success result. A call holds at most
+ * 16 ranges, so this only guards the result size if that limit ever grows.
+ */
+const MAX_LISTED_BLOCKS = 16;
 
 export interface CompressionToolResultDetails extends Record<string, unknown> {
   runId?: string;
@@ -41,17 +54,17 @@ ${selectionRules(runtime.config)}
 
 Summary quality
 - Every new call must include a full, model-authored summary for each range. pi-dcp does not generate summaries automatically.
-- After a successful call, pi-dcp removes summary arguments from that historical call in the context shown to you, because the text is already in the compressed block. A past successful call without summary arguments is a shortened history record, not a valid example for a new call.
+- After a successful call, pi-dcp removes summary arguments from that historical call in the context shown to you, because the text is already in the compressed block. A past successful call without summary arguments is a shortened history record, not a valid example for a new call. Its tool result lists the blocks it stored, so a past call shown without summaries was complete.
 - Layer 1, the summary: it must let work continue safely WITHOUT searching. Keep user intent (quote short user messages verbatim when they carry the intent), current constraints, decisions with their main reasons, unresolved issues, and the exact details still needed (paths, commands, identifiers, numbers).
 - Layer 2, recall: useful supporting detail that is no longer needed day-to-day (full logs, benchmark tables, rejected alternatives and why, long command output, exploration notes) may be left out of the summary. List it in recall: one short item per detail, with concrete searchable names (file names, symbols, error text, measurement names), for example "SQLite rejection reasons: concurrent writers".
 - Never replace a critical constraint with only a recall cue. If future work depends on it, state it in the summary.
 - Keep the summary lean: no preamble, no restating the obvious.
-- topic is optional display metadata; if omitted, pi-dcp uses "Compressed context".
+- topic is optional display metadata, on the call or on each range; a range topic overrides the call topic. If both are omitted, pi-dcp uses "Compressed context".
 
 Merging blocks
 - A range may include existing bNNNN blocks. Including them merges them into the new block; select whole blocks only.
 - Write ONE new, higher-level summary for the whole range: the selected blocks plus any raw units in it. Do not copy or paste the child summaries.
-- Keep user intent, current constraints, decisions with their main reasons, unresolved issues, and the critical exact details future work still needs (paths, commands, numbers). A merged summary may drop everything else; list dropped detail that future work may need in recall.
+${MERGE_RULE_BULLETS}
 - Write new recall cues for the merged block. Cues of the merged blocks are not carried over; their summaries and cues stay searchable.
 - No placeholders are needed. The replaced summaries remain stored; they are not deleted.
 - Protected tool output inside the merged blocks is carried over verbatim automatically, like the range's own protected output; do not repeat it.
@@ -85,6 +98,21 @@ Validation
     },
   };
   pi.registerTool(tool);
+}
+
+/**
+ * One line per stored block: alias, topic, and summary length. Redaction removes a
+ * past call's summary arguments, but never this result, so the list stays in the
+ * history and shows that the call's content was stored in full.
+ */
+function storedBlockLines(blocks: readonly CreatedBlock[], labels: ReadonlyMap<string, string>): string[] {
+  const lines = blocks.slice(0, MAX_LISTED_BLOCKS).map((block) => {
+    const label = labels.get(block.blockId);
+    const topic = block.topic.replace(/\s+/g, " ").trim();
+    return `- ${label ? `${label} ` : ""}"${topic}": ${block.summary.length.toLocaleString("en-US")} chars`;
+  });
+  if (blocks.length > MAX_LISTED_BLOCKS) lines.push(`- ... and ${blocks.length - MAX_LISTED_BLOCKS} more`);
+  return lines;
 }
 
 /**
@@ -217,11 +245,16 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
       for (const entryId of block.coverage.effectiveEntryIds) coveredEntryIds.add(entryId);
       for (const toolCallId of block.coverage.effectiveToolCallIds) coveredToolCallIds.add(toolCallId);
     }
+    // The receipt shows the topics that were stored. The call topic may be absent
+    // when each range has its own, and the default would then hide the phases.
+    // Cut by code point, so the cut never splits a surrogate pair in the notification.
+    const storedTopics = [...new Set(built.blocks.map((block) => block.topic))].join("; ");
+    const receiptTopic = Array.from(storedTopics).length > MAX_RECEIPT_TOPIC_CHARS ? `${Array.from(storedTopics).slice(0, MAX_RECEIPT_TOPIC_CHARS - 3).join("")}...` : storedTopics;
     const contextWindow = ctx.getContextUsage()?.contextWindow || ctx.model?.contextWindow || 0;
     const contextPercent = contextWindow > 0 ? Math.round((estimatedTokens / contextWindow) * 1000) / 10 : undefined;
     const report: CompressionNotification = {
       action: "compressed",
-      topic: params.topic,
+      topic: receiptTopic,
       count: built.blocks.length,
       estimatedTokens,
       confidence: "heuristic",
@@ -237,8 +270,13 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
     // "nextTurn"`, so the old chat notification always appeared one turn late
     // and looked unrelated to the call that produced it.
     const stats = formatNotification(runtime.config, report);
+    // Labels are the ones the next request shows, computed from the state just
+    // committed. The model needs them now, and a guessed label could name the wrong block.
+    const labels = new Map(orderedActiveBlocks(baseline.units, runtime.reduced).map((item, position) => [item.blockId, blockAlias(position + 1)]));
+    const lines = [`pi-dcp compressed ${built.blocks.length} range(s). Stored ${built.blocks.length} block(s) (labels apply from the next request):`, ...storedBlockLines(built.blocks, labels)];
+    if (stats) lines.push(`${stats}.`);
     return {
-      content: [{ type: "text", text: `pi-dcp compressed ${built.blocks.length} range(s). Refresh context aliases.${stats ? ` ${stats}.` : ""}` }],
+      content: [{ type: "text", text: lines.join("\n") }],
       details: {
         runId: built.envelope.operation.type === "compression.created" ? built.envelope.operation.runId : undefined,
         blockIds: built.blocks.map((block) => block.blockId),

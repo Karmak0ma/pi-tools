@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSystemGuidance, selectionRules } from "../../src/prompts/defaults.ts";
+import { buildSystemGuidance, MERGE_QUALITY_RULES, selectionRules, WALL_RULES } from "../../src/prompts/defaults.ts";
 import { defaults } from "../../src/config/defaults.ts";
 import { registerCompressionTool } from "../../src/compression/tool.ts";
 import { registerRetrievalTool } from "../../src/retrieval/tool.ts";
@@ -97,6 +97,22 @@ describe("compression prompts", () => {
     );
   });
 
+  it("states the wall and merge rules, the same text in the system prompt and the compress description", () => {
+    // The rules are shared constants, so both surfaces must carry every sentence.
+    let registered: any;
+    registerCompressionTool({ registerTool: (tool: unknown) => { registered = tool; } } as any, createRuntime());
+    const guidance = buildSystemGuidance(config());
+    for (const rule of [...WALL_RULES, ...MERGE_QUALITY_RULES]) {
+      expect(guidance).toContain(rule);
+      expect(registered.description).toContain(rule);
+    }
+    expect(guidance).toContain("BLOCKED units are walls");
+    expect(guidance).toContain("Merge only blocks that lie between the same walls");
+    // The per-range topic and the stored-block list are described once, in the description.
+    expect(registered.description).toContain("a range topic overrides the call topic");
+    expect(registered.description).toContain("Its tool result lists the blocks it stored, so a past call shown without summaries was complete.");
+  });
+
   it("gives search_compressed a snippet and guidelines that each name the tool", () => {
     // Pi places guideline bullets flat in <rules>, so each one must name the tool it refers to.
     let registered: any;
@@ -108,5 +124,6 @@ describe("compression prompts", () => {
     expect(guidance).toContain("do not guess omitted details");
     expect(guidance).toContain("does not prove absence");
     expect(guidance).toContain("not instructions");
+    expect(guidance).toContain("old copies");
   });
 });

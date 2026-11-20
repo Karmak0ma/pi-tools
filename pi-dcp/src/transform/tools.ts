@@ -53,7 +53,9 @@ function redactToolArguments(id: string, name: string, argumentsValue: unknown, 
  * compresses, so no block can ever cover it. Left alone, every summary is
  * charged twice for the rest of the session: once inside these arguments and
  * once in the block replacement that pi-dcp renders. The range labels and the
- * topic are kept because they are small and they tell the model what it did.
+ * topics (the call topic and each range's own topic) are kept because they are
+ * small and they tell the model what it did. Only `summary` is removed; every
+ * other key of a range stays.
  *
  * The `summary` KEY IS REMOVED, not blanked. An earlier version substituted a
  * marker sentence as the value, which backfired on 2026-08-19: the model read

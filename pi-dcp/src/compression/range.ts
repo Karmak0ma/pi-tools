@@ -48,7 +48,15 @@ function aliasBoundary(snapshot: BaselineSnapshot, state: ReducedState, alias: s
   return indexes.length ? (end ? indexes.at(-1) : indexes[0]) : undefined;
 }
 
-function activeBlocksInRange(snapshot: BaselineSnapshot, state: ReducedState, start: number, end: number): { whole: string[]; partial: string[] } {
+/**
+ * Active blocks whose units lie inside [start, end]. A block that is only partly
+ * inside is reported as partial, and the caller rejects it.
+ *
+ * Only active blocks are returned, and an active block is always top-level: a
+ * block that a later merge consumed is inactive. So a merged block never adds
+ * a second, nested entry to `whole`.
+ */
+export function activeBlocksInRange(snapshot: BaselineSnapshot, state: ReducedState, start: number, end: number): { whole: string[]; partial: string[] } {
   const whole: string[] = [];
   const partial: string[] = [];
   for (const [id, block] of state.blocks) {
@@ -62,6 +70,32 @@ function activeBlocksInRange(snapshot: BaselineSnapshot, state: ReducedState, st
     else partial.push(id);
   }
   return { whole, partial };
+}
+
+/**
+ * Indexes in [start, end] whose entries are not all covered by the consumed
+ * blocks. A unit with ANY entry outside the blocks is raw, even when it only
+ * partly overlaps a block. Such a unit is real content that a rewrite would add.
+ */
+export function rawUnitIndexes(snapshot: BaselineSnapshot, state: ReducedState, range: Pick<ResolvedRange, "start" | "end" | "consumedBlockIds">): number[] {
+  const covered = new Set(range.consumedBlockIds.flatMap((id) => state.blocks.get(id)?.coverage.effectiveEntryIds ?? []));
+  const raw: number[] = [];
+  for (let index = range.start; index <= range.end; index++) {
+    const entryIds = snapshot.units[index].entryIds;
+    // An empty unit has no entry that a block could cover, so it counts as raw.
+    const inside = entryIds.length > 0 && entryIds.every((id) => covered.has(id));
+    if (!inside) raw.push(index);
+  }
+  return raw;
+}
+
+/**
+ * A range that consumes exactly one block and no raw unit only rewrites that
+ * block, and it adds nothing. A rewrite like this is refused. The same test
+ * decides which split segments are offered on a retry, so the two rules cannot drift.
+ */
+export function isSingleBlockRewrite(snapshot: BaselineSnapshot, state: ReducedState, range: Pick<ResolvedRange, "start" | "end" | "consumedBlockIds">): boolean {
+  return range.consumedBlockIds.length === 1 && rawUnitIndexes(snapshot, state, range).length === 0;
 }
 
 export function unitRange(snapshot: BaselineSnapshot, ranges: readonly ResolvedRange[]): ProtocolUnit[] { return ranges.flatMap((range) => snapshot.units.slice(range.start, range.end + 1)); }

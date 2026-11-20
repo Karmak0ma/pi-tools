@@ -29,6 +29,11 @@ const MAX_APPROXIMATE_LABELS = 5;
 const MAX_LIMIT = 20;
 const EXCERPT_CHARS = 480;
 const READ_PAGE_CHARS = 8_000;
+/**
+ * Copy refs listed on one hit. The count still covers every copy. A common phrase
+ * can match dozens of identical outputs, and listing them all would crowd out the hits.
+ */
+const MAX_COPY_REFS = 5;
 
 /**
  * Identifier characters stay inside a token, so `user.id`, `pi-dcp`,
@@ -61,12 +66,14 @@ export interface SearchHit {
   excerpt: string;
   /** `term~form` pairs for query terms that matched this source only approximately. */
   approximate: string[];
+  /** Refs of other sources with the same text, most recent first. Empty when there are no copies. */
+  copies: string[];
 }
 
 export interface SearchResult {
   ok: true;
   hits: SearchHit[];
-  /** Matching sources in scope, before paging. */
+  /** Distinct matches in scope, before paging. Identical copies count once. */
   matched: number;
   offset: number;
   nextOffset?: number;
@@ -108,7 +115,7 @@ export function searchCorpus(corpus: Corpus, query: string, options: SearchOptio
   const inScope = (scopeBlockIds: readonly string[]): boolean => options.blockId === undefined || scopeBlockIds.includes(options.blockId);
 
   const termHits = parsed.terms.length ? searchWords((options.index ?? searchIndexFor(corpus)).engine, parsed.terms) : new Map<number, TermHit>();
-  const ranked = rank(corpus, parsed.phrases, inScope, termHits);
+  const ranked = collapseIdentical(corpus, rank(corpus, parsed.phrases, inScope, termHits));
 
   // Pages are cut by size as well as by count. A page of twenty long excerpts
   // could exceed the result cap, so the page ends early and `nextOffset` names
@@ -120,7 +127,12 @@ export function searchCorpus(corpus: Corpus, query: string, options: SearchOptio
     // match of every source would cost far more than the page shows.
     const source = corpus.sources[item.index];
     const detail = describeHit(source.text, parsed.terms, termHits.get(item.index)?.matched, item.phrase);
-    const hit: SearchHit = { source, excerpt: excerptAround(source.text, detail.position), approximate: detail.approximate };
+    const hit: SearchHit = {
+      source,
+      excerpt: excerptAround(source.text, detail.position),
+      approximate: detail.approximate,
+      copies: item.copies.map((index) => corpus.sources[index].ref),
+    };
     const cost = renderHitLine(hit, offset + hits.length + 1).length + 1;
     if (hits.length > 0 && used + cost > HIT_BUDGET_CHARS) break;
     hits.push(hit);
@@ -168,11 +180,11 @@ export function renderSearch(result: SearchResult, query: string, scope?: string
   if (result.matched === 0) {
     lines.push(`No matches for "${query}"${scopeText}. No match does not prove absence: retry with different words or an exact identifier.`);
   } else if (result.hits.length === 0) {
-    lines.push(`No results at offset ${result.offset}; ${result.matched} source(s) match "${query}"${scopeText}.`);
+    lines.push(`No results at offset ${result.offset}; ${result.matched} distinct match(es) for "${query}"${scopeText}.`);
   } else {
     const first = result.offset + 1;
     const last = result.offset + result.hits.length;
-    lines.push(`${result.matched} source(s) match "${query}"${scopeText}; showing ${first}-${last}.`);
+    lines.push(`${result.matched} distinct match(es) for "${query}"${scopeText}; showing ${first}-${last}.`);
   }
   const { withheld, missing } = result.unavailable;
   if (withheld || missing) {
@@ -413,6 +425,8 @@ interface Ranked {
   score: number;
   /** Earliest position of the quoted phrases in the source, when phrases were required. */
   phrase?: number;
+  /** Indexes of identical copies that this result stands for, most recent first. */
+  copies: number[];
 }
 
 /**
@@ -425,15 +439,49 @@ function rank(corpus: Corpus, phrases: readonly string[], inScope: InScope, term
   const ranked: Ranked[] = [];
   if (phrases.length) {
     for (const [index, phrase] of phrasePositions(corpus, phrases, inScope)) {
-      ranked.push({ index, score: termHits.get(index)?.score ?? 0, phrase });
+      ranked.push({ index, score: termHits.get(index)?.score ?? 0, phrase, copies: [] });
     }
   } else {
     for (const [index, hit] of termHits) {
-      if (inScope(corpus.sources[index].scopeBlockIds)) ranked.push({ index, score: hit.score });
+      if (inScope(corpus.sources[index].scopeBlockIds)) ranked.push({ index, score: hit.score, copies: [] });
     }
   }
   // Branch order breaks ties, so the same query always gives the same order.
   return ranked.sort((a, b) => b.score - a.score || a.index - b.index);
+}
+
+/**
+ * Collapse sources whose text is identical after trim into one result.
+ *
+ * Repeated tool output (the same test run, the same file read) fills results with
+ * copies of one text, and the copies crowd out the distinct evidence. Each group
+ * keeps its best member: the highest score, and among equal scores the most recent.
+ * Entries are in branch order, so a higher index is a later entry, and it wins a tie.
+ * The other members stay as `copies`, so the model can still read any of them. Counts
+ * and paging then run over the collapsed list, so a page holds distinct texts.
+ *
+ * Empty texts are never grouped, because they do not match one another.
+ */
+function collapseIdentical(corpus: Corpus, ranked: readonly Ranked[]): Ranked[] {
+  const groups = new Map<string, Ranked[]>();
+  const collapsed: Ranked[] = [];
+  for (const item of ranked) {
+    const key = corpus.sources[item.index].text.trim();
+    if (!key) {
+      collapsed.push(item);
+      continue;
+    }
+    const group = groups.get(key);
+    if (group) group.push(item);
+    else groups.set(key, [item]);
+  }
+  for (const members of groups.values()) {
+    const best = members.reduce((kept, candidate) => candidate.score > kept.score || (candidate.score === kept.score && candidate.index > kept.index) ? candidate : kept);
+    const copies = members.filter((member) => member !== best).map((member) => member.index).sort((a, b) => b - a);
+    collapsed.push({ ...best, copies });
+  }
+  // Same order as rank(): best score first, then branch order.
+  return collapsed.sort((a, b) => b.score - a.score || a.index - b.index);
 }
 
 /**
@@ -541,7 +589,10 @@ function renderHitLine(hit: SearchHit, number: number): string {
   const shown = hit.approximate.slice(0, MAX_APPROXIMATE_LABELS);
   const more = hit.approximate.length - shown.length;
   const approximate = shown.length ? `\n   matched approximately: ${shown.join(", ")}${more ? ` (and ${more} more)` : ""}` : "";
-  return `${number}. ${hit.source.ref} (${hit.source.kind}) | ${hit.source.label} | topic: ${hit.source.topic}${timestamp}\n   ${hit.excerpt}${approximate}`;
+  // The count covers every copy, but only a few refs are listed. The shown hit is the
+  // best copy, and the refs are how the model reads the others.
+  const copies = hit.copies.length ? `\n   (+${hit.copies.length} identical copies: ${hit.copies.slice(0, MAX_COPY_REFS).join(", ")})` : "";
+  return `${number}. ${hit.source.ref} (${hit.source.kind}) | ${hit.source.label} | topic: ${hit.source.topic}${timestamp}\n   ${hit.excerpt}${copies}${approximate}`;
 }
 
 function countUnavailable(corpus: Corpus, inScope: (scopeBlockIds: readonly string[]) => boolean): { withheld: number; missing: number } {

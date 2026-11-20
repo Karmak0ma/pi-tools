@@ -1,6 +1,6 @@
 import type { Model } from "@earendil-works/pi-ai";
 import { hashJson } from "../util/hash.ts";
-import type { ReducedState } from "../state/reducer.ts";
+import type { ReducedBlock, ReducedState } from "../state/reducer.ts";
 import type { BaselineKey, BaselineSnapshot, CanonicalIndex, ModelKey, SnapshotBlockAlias } from "./types.ts";
 
 /**
@@ -11,6 +11,38 @@ import type { BaselineKey, BaselineSnapshot, CanonicalIndex, ModelKey, SnapshotB
  */
 export function unitAlias(index: number): string {
   return `m${String(index + 1).padStart(4, "0")}`;
+}
+
+/**
+ * The label of the block at `ordinal` (1-based) in alias order. Shared by
+ * createSnapshot and the compress result, so a block is named the same way
+ * wherever it is printed.
+ */
+export function blockAlias(ordinal: number): string {
+  return `b${String(ordinal).padStart(4, "0")}`;
+}
+
+/**
+ * The active, available blocks in alias order: by the earliest unit each one
+ * covers, then by blockId. Aliases are positional, so appending history never
+ * renumbers an existing block. A block created earlier in history can renumber
+ * later ones, which is why a label is valid only for the request it was
+ * published in.
+ *
+ * This is the only ordering rule. createSnapshot uses it, and the compress
+ * result uses it to name a new block with the alias the next request shows.
+ */
+export function orderedActiveBlocks(units: readonly { entryIds: readonly string[] }[], state: ReducedState): { blockId: string; block: ReducedBlock; indexes: number[] }[] {
+  return [...state.blocks.entries()]
+    .filter(([, block]) => block.active && block.available)
+    .map(([blockId, block]) => ({
+      blockId,
+      block,
+      indexes: units
+        .map((unit, index) => block.coverage.effectiveEntryIds.some((entryId) => unit.entryIds.includes(entryId)) ? index : -1)
+        .filter((index) => index >= 0),
+    }))
+    .sort((a, b) => (a.indexes[0] ?? Number.MAX_SAFE_INTEGER) - (b.indexes[0] ?? Number.MAX_SAFE_INTEGER) || a.blockId.localeCompare(b.blockId));
 }
 
 export function modelKey(model: Model<any> | undefined, contextWindow = 0): ModelKey {
@@ -57,22 +89,13 @@ export function createSnapshot(options: {
 
   const blockAliases = new Map<string, SnapshotBlockAlias>();
   const blockRanges = new Map<string, { start: number; end: number }>();
-  const activeBlocks = [...options.state.blocks.entries()]
-    .filter(([, block]) => block.active && block.available)
-    .map(([blockId, block]) => ({
-      blockId,
-      block,
-      indexes: units
-        .map((unit, index) => block.coverage.effectiveEntryIds.some((entryId) => unit.entryIds.includes(entryId)) ? index : -1)
-        .filter((index) => index >= 0),
-    }))
-    .sort((a, b) => (a.indexes[0] ?? Number.MAX_SAFE_INTEGER) - (b.indexes[0] ?? Number.MAX_SAFE_INTEGER) || a.blockId.localeCompare(b.blockId));
+  const activeBlocks = orderedActiveBlocks(units, options.state);
 
   for (let index = 0; index < activeBlocks.length; index++) {
     const { blockId, block, indexes } = activeBlocks[index];
     const ordinal = index + 1;
     if (ordinal > 9999) throw new Error("alias_overflow");
-    const alias = `b${String(ordinal).padStart(4, "0")}`;
+    const alias = blockAlias(ordinal);
     blockAliases.set(alias, {
       alias,
       blockId,
