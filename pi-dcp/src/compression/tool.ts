@@ -325,10 +325,10 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
 }
 
 /**
- * `lastReadiness.ready` can go stale-true: `onSettled` bumps `runtime.generation`
- * and clears baselines after a settled pruning mutation without touching
- * `lastReadiness` (nudge delivery in the same cycle depends on the pre-bump
- * `ready` flag, so it is deliberately left alone there). Compare generations
+ * `lastReadiness.ready` can go stale-true: `/dcp sweep` bumps `runtime.generation`
+ * and clears baselines after an immediate pruning mutation without touching
+ * `lastReadiness`. Settled pruning no longer bumps the generation (its claims wait
+ * for the next compression), so it cannot leave the flag stale. Compare generations
  * here, at the point where a missing baseline is actually reported, so a
  * stale flag cannot make a genuinely invalidated state report the unhelpful
  * `baseline_unavailable` instead of `compression_unavailable`.

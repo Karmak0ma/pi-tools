@@ -120,9 +120,10 @@ export function buildCompressionEnvelope(options: CompressionBuildOptions): Comp
     // Cues are rendered with the block, so they count toward its footprint.
     const estimatedSummaryTokens = Math.max(1, Math.ceil([finalSummary, ...recall].join("\n").length / 4));
     const estimatedSourceTokens = estimateCompressionSourceTokens(options, units, range.consumedBlockIds);
+    const creditedPruneTokens = prunedTokensInRange(options.state, units, children);
     // A range names its own phase when it can. A blank range topic counts as absent,
     // so the call topic applies. normalizeCompressionParams has already defaulted it.
-    const block: CreatedBlock = { blockId: randomId(), ordinal: index, topic: params.content[index].topic?.trim() || params.topic, summary: finalSummary, authoredSummary: authored, estimatedSummaryTokens, estimatedSourceTokens, estimatedSavingsTokens: Math.max(0, estimatedSourceTokens - estimatedSummaryTokens), coverage: { directEntryIds, effectiveEntryIds, directToolCallIds, effectiveToolCallIds }, anchor: { beforeEntryId: options.snapshot.units[range.start - 1]?.entryIds.at(-1), afterEntryId: options.snapshot.units[range.end + 1]?.entryIds[0] }, consumedBlockIds: range.consumedBlockIds, nestedDepth, ...(recall.length ? { recall } : {}) };
+    const block: CreatedBlock = { blockId: randomId(), ordinal: index, topic: params.content[index].topic?.trim() || params.topic, summary: finalSummary, authoredSummary: authored, estimatedSummaryTokens, estimatedSourceTokens, estimatedSavingsTokens: Math.max(0, estimatedSourceTokens - estimatedSummaryTokens), coverage: { directEntryIds, effectiveEntryIds, directToolCallIds, effectiveToolCallIds }, anchor: { beforeEntryId: options.snapshot.units[range.start - 1]?.entryIds.at(-1), afterEntryId: options.snapshot.units[range.end + 1]?.entryIds[0] }, consumedBlockIds: range.consumedBlockIds, nestedDepth, ...(recall.length ? { recall } : {}), ...(creditedPruneTokens > 0 ? { creditedPruneTokens } : {}) };
     blocks.push(block);
   }
   const operation: CompressionCreated = { type: "compression.created", runId: randomId(), mode: "range", toolCallId: options.toolCallId || `legacy-${options.snapshot.hash.slice(0, 16)}`, snapshotHash: options.snapshot.hash, model: { provider: options.model?.provider || "unknown", id: options.model?.id || "unknown", api: options.model?.api || "unknown" }, blocks };
@@ -147,6 +148,24 @@ function isBlockLabel(alias: string): boolean {
 function cleanRecall(cues: readonly string[] | undefined): string[] {
   const lines = (cues ?? []).map((cue) => cue.replace(/\s+/g, " ").trim()).filter((cue) => cue.length > 0);
   return [...new Set(lines)];
+}
+
+/**
+ * Tokens that earlier pruning decisions counted as saved for tool calls in this
+ * range's own units. The block's source estimate reads raw history, so it already
+ * contains these bytes. Consumed children are skipped: each child subtracted its
+ * own decisions when it was created, and its raw bytes are not counted here again.
+ */
+function prunedTokensInRange(state: ReducedState, units: readonly { toolCallIds: readonly string[] }[], children: readonly { coverage: { effectiveToolCallIds: readonly string[] } }[]): number {
+  const consumed = new Set(children.flatMap((child) => child.coverage.effectiveToolCallIds));
+  let total = 0;
+  for (const unit of units) for (const toolCallId of unit.toolCallIds) {
+    if (consumed.has(toolCallId)) continue;
+    const prune = state.toolPrunes.get(toolCallId);
+    if (!prune) continue;
+    total += (prune.output?.estimatedTokens ?? 0) + (prune.oldErrorInput?.estimatedTokens ?? 0) + (prune.questionInput?.estimatedTokens ?? 0);
+  }
+  return total;
 }
 
 /**

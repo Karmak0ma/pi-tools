@@ -1,6 +1,6 @@
 import type { Model } from "@earendil-works/pi-ai";
 import { hashJson } from "../util/hash.ts";
-import type { ReducedBlock, ReducedState } from "../state/reducer.ts";
+import { outgoingPrune, type ReducedBlock, type ReducedState } from "../state/reducer.ts";
 import type { BaselineKey, BaselineSnapshot, CanonicalIndex, ModelKey, SnapshotBlockAlias } from "./types.ts";
 
 /**
@@ -126,7 +126,12 @@ export function createSnapshot(options: {
   })));
   const dcpTransformHash = hashJson({
     activeBlocks: [...blockAliases.values()].map((block) => ({ alias: block.alias, blockId: block.blockId })),
-    prunedTools: [...options.state.toolPrunes.entries()].sort(([a], [b]) => a.localeCompare(b)),
+    // Only the claims that shape the request. A pending claim changes nothing the
+    // model receives, so it must not change the identity of this request either.
+    prunedTools: [...options.state.toolPrunes.keys()].sort((a, b) => a.localeCompare(b)).flatMap((toolCallId) => {
+      const prune = outgoingPrune(options.state, toolCallId);
+      return prune ? [[toolCallId, prune] as const] : [];
+    }),
     aliasTransport: "local-unit-inline-v1",
   });
   const branchIdentity = options.branchIdentity || options.sessionId;

@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ReducedState } from "../state/reducer.ts";
+import { outgoingPrune, type ReducedState } from "../state/reducer.ts";
 import { redactOldErrorArguments } from "../strategies/purge-errors.ts";
 import { adapterForQuestion } from "../questions/registry.ts";
 
@@ -7,6 +7,10 @@ const CLEARED = "[Old tool result content cleared by pi-dcp]";
 const SUMMARY_MOVED = "[summary text removed by pi-dcp: it is delivered by the compressed block itself]";
 /**
  * Apply persisted pruning to outgoing messages, copy-on-write.
+ *
+ * Only the claims that take effect now are applied (see outgoingPrune). A claim
+ * recorded since the last compression stays out of the request until the next
+ * compression, so the request does not change in the meantime.
  *
  * Only a message that is actually redacted is copied; every other message is
  * returned by reference. The input is never mutated, because the pipeline may
@@ -19,7 +23,7 @@ export function applyPersistedRedactions(messages: readonly AgentMessage[], stat
 
 function redactMessage(message: AgentMessage, state: ReducedState): AgentMessage {
   if (message.role === "toolResult") {
-    return state.toolPrunes.get(message.toolCallId)?.output ? { ...message, content: [{ type: "text", text: CLEARED }] } : message;
+    return outgoingPrune(state, message.toolCallId)?.output ? { ...message, content: [{ type: "text", text: CLEARED }] } : message;
   }
   if (message.role !== "assistant") return message;
   let changed = false;
@@ -35,7 +39,7 @@ function redactMessage(message: AgentMessage, state: ReducedState): AgentMessage
 
 /** Returns the same object when nothing applies; every redactor is pure. */
 function redactToolArguments(id: string, name: string, argumentsValue: unknown, state: ReducedState): unknown {
-  const prune = state.toolPrunes.get(id);
+  const prune = outgoingPrune(state, id);
   let result = argumentsValue;
   if (prune?.oldErrorInput) result = redactOldErrorArguments(result);
   if (prune?.questionInput) {

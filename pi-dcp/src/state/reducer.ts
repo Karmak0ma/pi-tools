@@ -11,10 +11,17 @@ export interface ReducedBlock extends CreatedBlock {
   userDecompressed: boolean;
   parentBlockIds: BlockId[];
 }
+/**
+ * A pruning decision for one field of one tool call. It is recorded when it is
+ * decided, and its savings are counted then. Whether it already changes the
+ * outgoing request is a separate question, answered by outgoingPrune.
+ */
+export interface PruneClaim { opId: string; operationIndex: number; estimatedTokens: number; }
 export interface ReducedToolPrune {
-  output?: { kind: "dedup-output" | "sweep-output"; opId: string; operationIndex: number };
-  oldErrorInput?: { opId: string; operationIndex: number };
-  questionInput?: { opId: string; operationIndex: number };
+  /** immediate: a sweep switched this output on, so it applies without a compression. */
+  output?: PruneClaim & { kind: "dedup-output" | "sweep-output"; immediate?: true };
+  oldErrorInput?: PruneClaim;
+  questionInput?: PruneClaim;
 }
 /** Delivery is derived from branch custom_message entries, not mutable reducer state. */
 export interface ReducedNudge extends NudgeRequested { requestedByOpId: string; }
@@ -23,6 +30,12 @@ export interface ReducedState {
   blocks: Map<BlockId, ReducedBlock>;
   runs: Map<RunId, BlockId[]>;
   toolPrunes: Map<string, ReducedToolPrune>;
+  /**
+   * operationIndex of the latest reduced compression.created, or -1 before any.
+   * A pruning claim reaches the request only once a compression committed after
+   * it, so the ordering lives here and replays the same way (see outgoingPrune).
+   */
+  lastCompressionOperationIndex: number;
   /**
    * Tool-call IDs of compress calls that actually produced blocks. The authored
    * summary text is stored in the block, so keeping the identical text in the
@@ -47,6 +60,7 @@ export function emptyState(): ReducedState {
     blocks: new Map(),
     runs: new Map(),
     toolPrunes: new Map(),
+    lastCompressionOperationIndex: -1,
     compressToolCallIds: new Set(),
     nudges: new Map(),
     manualMode: false,
@@ -76,6 +90,7 @@ export function cloneState(state: ReducedState): ReducedState {
     }])),
     runs: new Map([...state.runs].map(([id, blocks]) => [id, [...blocks]])),
     toolPrunes: new Map([...state.toolPrunes].map(([id, prune]) => [id, { ...prune }])),
+    lastCompressionOperationIndex: state.lastCompressionOperationIndex,
     compressToolCallIds: new Set(state.compressToolCallIds || []),
     nudges: new Map([...state.nudges].map(([key, nudge]) => [key, { ...nudge }])),
     manualMode: state.manualMode,
@@ -158,6 +173,9 @@ function applyOperation(state: ReducedState, operation: DcpOperation, opId: stri
     }
     state.runs.set(operation.runId, ids);
     if (operation.toolCallId) state.compressToolCallIds.add(operation.toolCallId);
+    // Set only after every check above has passed: a rejected envelope returns
+    // false before this line, so it cannot activate earlier pruning claims.
+    state.lastCompressionOperationIndex = operationIndex;
     addSavingsTotals(state.savings, savingsFromOperation(operation));
     return true;
   }
@@ -187,10 +205,15 @@ function applyOperation(state: ReducedState, operation: DcpOperation, opId: stri
     })) return false;
     for (const decision of operation.decisions) {
       const current = state.toolPrunes.get(decision.toolCallId) || {};
+      const claim: PruneClaim = { opId, operationIndex, estimatedTokens: decision.estimatedTokens };
       if (decision.kind === "dedup-output" || decision.kind === "sweep-output") {
-        if (!current.output) current.output = { kind: decision.kind, opId, operationIndex };
-      } else if (decision.kind === "old-error-input") current.oldErrorInput ||= { opId, operationIndex };
-      else current.questionInput ||= { opId, operationIndex };
+        if (!current.output) current.output = { kind: decision.kind, ...claim, ...(decision.kind === "sweep-output" ? { immediate: true as const } : {}) };
+        // A sweep can switch on an output that an earlier decision recorded and
+        // that still waits for a compression. The claim keeps its operation and
+        // its credit, so only its timing changes. The sweep adds no tokens.
+        else if (decision.kind === "sweep-output") current.output = { ...current.output, immediate: true };
+      } else if (decision.kind === "old-error-input") current.oldErrorInput ||= claim;
+      else current.questionInput ||= claim;
       state.toolPrunes.set(decision.toolCallId, current);
     }
     addSavingsTotals(state.savings, savingsFromOperation(operation));
@@ -203,6 +226,33 @@ function applyOperation(state: ReducedState, operation: DcpOperation, opId: stri
     return true;
   }
   return false;
+}
+
+/**
+ * The pruning claims that change the outgoing request now, or undefined when none does.
+ *
+ * A claim waits until a compression that committed after it has been reduced.
+ * That compression already rewrites history from its range start, so the pruned
+ * bytes add no earlier cache break. Applying the claim where it was decided would
+ * change bytes before every later assistant turn. That drops the signed thinking
+ * of those turns and misses the prompt cache.
+ *
+ * `/dcp sweep` is the one exception. It is an explicit user request, so the
+ * outputs it names apply at once, including an output claim that still waits
+ * (see applyOperation).
+ *
+ * The result depends only on reducer order, so a restart or a fork that replays
+ * the same entries builds the same request.
+ */
+export function outgoingPrune(state: ReducedState, toolCallId: string): ReducedToolPrune | undefined {
+  const prune = state.toolPrunes.get(toolCallId);
+  if (!prune) return undefined;
+  const takesEffect = (claim: PruneClaim, immediate: boolean): boolean => immediate || claim.operationIndex < state.lastCompressionOperationIndex;
+  const active: ReducedToolPrune = {};
+  if (prune.output && takesEffect(prune.output, prune.output.immediate === true)) active.output = prune.output;
+  if (prune.oldErrorInput && takesEffect(prune.oldErrorInput, false)) active.oldErrorInput = prune.oldErrorInput;
+  if (prune.questionInput && takesEffect(prune.questionInput, false)) active.questionInput = prune.questionInput;
+  return active.output || active.oldErrorInput || active.questionInput ? active : undefined;
 }
 
 // Both walks below recurse over consumedBlockIds. Recursion depth is bounded by

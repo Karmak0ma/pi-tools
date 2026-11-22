@@ -509,11 +509,12 @@ async function onSettled(ctx: ExtensionContext, runtime: DcpRuntime, pi: Extensi
       // Automatic strategies are explicitly gated here. Manual mode no longer
       // makes evaluateSettledStrategies silently discard the configured flag.
       //
-      // This mutation must run before nudge creation. A persisted pruning
-      // operation increments `runtime.generation` and invalidates baselines;
-      // creating the nudge first would leave it tagged with the old generation,
-      // and beforeAgentStart would correctly—but incorrectly for this case—
-      // reject it as stale instead of delivering it on the next request.
+      // This mutation must run before nudge creation, so the nudge is tagged with
+      // the generation that beforeAgentStart will see. A settled pruning claim does
+      // not bump `runtime.generation`: it takes effect only at the next compression,
+      // which bumps the generation itself. The request therefore stays byte-identical,
+      // and Pi's cache warming may keep replaying the last one. decideCacheWarming
+      // would stop it on a generation change. Baselines are still cleared.
       const strategiesAllowed = !(runtime.reduced.manualMode && !runtime.config.manualMode.automaticStrategies);
       const suffixHash = hashJson(index.entries.slice(-64).map((entry) => entry.fingerprint));
       if (strategiesAllowed && suffixHash !== runtime.lastSettledSuffixHash) {
@@ -533,7 +534,6 @@ async function onSettled(ctx: ExtensionContext, runtime: DcpRuntime, pi: Extensi
           await persistSavingsBestEffort(envelope, runtime.logger);
           runtime.reduced = reduceEnvelope(runtime.reduced, envelope);
           if (runtime.reduced.corruptReason) { runtime.valid = false; return; }
-          runtime.generation++;
           clearBaselines(runtime);
         }
         runtime.lastSettledSuffixHash = suffixHash;

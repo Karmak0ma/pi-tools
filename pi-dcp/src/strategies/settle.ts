@@ -1,7 +1,7 @@
 import type { CanonicalIndex } from "../identity/types.ts";
 import type { ReducedState } from "../state/reducer.ts";
 import type { PrunedToolDecision } from "../state/operations.ts";
-import { deduplicate, collectToolRecords } from "./deduplicate.ts";
+import { deduplicate, collectToolRecords, latestUserUnitIndex } from "./deduplicate.ts";
 import { purgeOldErrors } from "./purge-errors.ts";
 import type { ProtectionOptions } from "../compression/protected.ts";
 import { questionPruning } from "../questions/registry.ts";
@@ -22,7 +22,17 @@ export function evaluateSettledStrategies(index: CanonicalIndex, state: ReducedS
   ];
   const seen = new Set<string>();
   const canonicalOrder = new Map(collectToolRecords(index).map((record) => [record.toolCallId, record.unitIndex]));
+  // Two exclusions. The current turn is left to /dcp sweep. An automatic claim
+  // there would wait for a compression that may never come, while its savings are
+  // already counted (stats.ts). A claim on a tool call that an active block already
+  // covers has no visible effect, and the block's source estimate already counts
+  // those bytes, so the claim would count them twice.
+  const currentTurn = latestUserUnitIndex(index);
+  const coveredToolCallIds = new Set([...state.blocks.values()].filter((block) => block.active && block.available).flatMap((block) => block.coverage.effectiveToolCallIds));
   return decisions.filter((decision) => {
+    const unitIndex = canonicalOrder.get(decision.toolCallId);
+    if (unitIndex === undefined || unitIndex > currentTurn) return false;
+    if (coveredToolCallIds.has(decision.toolCallId)) return false;
     const key = `${decision.toolCallId}\0${decision.kind}`;
     if (seen.has(key)) return false;
     seen.add(key);

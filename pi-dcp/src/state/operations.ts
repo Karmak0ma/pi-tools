@@ -49,6 +49,15 @@ export interface CreatedBlock {
   estimatedSummaryTokens: number;
   estimatedSourceTokens?: number;
   estimatedSavingsTokens?: number;
+  /**
+   * Tokens that earlier pruning decisions counted as saved for tool calls in this
+   * block's own units. Merged child blocks are not included: each child subtracted
+   * its own decisions when it was created. The block estimate reads raw history, so
+   * it contains these bytes again. Stats subtract them here, so each token is
+   * counted once. The estimate itself is unchanged and still describes the raw
+   * source. Absent when no decision lies in the range, so such blocks keep their bytes.
+   */
+  creditedPruneTokens?: number;
   coverage: CanonicalCoverage;
   anchor: { beforeEntryId?: string; afterEntryId?: string };
   consumedBlockIds: BlockId[];
@@ -199,6 +208,7 @@ function isCreatedBlock(value: unknown): value is CreatedBlock {
     && typeof block.estimatedSummaryTokens === "number" && Number.isFinite(block.estimatedSummaryTokens)
     && (block.estimatedSourceTokens === undefined || (typeof block.estimatedSourceTokens === "number" && Number.isFinite(block.estimatedSourceTokens) && block.estimatedSourceTokens >= 0))
     && (block.estimatedSavingsTokens === undefined || (typeof block.estimatedSavingsTokens === "number" && Number.isFinite(block.estimatedSavingsTokens) && block.estimatedSavingsTokens >= 0))
+    && (block.creditedPruneTokens === undefined || (typeof block.creditedPruneTokens === "number" && Number.isFinite(block.creditedPruneTokens) && block.creditedPruneTokens >= 0))
     && !!coverage
     && isStringArray(coverage.directEntryIds)
     && isStringArray(coverage.effectiveEntryIds) && coverage.effectiveEntryIds.length > 0

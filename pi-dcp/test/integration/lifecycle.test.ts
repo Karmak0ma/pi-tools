@@ -631,7 +631,7 @@ describe("extension capability gate", () => {
     expect(sections[DCP_SYSTEM_SECTION]).toBeUndefined();
   });
 
-  it("delivers a nudge after settled pruning advances the runtime generation", async () => {
+  it("delivers a nudge after settled pruning, which leaves the runtime generation unchanged", async () => {
     const handlers = new Map<string, (event: any, ctx: any) => unknown>();
     const entries = [
       { type: "message", id: "user-1", parentId: null, timestamp: new Date(1).toISOString(), message: { role: "user", content: "first request", timestamp: 1 } },
@@ -671,7 +671,9 @@ describe("extension capability gate", () => {
       await handlers.get("agent_settled")?.({}, ctx);
 
       expect(appended.some((envelope) => envelope.operation?.type === "tools.pruned")).toBe(true);
-      expect(runtime.generation).toBe(2);
+      // A settled claim waits for the next compression and changes no request, so
+      // the generation stays put. A bump here would stop Pi's cache warming.
+      expect(runtime.generation).toBe(1);
       const nudge = [...runtime.reduced.nudges.values()][0];
       expect(nudge?.configGeneration).toBe(runtime.generation);
 

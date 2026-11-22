@@ -9,6 +9,11 @@ import type { OpEnvelope, DcpOperation } from "./state/operations.ts";
  * every transformed request would count the same compressed block repeatedly;
  * recording each persisted pruning/compression operation once gives cumulative
  * and replayable statistics instead.
+ *
+ * A pruning decision is counted when it is decided, even while it waits for the
+ * next compression (state/reducer.ts). A compression then subtracts the decided
+ * tokens that lie inside its own range (CreatedBlock.creditedPruneTokens), so a
+ * token that is pruned and later compressed is still counted once.
  */
 export const SAVINGS_SOURCES = [
   "compression",
@@ -63,13 +68,16 @@ export function savingsFromOperation(operation: DcpOperation): Partial<Record<Sa
     return {
       compression: {
         events: operation.blocks.length,
-        tokens: operation.blocks.reduce((total, block) => total + finiteNonNegative(block.estimatedSavingsTokens), 0),
+        tokens: operation.blocks.reduce((total, block) => total + Math.max(0, finiteNonNegative(block.estimatedSavingsTokens) - finiteNonNegative(block.creditedPruneTokens)), 0),
       },
     };
   }
   if (operation.type === "tools.pruned") {
     const savings = {} as Partial<Record<SavingsSource, SavingsBucket>>;
     for (const decision of operation.decisions) {
+      // A decision with no tokens switches on an output that an earlier decision
+      // already counted (see reducer.ts). It is not a new saving, so it adds no event.
+      if (!(decision.estimatedTokens > 0)) continue;
       const source = decision.kind === "dedup-output"
         ? "deduplication"
         : decision.kind === "sweep-output"

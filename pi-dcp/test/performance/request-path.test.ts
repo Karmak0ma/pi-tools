@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { buildSyntheticSession, contextEventMessages, createContextHarness } from "../helpers/synthetic-session.ts";
 import { currentHostSessionManager } from "../helpers/current-host.ts";
 import { deepFreeze } from "../../src/util/clone.ts";
+import { outgoingPrune } from "../../src/state/reducer.ts";
 
 /**
  * SHA-256 of the transformed messages for the default synthetic session.
@@ -14,7 +15,10 @@ import { deepFreeze } from "../../src/util/clone.ts";
  */
 // Updated 2026-11-06: tool-call units are labelled on their tool result, not
 // inside the assistant turn (plain-text tool-call incident, labels.ts).
-const GOLDEN_OUTPUT_SHA256 = "bb9fbbd844b87d0d59f0cb3c49fbd4d3019ba0eef0a3aaee1584471ee2e635b7";
+// Updated for deferred pruning: the fixture's dedup decisions come after its last
+// compression, so their 12 outputs stay raw until the next one. Nothing else in
+// the output changed (verified by diffing the two outputs message by message).
+const GOLDEN_OUTPUT_SHA256 = "5be03650fa6d399387eddbd9deaeff49d529f94130475273daa5854cac1cca2d";
 
 /**
  * Coarse guard against a large regression, not a performance target. The
@@ -53,11 +57,18 @@ describe("realistic request path", () => {
     expect(output).not.toContain("summary-b1:0");
     // Pi applies the host context_edit before DCP sees the projection.
     expect(output).toContain("[edited by host");
-    // Every dedup-pruned output is replaced by a short placeholder.
-    const pruned = new Set(harness.runtime.reduced.toolPrunes.keys());
-    const prunedResults = first.messages.filter((message): message is Extract<typeof message, { role: "toolResult" }> => message.role === "toolResult" && pruned.has(message.toolCallId));
-    expect(prunedResults.length).toBe(pruned.size);
+    // Every dedup-pruned output that takes effect is replaced by a short placeholder.
+    const state = harness.runtime.reduced;
+    const effective = new Set([...state.toolPrunes.keys()].filter((id) => outgoingPrune(state, id)?.output));
+    const prunedResults = first.messages.filter((message): message is Extract<typeof message, { role: "toolResult" }> => message.role === "toolResult" && effective.has(message.toolCallId));
+    expect(prunedResults.length).toBe(effective.size);
     for (const message of prunedResults) expect(JSON.stringify(message.content).length).toBeLessThan(200);
+    // Decisions recorded after the last compression wait for the next one, so
+    // their outputs must still be raw here. Replacing them now would change bytes
+    // before every later turn (see state/reducer.ts, outgoingPrune).
+    const pendingResults = first.messages.filter((message): message is Extract<typeof message, { role: "toolResult" }> => message.role === "toolResult" && state.toolPrunes.has(message.toolCallId) && !effective.has(message.toolCallId));
+    expect(pendingResults.length).toBeGreaterThan(0);
+    for (const message of pendingResults) expect(JSON.stringify(message.content).length).toBeGreaterThan(200);
     // Pi 0.87 omits system messages from `context`; DCP must not add them back.
     expect(first.messages.some((message) => message.role === "system")).toBe(false);
 

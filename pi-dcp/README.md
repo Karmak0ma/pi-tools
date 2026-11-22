@@ -113,6 +113,12 @@ Compression summaries are authored by the model through the v2 `compress` tool. 
 
 **Recall cues.** A range may also list up to six `recall` strings: details that its summary leaves out but that remain in the original history. Each is one short line with concrete, searchable terms, for example `SQLite rejection reasons: concurrent writers`. A block with cues lists them after its summary, under "Details omitted here but searchable with search_compressed", so the model knows the details exist. Cues are searchable with their block. A merged block does not inherit its children's cues; the model writes new ones, and the children's summaries and cues stay searchable. Blocks without cues are rendered exactly as before.
 
+## When pruning takes effect
+
+Automatic pruning (duplicate outputs, old error inputs, and question inputs) is recorded when the agent settles, but it does not change the next request. It takes effect with the next successful compression. Anthropic binds each signed thinking block to the exact bytes before it. Changing an earlier message therefore drops the thinking of every later assistant turn, and the provider prompt cache misses from that point. A compression already rewrites history from its range start, so pruning that joins the same request adds no extra cache break. A pruned output that lies before the compressed range moves the change point back to that output. Automatic pruning never touches the current turn.
+
+`/dcp sweep [N]` applies at once, because you asked for it. It can drop the thinking of the current turn and miss the prompt cache. Statistics count each pruning decision when it is recorded, so a decision that never reaches a compression is still counted. A session recorded before this change follows the same rule: pruning recorded after its last compression is held back on resume, so those outputs are sent raw again until the next compression (one cache miss).
+
 ## Searching compressed context
 
 A summary is not a complete record. The model-facing `search_compressed` tool searches the original messages behind compressed blocks, and the stored summaries of blocks that a later block merged. It can then read a match back in full. The result is a new tool result. It is read-only: it writes no operation entry, changes no block activation, and does not bump the context generation.

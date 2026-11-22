@@ -41,7 +41,10 @@ export interface SemanticNudgeCounters {
  * content already represented by an active block are excluded. The estimate
  * uses the same eligibility rules as compression validation and includes DCP's
  * persisted tool redactions so a nudge does not claim savings for bytes that
- * are already removed from the outgoing context. Configured protected tool
+ * are already removed from the outgoing context. Only redactions that already
+ * reach the request count (outgoingPrune). A pruning claim still waiting for the
+ * next compression leaves its bytes in the source, so they are a potential saving
+ * of that compression and are not reported as saved. Configured protected tool
  * output is also excluded because compression preserves it verbatim inside the
  * authored summary rather than removing it.
  */
