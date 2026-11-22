@@ -1,4 +1,5 @@
-import type { ExtensionCommandContext, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { ExtensionSelectorComponent, keyHint, rawKeyHint, type ExtensionCommandContext, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { matchesKey } from "@earendil-works/pi-tui";
 import { clearBaselines, resetSemanticNudges, setDcpToolActive, type DcpRuntime } from "../runtime.ts";
 import { isEnabledForModel } from "../config/models.ts";
 import { defaults, type EffectiveConfig } from "../config/defaults.ts";
@@ -12,7 +13,7 @@ export async function settingsCommand(ctx: ExtensionCommandContext, pi: Extensio
   if (!ctx.hasUI) { ctx.ui.notify(`pi-dcp settings require an interactive UI. Edit ${settingsPath()} directly.`, "info"); return; }
   let draft = structuredClone(runtime.config) as EffectiveConfig;
   while (true) {
-    const choice = await ctx.ui.select("pi-dcp settings", menuOptions(draft));
+    const choice = await selectMenu(ctx, "pi-dcp settings", menuOptions(draft));
     if (!choice || choice === CANCEL) return;
     if (choice === SAVE) {
       try { await writeSettings(draft, settingsPath()); }
@@ -66,6 +67,41 @@ function menuOptions(config: EffectiveConfig): string[] { return [
   SAVE,
   CANCEL,
 ]; }
+
+/**
+ * The main menu with one extra key: Ctrl+S picks "Save and close" from any row,
+ * so the user does not have to scroll to the bottom after an edit.
+ *
+ * ctx.ui.select cannot take extra keys, so in the TUI we show Pi's own
+ * ExtensionSelectorComponent through ctx.ui.custom and only add the key. This
+ * keeps the look and the other keys identical to every other select dialog.
+ * The key is fixed to ctrl+s: Pi has no generic "save" binding (its ctrl+s
+ * bindings are scoped to the model and thinking selectors), and ctrl+s is what
+ * those selectors use, so it is the key users already expect for "save".
+ * Other modes (RPC, print) have no key events and keep the plain select.
+ *
+ * The Ctrl+S hint goes in the grey key-hint line at the bottom, next to the
+ * other keys. The selector has no option for extra hints, so we rewrite that
+ * line. It is the third child from the end ([hints, Spacer, DynamicBorder]).
+ * If a Pi update changes that layout, the setText check fails and the menu
+ * still works; only the hint is missing (Ctrl+S itself still saves).
+ */
+async function selectMenu(ctx: ExtensionCommandContext, title: string, options: string[]): Promise<string | undefined> {
+  if (ctx.mode !== "tui") return ctx.ui.select(title, options);
+  return ctx.ui.custom<string | undefined>((tui, _theme, _keybindings, done) => {
+    const selector = new ExtensionSelectorComponent(title, options, (option) => done(option), () => done(undefined), { tui });
+    const hints = selector.children[selector.children.length - 3];
+    // Duck-typed on purpose: Pi and this extension can load separate copies of
+    // pi-tui, so `instanceof Text` is false even for the real hint line.
+    if (hints && "setText" in hints && typeof hints.setText === "function") {
+      // Same order and spacing as Pi's own line, with save before cancel.
+      hints.setText([rawKeyHint("↑↓", "navigate"), keyHint("tui.select.confirm", "select"), rawKeyHint("ctrl+s", "save"), keyHint("tui.select.cancel", "cancel")].join("  "));
+    }
+    const handleInput = selector.handleInput.bind(selector);
+    selector.handleInput = (data: string) => { if (matchesKey(data, "ctrl+s")) done(SAVE); else { handleInput(data); tui.requestRender(); } };
+    return selector;
+  });
+}
 
 async function chooseToggle(ctx: ExtensionCommandContext, title: string, current: boolean): Promise<boolean> { const choice = await ctx.ui.select(title, ["on", "off", "Back"]); if (choice === "on") return true; if (choice === "off") return false; return current; }
 async function chooseTurns(ctx: ExtensionCommandContext, current: number): Promise<number | undefined> { const choice = await ctx.ui.select("Recent-turn protection", ["off", "2 turns", "4 turns", "6 turns", "8 turns", "custom…", "Back"]); if (!choice || choice === "Back") return undefined; if (choice === "off") return 0; if (choice === "custom…") return numberInput(ctx, "Recent turns to protect", String(current), 1, 100); return Number(choice.split(" ")[0]); }
