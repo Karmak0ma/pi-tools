@@ -26,6 +26,32 @@ describe("configuration", () => {
     }
   });
 
+  it("merges a partial strategies.deduplication object key by key, so a lower layer's other keys survive", () => {
+    const disabled = validateConfig({ strategies: { deduplication: { enabled: false } } });
+    expect(disabled.error).toBeUndefined();
+    expect(disabled.value!.strategies.deduplication).toEqual({ enabled: false, protectedTools: [] });
+    const withTools = validateConfig({ strategies: { deduplication: { protectedTools: ["bash"] } } }).value!;
+    expect(withTools.strategies.deduplication).toEqual({ enabled: true, protectedTools: ["bash"] });
+    // The later layer names only protectedTools, so enabled: false from the earlier layer stays.
+    // Its list replaces the earlier list rather than joining it: "bash" is gone.
+    const earlier = validateConfig({ strategies: { deduplication: { enabled: false, protectedTools: ["bash"] } } }).value!;
+    const layered = validateConfig({ strategies: { deduplication: { protectedTools: ["read"] } } }, earlier).value!;
+    expect(layered.strategies.deduplication).toEqual({ enabled: false, protectedTools: ["read"] });
+    // The merge works on a copy, so the shared defaults are never changed.
+    expect(defaults.strategies.deduplication).toEqual({ enabled: true, protectedTools: [] });
+  });
+
+  it("refuses an invalid nested strategy value with its full path, and keeps valid siblings only as warnings", () => {
+    expect(validateConfig({ strategies: { deduplication: { enabled: "no" } } }).error).toBe("strategies.deduplication.enabled must be boolean");
+    expect(validateConfig({ strategies: { deduplication: { protectedTools: "bash" } } }).error).toBe("strategies.deduplication.protectedTools must be a string array");
+    expect(validateConfig({ strategies: { deduplication: 5 } }).error).toBe("strategies.deduplication must be an object");
+    // An unknown nested key is a named warning, not an error, as at every other level.
+    const result = validateConfig({ strategies: { deduplication: { enabled: false, bogus: 1 } } });
+    expect(result.error).toBeUndefined();
+    expect(result.warnings).toContain("unknown configuration key: strategies.deduplication.bogus");
+    expect(result.value!.strategies.deduplication.enabled).toBe(false);
+  });
+
   it("validates exact provider/model identifiers and defaults to all models enabled", () => {
     expect(defaults.disabledModels).toEqual([]);
     for (const disabledModels of ["test/model", [1], ["model"], ["/model"], ["test/"], ["test/model name"]]) {

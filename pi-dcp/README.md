@@ -150,6 +150,20 @@ Configuration is read from trusted global and project `dcp.jsonc`/`dcp.json` lay
 
 `strategies.purgeErrors` (automatic old-error-input pruning) is removed. A file that still contains it loads, and the setting is ignored with the warning `deprecated configuration key ignored: strategies.purgeErrors`. Its value is not validated.
 
+### Turn off deduplication
+
+Automatic deduplication marks an older tool call as a duplicate when a later call has the same tool name and the same arguments. The newer output is kept. A failed call is never marked. To turn deduplication off, add this to `~/.pi/agent/dcp.jsonc` (or `dcp.json`):
+
+```json
+{
+  "strategies": {
+    "deduplication": { "enabled": false }
+  }
+}
+```
+
+The default is `enabled: true`. `protectedTools` lists tool names whose outputs are never marked as duplicates. Its default is `[]`; the built-in floor (`compress`, `write`, `edit`, `todo`) is protected anyway. Set only the keys you want to change. Other keys keep their values from lower-priority layers. A list replaces the lower-priority list. A duplicate claim takes effect only when a compression starts at or before it, as described in [When pruning takes effect](#when-pruning-takes-effect). `/dcp sweep` does not read this setting.
+
 ### Disable DCP for specific models
 
 Add `disabledModels` to `~/.pi/agent/dcp.jsonc` (or `dcp.json`):

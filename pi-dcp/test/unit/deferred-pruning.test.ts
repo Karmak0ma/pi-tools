@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { defaults } from "../../src/config/defaults.ts";
+import { loadConfig } from "../../src/config/load.ts";
 import { createEnvelope, OPERATION_CUSTOM_TYPE, type CreatedBlock, type OpEnvelope, type PrunedToolDecision } from "../../src/state/operations.ts";
 import { emptyState, outgoingPrune, reduceEnvelope, requestLayout } from "../../src/state/reducer.ts";
 import { reconstructFromBranch } from "../../src/state/reconstruct.ts";
@@ -338,6 +342,22 @@ describe("deferred pruning of raw history", () => {
     expect(evaluateSettledStrategies(index, emptyState(), settled).map((decision) => decision.toolCallId)).toEqual(["call-a1"]);
     const covered = reduceEnvelope(emptyState(), compression("one", ["entry-1", "entry-2", "entry-3", "entry-4"], ["call-a1"], "entry-5"));
     expect(evaluateSettledStrategies(index, covered, settled)).toEqual([]);
+  });
+
+  it("a config file that disables deduplication loads, and the same transcript then gets no duplicate-read claim", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dcp-dedup-config-"));
+    try {
+      await writeFile(join(dir, "dcp.json"), JSON.stringify({ strategies: { deduplication: { enabled: false } } }));
+      // The project path does not exist and is untrusted, so only the global file is read.
+      const loaded = await loadConfig(join(dir, "project"), false, { PI_CODING_AGENT_DIR: dir });
+      expect(loaded.error).toBeUndefined();
+      const index = indexOf(repeatedReads());
+      // lifecycle.ts passes these two fields to evaluateSettledStrategies. The defaults claim
+      // call-a1 on this transcript, so the empty result below is caused by the file.
+      const claimsWith = (config: typeof CONFIG) => evaluateSettledStrategies(index, emptyState(), { cwd: "/tmp", deduplication: config.strategies.deduplication.enabled, protectedTools: [...config.strategies.deduplication.protectedTools], protectedFilePatterns: [] }).map((decision) => decision.toolCallId);
+      expect(claimsWith(CONFIG)).toEqual(["call-a1"]);
+      expect(claimsWith(loaded.config)).toEqual([]);
+    } finally { await rm(dir, { recursive: true, force: true }); }
   });
 
   it("automatic strategies no longer record old-error-input, even for a failed call many turns old", () => {

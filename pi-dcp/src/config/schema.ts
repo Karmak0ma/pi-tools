@@ -38,26 +38,7 @@ export function mergeConfig(base: EffectiveConfig, patch: Record<string, unknown
     if (key === "receiptStyle") { result.receiptStyle = enumValue(raw, RECEIPT_STYLES, key); continue; }
     if (key === "pruneNotificationType") { result.pruneNotificationType = enumValue(raw, ["chat", "toast", "both"], key); continue; }
     const target = result[key as "commands" | "manualMode" | "turnProtection" | "compress" | "strategies" | "summary"] as unknown as Record<string, unknown>;
-    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${key} must be an object`);
-    for (const [child, childValue] of Object.entries(raw as Record<string, unknown>)) {
-      // Removed settings. maxExpandedChars bounded placeholder expansion, which no
-      // longer exists. maxNestedDepth is now the fixed MAX_NESTED_DEPTH bound, so a
-      // copied tuning value (the old 8) would refuse merges that replay accepts.
-      // Both are ignored with a named warning, not an error, as nudge.type is, so an
-      // old settings file still loads.
-      if (key === "summary" && (child === "maxExpandedChars" || child === "maxNestedDepth")) { warnings.push(`deprecated configuration key ignored: summary.${child}`); continue; }
-      // Removed with the automatic old-error-input strategy. Any value is accepted and
-      // ignored, not validated: an old file must still load, and validating a setting
-      // that no longer does anything would only reject it for no benefit.
-      if (key === "strategies" && child === "purgeErrors") { warnings.push("deprecated configuration key ignored: strategies.purgeErrors"); continue; }
-      if (!(child in target)) { warnings.push(`unknown configuration key: ${key}.${child}`); continue; }
-      if (child === "protectedTools" || child === "protectedFilePatterns") target[child] = stringArray(childValue, `${key}.${child}`);
-      else if (child === "modelMaxLimits" || child === "modelMinLimits") target[child] = limitsMap(childValue, `${key}.${child}`);
-      else if (child === "permission") target[child] = enumValue(childValue, ["allow", "ask", "deny"], `${key}.${child}`);
-      else if (child === "maxContextLimit" || child === "minContextLimit") { target[child] = limitValue(childValue, `${key}.${child}`); if (typeof childValue === "string") result.nudge[child === "maxContextLimit" ? "maxContextPercent" : "minContextPercent"] = Number(childValue.slice(0, -1)); }
-      else if (typeof target[child] === "boolean") target[child] = booleanValue(childValue, `${key}.${child}`);
-      else target[child] = positiveInteger(childValue, `${key}.${child}`);
-    }
+    mergeSection(result, target, raw, key, warnings);
   }
   if (result.compress.minContextLimit === 0 || result.compress.maxContextLimit === 0) throw new Error("context limits must be positive");
   if (typeof result.compress.minContextLimit === typeof result.compress.maxContextLimit) { const minLimit = comparableLimit(result.compress.minContextLimit); const maxLimit = comparableLimit(result.compress.maxContextLimit); if (minLimit > maxLimit) throw new Error("minContextLimit cannot exceed maxContextLimit"); }
@@ -66,6 +47,48 @@ export function mergeConfig(base: EffectiveConfig, patch: Record<string, unknown
   return result;
 }
 
+/**
+ * Merges one object-valued section (for example `commands`, or the nested
+ * `strategies.deduplication`) into `target`. Each child is merged on its own, so a
+ * patch overrides only the keys it names and keeps the rest from the layer below.
+ *
+ * WHY it recurses instead of validating every child as a leaf: a nested object
+ * used to fall through to the integer check. `strategies.deduplication: { enabled:
+ * false }` was then refused with "must be a positive integer", and the whole file
+ * was dropped. The same fall-through also accepted a scalar in an object slot and
+ * overwrote the object with it, so later code read `.enabled` from a number. A
+ * scalar where an object belongs is refused here ("must be an object").
+ */
+function mergeSection(result: EffectiveConfig, target: Record<string, unknown>, raw: unknown, path: string, warnings: string[]): void {
+  if (!isObject(raw)) throw new Error(`${path} must be an object`);
+  for (const [child, childValue] of Object.entries(raw)) {
+    // Removed settings. maxExpandedChars bounded placeholder expansion, which no
+    // longer exists. maxNestedDepth is now the fixed MAX_NESTED_DEPTH bound, so a
+    // copied tuning value (the old 8) would refuse merges that replay accepts.
+    // Both are ignored with a named warning, not an error, as nudge.type is, so an
+    // old settings file still loads.
+    if (path === "summary" && (child === "maxExpandedChars" || child === "maxNestedDepth")) { warnings.push(`deprecated configuration key ignored: summary.${child}`); continue; }
+    // Removed with the automatic old-error-input strategy. Any value is accepted and
+    // ignored, not validated: an old file must still load, and validating a setting
+    // that no longer does anything would only reject it for no benefit.
+    if (path === "strategies" && child === "purgeErrors") { warnings.push("deprecated configuration key ignored: strategies.purgeErrors"); continue; }
+    // Own keys only. `in` also matches Object.prototype members such as "constructor",
+    // which would then be written as if they were settings.
+    if (!Object.hasOwn(target, child)) { warnings.push(`unknown configuration key: ${path}.${child}`); continue; }
+    if (child === "protectedTools" || child === "protectedFilePatterns") target[child] = stringArray(childValue, `${path}.${child}`);
+    else if (child === "modelMaxLimits" || child === "modelMinLimits") target[child] = limitsMap(childValue, `${path}.${child}`);
+    else if (child === "permission") target[child] = enumValue(childValue, ["allow", "ask", "deny"], `${path}.${child}`);
+    else if (child === "maxContextLimit" || child === "minContextLimit") { target[child] = limitValue(childValue, `${path}.${child}`); if (typeof childValue === "string") result.nudge[child === "maxContextLimit" ? "maxContextPercent" : "minContextPercent"] = Number(childValue.slice(0, -1)); }
+    // Checked after the named maps above: modelMaxLimits and modelMinLimits are also
+    // objects, but their keys are model IDs, not settings. They stay whole-value
+    // replacements, as before, so a higher layer's map replaces a lower layer's map.
+    else if (isObject(target[child])) mergeSection(result, target[child], childValue, `${path}.${child}`, warnings);
+    else if (typeof target[child] === "boolean") target[child] = booleanValue(childValue, `${path}.${child}`);
+    else target[child] = positiveInteger(childValue, `${path}.${child}`);
+  }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function mergeNudge(target: EffectiveConfig["nudge"], raw: unknown, warnings: string[] = []): void { if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("nudge must be an object"); for (const [child, value] of Object.entries(raw as Record<string, unknown>)) { if (child === "minContextPercent" || child === "maxContextPercent" || child === "criticalContextPercent") target[child] = percentageValue(value, `nudge.${child}`); else if (child === "turnsBetweenNudges" || child === "turnNudgeFrequency" || child === "iterationNudgeThreshold" || child === "minPotentialSavingsTokens") target[child] = positiveInteger(value, `nudge.${child}`); else if (child === "type") warnings.push("deprecated configuration key ignored: nudge.type"); else throw new Error(`unknown configuration key: nudge.${child}`); } }
 function percentageValue(value: unknown, key: string): number { if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 100) throw new Error(`${key} must be an integer from 1 to 100`); return value; }
 function booleanValue(value: unknown, key: string): boolean { if (typeof value !== "boolean") throw new Error(`${key} must be boolean`); return value; }
