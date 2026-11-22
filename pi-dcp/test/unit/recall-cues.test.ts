@@ -39,7 +39,7 @@ function rawSession(messages: readonly unknown[]): RawSession {
 }
 
 function build(source: RawSession, state: ReducedState, generation: number, content: CompressionParams["content"]) {
-  const snapshot = createSnapshot({ sessionId: "s", leafId: source.leafId, model, generation, index: source.index, state, configHash: "c" });
+  const snapshot = createSnapshot({ sessionId: "s", leafId: source.leafId, model, generation, index: source.index, state, branch: [], configHash: "c" });
   return buildCompressionEnvelope({ sessionId: "s", extensionVersion: "0.2.0", snapshot, state, params: { topic: "t", content }, model: undefined, toolCallId: `call-${generation}` });
 }
 
@@ -117,7 +117,7 @@ describe("recall cues: rendering", () => {
     const built = build(source, emptyState(), 1, content);
     if (!built.ok) throw new Error(built.reason);
     const state = reduceEnvelope(emptyState(), built.envelope);
-    const snapshot = createSnapshot({ sessionId: "s", leafId: source.leafId, model, generation: 2, index: source.index, state, configHash: "c" });
+    const snapshot = createSnapshot({ sessionId: "s", leafId: source.leafId, model, generation: 2, index: source.index, state, branch: [], configHash: "c" });
     const [replacement] = activeBlockReplacements(source.messages, snapshot.units, snapshot, state);
     // The block is a custom message, so its text is a plain string.
     return (replacement!.message as { content: string }).content;

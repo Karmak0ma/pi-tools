@@ -102,6 +102,8 @@ describe("model-specific disable", () => {
     const reduced = h.runtime.reduced;
     h.runtime.pendingNudge = { band: "critical", kind: "context", nudgeKey: "pending" };
 
+    // Count branch reads from the disabled phase only. The enabled phase above reads the branch to transform.
+    h.ctx.sessionManager.getBranch.mockClear();
     await h.select("disabled");
     expect(h.active()).toEqual(["read", "todo"]);
     expect(h.runtime.pendingNudge).toBeUndefined();

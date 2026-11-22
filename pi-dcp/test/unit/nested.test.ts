@@ -53,7 +53,7 @@ function session(messages: readonly unknown[]): Session {
 
 /** Build one compress envelope against `state`, as the tool would on its `generation`-th call. */
 function build(raw: Session, state: ReducedState, generation: number, content: { startId: string; endId: string; summary: string; topic?: string }[], extra: Partial<CompressionBuildOptions> = {}) {
-  const snapshot = createSnapshot({ sessionId: "s", leafId: raw.leafId, model, generation, ttlMs: 600000, index: raw.index, state, configHash: "c" });
+  const snapshot = createSnapshot({ sessionId: "s", leafId: raw.leafId, model, generation, ttlMs: 600000, index: raw.index, state, branch: [], configHash: "c" });
   return buildCompressionEnvelope({ sessionId: "s", extensionVersion: "0.1.0", snapshot, state, params: { topic: "t", content }, model: undefined, toolCallId: `call-${generation}`, ...extra });
 }
 

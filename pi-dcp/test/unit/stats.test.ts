@@ -56,7 +56,7 @@ describe("savings accounting", () => {
     const index = buildProtocolUnits(projection.messages);
     expect("units" in index).toBe(true);
     if (!("units" in index)) return;
-    const snapshot = createSnapshot({ sessionId: "session-compression", leafId: "entry-2", model: { provider: "test", id: "test", api: "test", contextWindow: 1000 }, generation: 1, ttlMs: 60_000, index, state: emptyState(), configHash: "stats" });
+    const snapshot = createSnapshot({ sessionId: "session-compression", leafId: "entry-2", model: { provider: "test", id: "test", api: "test", contextWindow: 1000 }, generation: 1, ttlMs: 60_000, index, state: emptyState(), branch: [], configHash: "stats" });
     const built = buildCompressionEnvelope({ sessionId: "session-compression", extensionVersion: "0.1.0", snapshot, state: emptyState(), params: { topic: "completed work", content: [{ startId: "m0001", endId: "m0001", summary: "short summary" }] }, model: undefined, index });
     expect(built.ok).toBe(true);
     if (built.ok) {

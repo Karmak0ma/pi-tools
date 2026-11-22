@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { emptyState } from "../../src/state/reducer.ts";
+import { emptyRequestLayout, emptyState } from "../../src/state/reducer.ts";
 import { applyPersistedRedactions, compressSummaryMarker } from "../../src/transform/tools.ts";
 import { validateSummary } from "../../src/compression/validate.ts";
 
@@ -23,7 +23,7 @@ describe("compress tool-call arguments", () => {
     const state = emptyState();
     state.compressToolCallIds.add("call-1");
 
-    const [message] = applyPersistedRedactions([callWith("a very long authored summary")], state);
+    const [message] = applyPersistedRedactions([callWith("a very long authored summary")], state, emptyRequestLayout());
     const part = (message as any).content[0];
 
     expect(part.arguments.topic).toBe("closed work");
@@ -43,7 +43,7 @@ describe("compress tool-call arguments", () => {
       provider: "test", model: "model", api: "test", stopReason: "toolUse", timestamp: 1,
     } as unknown as AgentMessage;
 
-    const [redacted] = applyPersistedRedactions([message], state);
+    const [redacted] = applyPersistedRedactions([message], state, emptyRequestLayout());
     expect((redacted as any).content[0].arguments.content[0]).toEqual({ startId: "m0001", endId: "m0002", topic: "Phase A" });
   });
 
@@ -57,7 +57,7 @@ describe("compress tool-call arguments", () => {
     } as unknown as AgentMessage;
 
     // The result is the only place a past call's stored content stays visible, so it must come back unchanged.
-    const [message] = applyPersistedRedactions([result], state);
+    const [message] = applyPersistedRedactions([result], state, emptyRequestLayout());
     expect(message).toBe(result);
   });
 
@@ -76,7 +76,7 @@ describe("compress tool-call arguments", () => {
   it("leaves a call that produced no block untouched", () => {
     // A rejected call never created a block, so its text is not stored anywhere
     // else. Removing it would hide from the model what it just tried to do.
-    const [message] = applyPersistedRedactions([callWith("summary of a rejected range")], emptyState());
+    const [message] = applyPersistedRedactions([callWith("summary of a rejected range")], emptyState(), emptyRequestLayout());
     expect((message as any).content[0].arguments.content[0].summary).toBe("summary of a rejected range");
   });
 
@@ -84,7 +84,7 @@ describe("compress tool-call arguments", () => {
     const state = emptyState();
     state.compressToolCallIds.add("call-1");
     const original = callWith("original text");
-    applyPersistedRedactions([original], state);
+    applyPersistedRedactions([original], state, emptyRequestLayout());
     expect((original as any).content[0].arguments.content[0].summary).toBe("original text");
   });
 });

@@ -4,6 +4,7 @@ import { emptyState, markAvailability, type ReducedBlock } from "../../src/state
 function block(anchor: ReducedBlock["anchor"]): ReducedBlock {
   return {
     blockId: "block-1",
+    operationIndex: 0,
     ordinal: 0,
     topic: "completed work",
     summary: "The work is complete.",

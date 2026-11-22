@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { outgoingPrune, type ReducedState } from "../state/reducer.ts";
+import { outgoingPrune, type ReducedState, type RequestLayout } from "../state/reducer.ts";
 import { redactOldErrorArguments } from "../strategies/purge-errors.ts";
 import { adapterForQuestion } from "../questions/registry.ts";
 
@@ -9,27 +9,28 @@ const SUMMARY_MOVED = "[summary text removed by pi-dcp: it is delivered by the c
  * Apply persisted pruning to outgoing messages, copy-on-write.
  *
  * Only the claims that take effect now are applied (see outgoingPrune). A claim
- * recorded since the last compression stays out of the request until the next
- * compression, so the request does not change in the meantime.
+ * that is still waiting stays out of the request, so the bytes before the next
+ * change point do not move. `layout` is the branch placement of this request, which
+ * decides whether a claim has taken effect.
  *
  * Only a message that is actually redacted is copied; every other message is
  * returned by reference. The input is never mutated, because the pipeline may
  * still fall back to it unchanged (see transformOutgoingContext). Copying the
  * whole input here cost a full deep clone of every request.
  */
-export function applyPersistedRedactions(messages: readonly AgentMessage[], state: ReducedState): AgentMessage[] {
-  return messages.map((message) => redactMessage(message, state));
+export function applyPersistedRedactions(messages: readonly AgentMessage[], state: ReducedState, layout: RequestLayout): AgentMessage[] {
+  return messages.map((message) => redactMessage(message, state, layout));
 }
 
-function redactMessage(message: AgentMessage, state: ReducedState): AgentMessage {
+function redactMessage(message: AgentMessage, state: ReducedState, layout: RequestLayout): AgentMessage {
   if (message.role === "toolResult") {
-    return outgoingPrune(state, message.toolCallId)?.output ? { ...message, content: [{ type: "text", text: CLEARED }] } : message;
+    return outgoingPrune(state, message.toolCallId, layout)?.output ? { ...message, content: [{ type: "text", text: CLEARED }] } : message;
   }
   if (message.role !== "assistant") return message;
   let changed = false;
   const content = message.content.map((part) => {
     if (part.type !== "toolCall") return part;
-    const redacted = redactToolArguments(part.id, part.name, part.arguments, state);
+    const redacted = redactToolArguments(part.id, part.name, part.arguments, state, layout);
     if (redacted === part.arguments) return part;
     changed = true;
     return { ...part, arguments: redacted as Record<string, any> };
@@ -38,8 +39,8 @@ function redactMessage(message: AgentMessage, state: ReducedState): AgentMessage
 }
 
 /** Returns the same object when nothing applies; every redactor is pure. */
-function redactToolArguments(id: string, name: string, argumentsValue: unknown, state: ReducedState): unknown {
-  const prune = outgoingPrune(state, id);
+function redactToolArguments(id: string, name: string, argumentsValue: unknown, state: ReducedState, layout: RequestLayout): unknown {
+  const prune = outgoingPrune(state, id, layout);
   let result = argumentsValue;
   if (prune?.oldErrorInput) result = redactOldErrorArguments(result);
   if (prune?.questionInput) {

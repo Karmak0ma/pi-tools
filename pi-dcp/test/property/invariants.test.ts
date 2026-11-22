@@ -29,7 +29,7 @@ describe("deterministic invariants", () => {
       const ctx = {
         model: { provider: "test", id: "model", api: "test", contextWindow: 10_000 },
         getContextUsage: () => ({ tokens: null, contextWindow: 10_000 }),
-        sessionManager: { buildContextEntries: () => entries, buildSessionProjection: () => buildSessionProjection(entries, parentId), getLeafId: () => parentId },
+        sessionManager: { buildContextEntries: () => entries, getBranch: () => entries, buildSessionProjection: () => buildSessionProjection(entries, parentId), getLeafId: () => parentId },
       } as any;
       const result = transformOutgoingContext(messages, { ctx, sessionId: "s", generation: placement + 1, state: emptyState(), config: structuredClone(defaults) as any });
       expect(result.snapshot).toBeDefined();

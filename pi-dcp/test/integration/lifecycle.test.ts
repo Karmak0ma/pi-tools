@@ -94,6 +94,7 @@ describe("extension capability gate", () => {
       getContextUsage: () => ({ tokens: 10, contextWindow: 100_000 }),
       sessionManager: {
         buildSessionProjection: () => buildSessionProjection([entry] as any, "user-1"),
+        getBranch: () => [entry],
         getLeafId: () => "user-1",
       },
     } as any;
@@ -248,6 +249,7 @@ describe("extension capability gate", () => {
         ui: { notify: () => undefined, confirm: async () => true },
         sessionManager: {
           buildContextEntries: () => entries,
+          getBranch: () => entries,
           buildSessionProjection: () => buildSessionProjection(entries as any, leafId),
           getLeafId: () => leafId,
         },
@@ -331,6 +333,7 @@ describe("extension capability gate", () => {
         ui: { notify: () => undefined, confirm: async () => true },
         sessionManager: {
           buildContextEntries: () => entries,
+          getBranch: () => entries,
           buildSessionProjection: () => buildSessionProjection(entries as any, leafId),
           getLeafId: () => leafId,
         },
@@ -397,6 +400,7 @@ describe("extension capability gate", () => {
         ui: { notify: () => undefined, confirm: async () => true },
         sessionManager: {
           buildContextEntries: () => entries,
+          getBranch: () => entries,
           buildSessionProjection: () => buildSessionProjection(entries as any, leafId),
           getLeafId: () => leafId,
         },
@@ -805,6 +809,7 @@ describe("extension capability gate", () => {
         ui: { notify: () => undefined, confirm: async () => true },
         sessionManager: {
           buildContextEntries: () => entries,
+          getBranch: () => entries,
           buildSessionProjection: () => buildSessionProjection(entries as any, "entry-3"),
           getLeafId: () => "entry-3",
         },
@@ -886,7 +891,7 @@ describe("extension capability gate", () => {
       ui: { notify: () => undefined },
       model: { provider: "test", id: "model", api: "test", contextWindow: 10_000 },
       getContextUsage: () => ({ tokens: null, contextWindow: 10_000 }),
-      sessionManager: { buildSessionProjection: () => buildSessionProjection(entries as any, "entry-3"), getLeafId: () => "entry-3" },
+      sessionManager: { buildSessionProjection: () => buildSessionProjection(entries as any, "entry-3"), getBranch: () => entries, getLeafId: () => "entry-3" },
     } as any;
     const extra = { role: "custom", customType: "other-extension", content: "added", display: false, timestamp: 0 };
 
@@ -928,6 +933,7 @@ describe("extension capability gate", () => {
       getContextUsage: () => ({ tokens: 400, contextWindow: 1_000 }),
       sessionManager: {
         buildContextEntries: () => [entry],
+        getBranch: () => [entry],
         buildSessionProjection: () => buildSessionProjection([entry] as any, "message-1"),
         getLeafId: () => "message-1",
       },

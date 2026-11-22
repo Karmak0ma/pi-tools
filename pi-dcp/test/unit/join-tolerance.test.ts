@@ -99,6 +99,7 @@ describe("tolerant projected-message joins", () => {
       sessionManager: {
         buildContextEntries: () => entries,
         buildSessionProjection: () => { hostProjectionCalls++; return buildSessionProjection(entries, "user-1"); },
+        getBranch: () => entries,
         getLeafId: () => "user-1",
       },
     } as any;
@@ -128,7 +129,7 @@ describe("tolerant projected-message joins", () => {
       cwd: "/tmp",
       model: { provider: "test", id: "model", api: "test", contextWindow: 10_000 },
       getContextUsage: () => ({ tokens: null, contextWindow: 10_000 }),
-      sessionManager: { buildContextEntries: () => entries, buildSessionProjection: () => buildSessionProjection(entries, "edit-1"), getLeafId: () => "edit-1" },
+      sessionManager: { buildContextEntries: () => entries, getBranch: () => entries, buildSessionProjection: () => buildSessionProjection(entries, "edit-1"), getLeafId: () => "edit-1" },
     } as any;
 
     const result = transformOutgoingContext([user, assistant], { ctx, sessionId: "s", generation: 1, state: emptyState(), config: structuredClone(defaults) as any });
@@ -152,7 +153,7 @@ describe("tolerant projected-message joins", () => {
       cwd: "/tmp",
       model: { provider: "test", id: "model", api: "test", contextWindow: 10_000 },
       getContextUsage: () => ({ tokens: null, contextWindow: 10_000 }),
-      sessionManager: { buildContextEntries: () => entries, buildSessionProjection: () => buildSessionProjection(entries, "user-2"), getLeafId: () => "user-2" },
+      sessionManager: { buildContextEntries: () => entries, getBranch: () => entries, buildSessionProjection: () => buildSessionProjection(entries, "user-2"), getLeafId: () => "user-2" },
     } as any;
 
     const result = transformOutgoingContext([oldUser, currentUser], { ctx, sessionId: "s", generation: 1, state: emptyState(), config: structuredClone(defaults) as any });

@@ -6,6 +6,13 @@ import { addSavingsTotals, cloneSavingsTotals, emptySavingsTotals, savingsFromOp
 export interface ReducedBlock extends CreatedBlock {
   runId: RunId;
   createdByOpId: string;
+  /**
+   * Position of the compression.created that committed this block among the
+   * reduced operations. A pruning claim recorded before it can take effect once
+   * this block starts at or before the claim (see outgoingPrune). Kept in state so
+   * that replay derives the same value as live.
+   */
+  operationIndex: number;
   active: boolean;
   available: boolean;
   userDecompressed: boolean;
@@ -31,12 +38,6 @@ export interface ReducedState {
   runs: Map<RunId, BlockId[]>;
   toolPrunes: Map<string, ReducedToolPrune>;
   /**
-   * operationIndex of the latest reduced compression.created, or -1 before any.
-   * A pruning claim reaches the request only once a compression committed after
-   * it, so the ordering lives here and replays the same way (see outgoingPrune).
-   */
-  lastCompressionOperationIndex: number;
-  /**
    * Tool-call IDs of compress calls that actually produced blocks. The authored
    * summary text is stored in the block, so keeping the identical text in the
    * tool-call arguments charges the user twice for it forever - the arguments
@@ -60,7 +61,6 @@ export function emptyState(): ReducedState {
     blocks: new Map(),
     runs: new Map(),
     toolPrunes: new Map(),
-    lastCompressionOperationIndex: -1,
     compressToolCallIds: new Set(),
     nudges: new Map(),
     manualMode: false,
@@ -90,7 +90,6 @@ export function cloneState(state: ReducedState): ReducedState {
     }])),
     runs: new Map([...state.runs].map(([id, blocks]) => [id, [...blocks]])),
     toolPrunes: new Map([...state.toolPrunes].map(([id, prune]) => [id, { ...prune }])),
-    lastCompressionOperationIndex: state.lastCompressionOperationIndex,
     compressToolCallIds: new Set(state.compressToolCallIds || []),
     nudges: new Map([...state.nudges].map(([key, nudge]) => [key, { ...nudge }])),
     manualMode: state.manualMode,
@@ -161,7 +160,7 @@ function applyOperation(state: ReducedState, operation: DcpOperation, opId: stri
       for (const [existingId, existing] of state.blocks) {
         if (existing.active && block.coverage.effectiveEntryIds.some((entryId) => existing.coverage.effectiveEntryIds.includes(entryId)) && !block.consumedBlockIds.includes(existingId)) return false;
       }
-      state.blocks.set(block.blockId, { ...block, runId: operation.runId, createdByOpId: opId, active: true, available: true, userDecompressed: false, parentBlockIds: [] });
+      state.blocks.set(block.blockId, { ...block, runId: operation.runId, createdByOpId: opId, operationIndex, active: true, available: true, userDecompressed: false, parentBlockIds: [] });
       ids.push(block.blockId);
     }
     for (const id of ids) {
@@ -173,9 +172,6 @@ function applyOperation(state: ReducedState, operation: DcpOperation, opId: stri
     }
     state.runs.set(operation.runId, ids);
     if (operation.toolCallId) state.compressToolCallIds.add(operation.toolCallId);
-    // Set only after every check above has passed: a rejected envelope returns
-    // false before this line, so it cannot activate earlier pruning claims.
-    state.lastCompressionOperationIndex = operationIndex;
     addSavingsTotals(state.savings, savingsFromOperation(operation));
     return true;
   }
@@ -229,30 +225,111 @@ function applyOperation(state: ReducedState, operation: DcpOperation, opId: stri
 }
 
 /**
+ * Where the parts of one request lie on the session branch. Positions are indexes
+ * into the branch entry list, not indexes among projected messages.
+ *
+ * The projection can lose entries (native compaction, host context edits), and then
+ * projected indexes shift. The branch never reorders and only grows, so a branch
+ * position stays fixed. A claim compared against a block start therefore keeps the
+ * same answer on every later request, and replay sees the same answer as live.
+ */
+export interface RequestLayout {
+  /** Branch position of the first entry of the protocol unit that holds each tool call. */
+  readonly toolCallPosition: ReadonlyMap<string, number>;
+  /**
+   * Branch position of the first entry of each block's range: the point where its
+   * replacement begins. Every block in state has one while its entries stay on the
+   * branch, active or not. A block that a later merge consumed keeps its place, so
+   * the earliest committed block never depends on which blocks are active now.
+   */
+  readonly blockStart: ReadonlyMap<string, number>;
+}
+
+/** The layout of a request with no branch information. Every automatic claim then waits. */
+export function emptyRequestLayout(): RequestLayout {
+  return { toolCallPosition: new Map(), blockStart: new Map() };
+}
+
+/**
+ * Build the layout for one request from the branch, the protocol units that the
+ * request was projected from, and the reduced state. Each position is the earliest
+ * branch entry that a unit or block owns, so a unit or range that spans several
+ * entries is placed at its first one.
+ */
+export function requestLayout(branch: readonly { id: string }[], units: readonly { entryIds: readonly string[]; toolCallIds: readonly string[] }[], state: ReducedState): RequestLayout {
+  const branchPosition = new Map<string, number>();
+  branch.forEach((entry, position) => { if (!branchPosition.has(entry.id)) branchPosition.set(entry.id, position); });
+  const earliest = (entryIds: readonly string[]): number | undefined => {
+    let found: number | undefined;
+    for (const entryId of entryIds) {
+      const position = branchPosition.get(entryId);
+      if (position !== undefined && (found === undefined || position < found)) found = position;
+    }
+    return found;
+  };
+  const toolCallPosition = new Map<string, number>();
+  for (const unit of units) {
+    const position = earliest(unit.entryIds);
+    if (position === undefined) continue;
+    for (const toolCallId of unit.toolCallIds) toolCallPosition.set(toolCallId, position);
+  }
+  const blockStart = new Map<string, number>();
+  for (const [blockId, block] of state.blocks) {
+    const position = earliest(block.coverage.effectiveEntryIds);
+    if (position !== undefined) blockStart.set(blockId, position);
+  }
+  return { toolCallPosition, blockStart };
+}
+
+/**
  * The pruning claims that change the outgoing request now, or undefined when none does.
  *
- * A claim waits until a compression that committed after it has been reduced.
- * That compression already rewrites history from its range start, so the pruned
- * bytes add no earlier cache break. Applying the claim where it was decided would
- * change bytes before every later assistant turn. That drops the signed thinking
- * of those turns and misses the prompt cache.
+ * Why a claim waits. Anthropic binds each signed thinking block to the exact bytes
+ * before it. Changing an earlier message drops the thinking of every later assistant
+ * turn and misses the prompt cache from that point. So a claim may change bytes only
+ * at or after the first point where a compression already changes them.
  *
- * `/dcp sweep` is the one exception. It is an explicit user request, so the
- * outputs it names apply at once, including an output claim that still waits
- * (see applyOperation).
+ * The rule. A claim on tool call T takes effect once a compression that committed
+ * after the claim starts at or before T on the branch. T is at or after the start
+ * when it lies inside the compressed range (the block hides it anyway) or after it.
+ * A claim that lies before every such start keeps waiting, because applying it would
+ * move the change point earlier than the compression already does.
  *
- * The result depends only on reducer order, so a restart or a fork that replays
- * the same entries builds the same request.
+ * The check is made here, at read time, rather than when the compression is reduced.
+ * The reducer has no branch positions, but the request layout does. The result is a
+ * pure function of the reduced state and the layout, so replay equals live.
+ *
+ * `/dcp sweep` is the one exception. It is an explicit user request, so the outputs
+ * it names apply at once, including a claim that still waits (see applyOperation).
  */
-export function outgoingPrune(state: ReducedState, toolCallId: string): ReducedToolPrune | undefined {
+export function outgoingPrune(state: ReducedState, toolCallId: string, layout: RequestLayout): ReducedToolPrune | undefined {
   const prune = state.toolPrunes.get(toolCallId);
   if (!prune) return undefined;
-  const takesEffect = (claim: PruneClaim, immediate: boolean): boolean => immediate || claim.operationIndex < state.lastCompressionOperationIndex;
+  const position = layout.toolCallPosition.get(toolCallId);
+  const takesEffect = (claim: PruneClaim, immediate: boolean): boolean => immediate || (position !== undefined && position >= changePointAfter(state, layout, claim.operationIndex));
   const active: ReducedToolPrune = {};
   if (prune.output && takesEffect(prune.output, prune.output.immediate === true)) active.output = prune.output;
   if (prune.oldErrorInput && takesEffect(prune.oldErrorInput, false)) active.oldErrorInput = prune.oldErrorInput;
   if (prune.questionInput && takesEffect(prune.questionInput, false)) active.questionInput = prune.questionInput;
   return active.output || active.oldErrorInput || active.questionInput ? active : undefined;
+}
+
+/**
+ * The earliest change point that a compression committed after `operationIndex`
+ * introduces, or Infinity when there is none. A claim at or after this point is
+ * effective. The minimum is taken over every such block, not only the active ones.
+ * A later merge begins at or before the blocks it consumes, so the minimum still
+ * names the newest range start. Excluding inactive blocks would let a user
+ * decompress move the minimum later, and an effective claim would flip back to waiting.
+ */
+function changePointAfter(state: ReducedState, layout: RequestLayout, operationIndex: number): number {
+  let earliest = Number.POSITIVE_INFINITY;
+  for (const [blockId, block] of state.blocks) {
+    if (block.operationIndex <= operationIndex) continue;
+    const start = layout.blockStart.get(blockId);
+    if (start !== undefined && start < earliest) earliest = start;
+  }
+  return earliest;
 }
 
 // Both walks below recurse over consumedBlockIds. Recursion depth is bounded by

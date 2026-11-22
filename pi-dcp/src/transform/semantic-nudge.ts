@@ -3,7 +3,7 @@ import type { CanonicalIndex } from "../identity/types.ts";
 import { buildEligibility, isUnitCompressible } from "../compression/eligibility.ts";
 import { applyPersistedRedactions } from "./tools.ts";
 import { compressProtectedMatch } from "../compression/protected.ts";
-import type { ReducedState } from "../state/reducer.ts";
+import type { ReducedState, RequestLayout } from "../state/reducer.ts";
 import { estimateTokens } from "../tokens/estimate.ts";
 import type { NudgeDecision, NudgeEvaluation } from "./metadata.ts";
 
@@ -48,7 +48,7 @@ export interface SemanticNudgeCounters {
  * output is also excluded because compression preserves it verbatim inside the
  * authored summary rather than removing it.
  */
-export function estimatePotentialSavings(index: CanonicalIndex, state: ReducedState, config: EffectiveConfig, cwd = "."): PotentialSavings {
+export function estimatePotentialSavings(index: CanonicalIndex, state: ReducedState, config: EffectiveConfig, cwd: string, layout: RequestLayout): PotentialSavings {
   const eligibility = buildEligibility(index.units, {
     turnProtection: config.turnProtection,
     protectUserMessages: config.compress.protectUserMessages,
@@ -79,7 +79,7 @@ export function estimatePotentialSavings(index: CanonicalIndex, state: ReducedSt
     const messages = unit.messageKeys
       .map((key) => entriesByKey.get(`${key.entryId}:${key.projection}`))
       .filter((message): message is NonNullable<typeof message> => message !== undefined);
-    const redacted = applyPersistedRedactions(messages, state);
+    const redacted = applyPersistedRedactions(messages, state, layout);
     sourceTokens += estimateTokens(redacted).total;
     const calls = new Map<string, { name: string; arguments: unknown }>();
     for (const message of messages) if (message.role === "assistant") for (const part of message.content) if (part.type === "toolCall") calls.set(part.id, { name: part.name, arguments: part.arguments });

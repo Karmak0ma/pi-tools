@@ -99,6 +99,8 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
       generation: options.generation,
       index: indexResult,
       state: availableState,
+      // The branch, not the projection, places pruning claims (see RequestLayout).
+      branch: options.ctx.sessionManager.getBranch(),
       configHash: hashJson(options.config),
     });
 
@@ -112,7 +114,7 @@ export function transformOutgoingContext(input: readonly AgentMessage[], options
     // protectUserMessages) stay out of inline labels on purpose - see the
     // comment in labels.ts on why baking them in would break prompt-cache
     // prefix stability.
-    const labeled = injectInlineLabels(applyPersistedRedactions(canonicalMessages, availableState), indexResult.units, snapshot);
+    const labeled = injectInlineLabels(applyPersistedRedactions(canonicalMessages, availableState, snapshot.layout), indexResult.units, snapshot);
     const rendered = replaceBlocksWithOrigins(labeled, indexResult.units, snapshot, availableState);
     const transformed = mergeProjectedOutput(input, incomingByFullIndex, rendered.byProjectedIndex);
     if (!validateProtocol(transformed)) return { ...failure(fallback, state, "protocol_invalid"), join };

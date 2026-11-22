@@ -107,7 +107,7 @@ describe("assistant messages left behind by an incomplete request", () => {
   // entry disappeared", or the block would deactivate and the whole context
   // would expand again - the exact outcome this change is meant to prevent.
   const legacyBlock = (coverage: string[], anchor: ReducedBlock["anchor"]): ReducedBlock => ({
-    blockId: "block-1", ordinal: 0, topic: "old work", summary: "s", authoredSummary: "s",
+    blockId: "block-1", ordinal: 0, operationIndex: 0, topic: "old work", summary: "s", authoredSummary: "s",
     estimatedSummaryTokens: 1, estimatedSourceTokens: 10, estimatedSavingsTokens: 9,
     coverage: { directEntryIds: [...coverage], effectiveEntryIds: [...coverage], directToolCallIds: [], effectiveToolCallIds: [] },
     anchor,

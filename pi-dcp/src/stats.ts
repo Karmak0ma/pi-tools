@@ -10,10 +10,12 @@ import type { OpEnvelope, DcpOperation } from "./state/operations.ts";
  * recording each persisted pruning/compression operation once gives cumulative
  * and replayable statistics instead.
  *
- * A pruning decision is counted when it is decided, even while it waits for the
- * next compression (state/reducer.ts). A compression then subtracts the decided
- * tokens that lie inside its own range (CreatedBlock.creditedPruneTokens), so a
- * token that is pruned and later compressed is still counted once.
+ * A pruning decision is counted when it is decided, even while it waits to take
+ * effect (state/reducer.ts, outgoingPrune). A claim may wait a long time, or never
+ * take effect, and its tokens still count. The total can therefore exceed the bytes
+ * actually removed from the request. A compression subtracts the decided tokens that
+ * lie inside its own range (CreatedBlock.creditedPruneTokens), so a token that is
+ * pruned and later compressed is still counted once.
  */
 export const SAVINGS_SOURCES = [
   "compression",

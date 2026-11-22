@@ -6,7 +6,7 @@ import { buildSessionProjection } from "@earendil-works/pi-coding-agent";
 import { sweepCommand } from "../../src/commands/sweep.ts";
 import { defaults } from "../../src/config/defaults.ts";
 import { createRuntime } from "../../src/runtime.ts";
-import { emptyState, outgoingPrune, reduceEnvelope } from "../../src/state/reducer.ts";
+import { emptyRequestLayout, emptyState, outgoingPrune, reduceEnvelope } from "../../src/state/reducer.ts";
 import { createEnvelope } from "../../src/state/operations.ts";
 
 it("uses Pi 0.87 host projection for sweep after a context edit", async () => {
@@ -34,6 +34,7 @@ it("uses Pi 0.87 host projection for sweep after a context edit", async () => {
       ui: { notify: (text: string) => { notices.push(text); } },
       sessionManager: {
         buildContextEntries: () => entries,
+        getBranch: () => entries,
         buildSessionProjection: () => { hostProjectionCalls++; return buildSessionProjection(entries, "result-1"); },
       },
     } as any;
@@ -45,7 +46,8 @@ it("uses Pi 0.87 host projection for sweep after a context edit", async () => {
     expect((appended[0] as any).operation.decisions).toEqual([expect.objectContaining({ toolCallId: "read-edited", kind: "sweep-output" })]);
     expect(notices).toContain("pi-dcp swept 1 tool output(s).");
     // A sweep is an explicit request, so its claim changes the next request at once.
-    expect(outgoingPrune(runtime.reduced, "read-edited")?.output?.kind).toBe("sweep-output");
+    // A sweep output is immediate, so the request layout does not decide it.
+    expect(outgoingPrune(runtime.reduced, "read-edited", emptyRequestLayout())?.output?.kind).toBe("sweep-output");
   } finally {
     if (previousStatsDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousStatsDir;
@@ -73,14 +75,14 @@ it("sweep switches on an automatic claim that still waits, without counting it a
     const ctx = {
       cwd: "/tmp",
       ui: { notify: () => {} },
-      sessionManager: { buildContextEntries: () => entries, buildSessionProjection: () => buildSessionProjection(entries as any, "result-1") },
+      sessionManager: { buildContextEntries: () => entries, getBranch: () => entries, buildSessionProjection: () => buildSessionProjection(entries as any, "result-1") },
     } as any;
 
     await sweepCommand("", ctx, pi, runtime);
 
     // The sweep carries no tokens: the dedup decision already counted them.
     expect(appended[0].operation.decisions).toEqual([{ toolCallId: "read-now", kind: "sweep-output", estimatedTokens: 0 }]);
-    expect(outgoingPrune(runtime.reduced, "read-now")?.output).toBeDefined();
+    expect(outgoingPrune(runtime.reduced, "read-now", emptyRequestLayout())?.output).toBeDefined();
     expect(runtime.reduced.savings.deduplication.tokens).toBe(50);
     expect(runtime.reduced.savings.sweep).toEqual({ events: 0, tokens: 0 });
   } finally {

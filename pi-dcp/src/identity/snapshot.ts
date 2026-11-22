@@ -1,6 +1,6 @@
 import type { Model } from "@earendil-works/pi-ai";
 import { hashJson } from "../util/hash.ts";
-import { outgoingPrune, type ReducedBlock, type ReducedState } from "../state/reducer.ts";
+import { outgoingPrune, requestLayout, type ReducedBlock, type ReducedState } from "../state/reducer.ts";
 import type { BaselineKey, BaselineSnapshot, CanonicalIndex, ModelKey, SnapshotBlockAlias } from "./types.ts";
 
 /**
@@ -80,6 +80,8 @@ export function createSnapshot(options: {
   generation: number;
   index: CanonicalIndex;
   state: ReducedState;
+  /** Session branch entries, in order. Pruning claims are placed on this order, not on projected indexes. */
+  branch: readonly { id: string }[];
   configHash: string;
   branchIdentity?: string;
   thinkingLevel?: string;
@@ -102,6 +104,7 @@ export function createSnapshot(options: {
     unitAliases.set(unitAlias(index), index);
   }
 
+  const layout = requestLayout(options.branch, units, options.state);
   const blockAliases = new Map<string, SnapshotBlockAlias>();
   const blockRanges = new Map<string, { start: number; end: number }>();
   const activeBlocks = orderedActiveBlocks(units, options.state);
@@ -129,7 +132,7 @@ export function createSnapshot(options: {
     // Only the claims that shape the request. A pending claim changes nothing the
     // model receives, so it must not change the identity of this request either.
     prunedTools: [...options.state.toolPrunes.keys()].sort((a, b) => a.localeCompare(b)).flatMap((toolCallId) => {
-      const prune = outgoingPrune(options.state, toolCallId);
+      const prune = outgoingPrune(options.state, toolCallId, layout);
       return prune ? [[toolCallId, prune] as const] : [];
     }),
     aliasTransport: "local-unit-inline-v1",
@@ -170,6 +173,7 @@ export function createSnapshot(options: {
     blockAliases,
     activeBlockIds: [...blockAliases.values()].map((block) => block.blockId),
     blockRanges,
+    layout,
     index: options.index,
     // Kept deterministic so equivalent transforms are deeply equal in tests.
     createdMonotonicMs: 0,

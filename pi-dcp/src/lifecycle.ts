@@ -14,7 +14,7 @@ import { stripEchoedLabels } from "./transform/echo.ts";
 import { relocateCacheBreakpoint } from "./transform/cache-breakpoint.ts";
 import { evaluateSettledStrategies } from "./strategies/settle.ts";
 import { createEnvelope, isOperationEnvelope, OPERATION_CUSTOM_TYPE, type OpEnvelope } from "./state/operations.ts";
-import { reduceEnvelope, markAvailability, type ReducedState } from "./state/reducer.ts";
+import { reduceEnvelope, markAvailability, requestLayout, type ReducedState } from "./state/reducer.ts";
 import { clearBaselines, disableRuntime, emptyContextStats, invalidateSnapshot, publishBaseline, resetSemanticNudges, runtimeSessionIdentity, setDcpToolActive, type DcpRuntime } from "./runtime.ts";
 import { modelKey } from "./identity/snapshot.ts";
 import { buildSystemGuidance, DCP_SYSTEM_SECTION } from "./prompts/defaults.ts";
@@ -544,7 +544,8 @@ async function onSettled(ctx: ExtensionContext, runtime: DcpRuntime, pi: Extensi
       // generation that beforeAgentStart will use for delivery.
       const usage = ctx.getContextUsage();
       const contextEvaluation = evaluateNudge(usage?.tokens, runtime.config, usage?.contextWindow || ctx.model?.contextWindow || 0, runtime.lastNudgeTurn === undefined ? Number.POSITIVE_INFINITY : runtime.turnCount - runtime.lastNudgeTurn, runtime.lastNudgeTurn === runtime.turnCount, ctx.model?.id);
-      const potential = estimatePotentialSavings(index, runtime.reduced, runtime.config, ctx.cwd);
+      // The nudge estimate must see the same claims the request sees, so it uses the same branch placement.
+      const potential = estimatePotentialSavings(index, runtime.reduced, runtime.config, ctx.cwd, requestLayout(ctx.sessionManager.getBranch(), index.units, runtime.reduced));
       const semanticEvaluation = evaluateSemanticNudge({
         userTurnsSinceCompression: runtime.semanticUserTurnsSinceCompression,
         iterationsSinceUserTurn: runtime.semanticIterationsSinceUserTurn,

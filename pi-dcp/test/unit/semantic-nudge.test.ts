@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaults, type EffectiveConfig } from "../../src/config/defaults.ts";
-import { emptyState } from "../../src/state/reducer.ts";
+import { emptyRequestLayout, emptyState } from "../../src/state/reducer.ts";
 import { createRuntime, noteSuccessfulCompression } from "../../src/runtime.ts";
 import { buildProtocolUnits } from "../../src/identity/protocol.ts";
 import { projectCurrentEntries } from "../helpers/current-host.ts";
@@ -38,7 +38,7 @@ describe("semantic compression nudges", () => {
       { role: "assistant", content: [{ type: "text", text: "x".repeat(64000) }], api: "test", provider: "test", model: "model", stopReason: "stop", timestamp: 2 },
       { role: "user", content: "current request", timestamp: 3 },
     ]);
-    const potential = estimatePotentialSavings(index, emptyState(), config(), "/tmp");
+    const potential = estimatePotentialSavings(index, emptyState(), config(), "/tmp", emptyRequestLayout());
 
     expect(potential.candidateUnits).toBe(2);
     expect(potential.candidateSegments).toBe(1);
@@ -56,7 +56,7 @@ describe("semantic compression nudges", () => {
     ]);
     const settings = config();
     settings.compress.protectedTools = ["read"];
-    const potential = estimatePotentialSavings(index, emptyState(), settings, "/tmp");
+    const potential = estimatePotentialSavings(index, emptyState(), settings, "/tmp", emptyRequestLayout());
 
     expect(potential.protectedSourceTokens).toBeGreaterThan(0);
     expect(potential.estimatedSavingsTokens).toBeLessThan(Math.floor(potential.sourceTokens * 0.75));

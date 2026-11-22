@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { defaults } from "../../src/config/defaults.ts";
 import { createEnvelope, OPERATION_CUSTOM_TYPE, type CreatedBlock, type OpEnvelope, type PrunedToolDecision } from "../../src/state/operations.ts";
-import { emptyState, outgoingPrune, reduceEnvelope } from "../../src/state/reducer.ts";
+import { emptyState, outgoingPrune, reduceEnvelope, requestLayout } from "../../src/state/reducer.ts";
 import { reconstructFromBranch } from "../../src/state/reconstruct.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
 import { estimatePotentialSavings } from "../../src/transform/semantic-nudge.ts";
@@ -14,10 +14,10 @@ import { savingsFromOperation } from "../../src/stats.ts";
 import { currentHostSessionManager, projectCurrentEntries } from "../helpers/current-host.ts";
 
 /**
- * A pruning decision on raw history must not change the request until the next
- * compression commits. Changing it earlier would move the bytes before every
- * later assistant turn, which drops that turn's signed thinking and misses the
- * prompt cache (see state/reducer.ts, outgoingPrune).
+ * A pruning decision on raw history must not move the change point of the request
+ * earlier than the compression already does. Changing bytes earlier drops the
+ * signed thinking of every later assistant turn and misses the prompt cache from
+ * that point (see state/reducer.ts, outgoingPrune).
  */
 
 const SESSION = "session-1";
@@ -32,7 +32,10 @@ const call = (id: string, path: string, timestamp: number): AgentMessage => ({ r
 const result = (toolCallId: string, text: string, timestamp: number): AgentMessage => ({ role: "toolResult", toolCallId, toolName: "read", content: [{ type: "text", text }], isError: false, timestamp } as any);
 const reply = (text: string, timestamp: number): AgentMessage => ({ role: "assistant", content: [{ type: "text", text }], provider: "test", model: "model", api: "test", stopReason: "stop", timestamp } as any);
 
-/** Turn one reads a.ts, turn two reads b.ts, and the third (current) turn is open. */
+/**
+ * Turn one reads a.ts, turn two reads b.ts, and the third (current) turn is open.
+ * Protocol units: 0 user, 1 call-a, 2 reply-a, 3 user, 4 call-b, 5 reply-b, 6 user, 7 reply.
+ */
 function session(): AgentMessage[] {
   return [
     user("first request", 1),
@@ -79,6 +82,11 @@ function indexOf(messages: AgentMessage[]) {
   return index;
 }
 
+/** The layout that transform() builds for these messages: the same branch and the same units. */
+function layoutOf(messages: AgentMessage[], state: ReturnType<typeof emptyState>) {
+  return requestLayout(toEntries(messages), indexOf(messages).units, state);
+}
+
 function prune(decisions: PrunedToolDecision[]): OpEnvelope {
   return createEnvelope({ type: "tools.pruned", decisions }, SESSION, "0.2.0");
 }
@@ -96,9 +104,13 @@ function compression(runId: string, entryIds: string[], toolCallIds: string[], a
 /** Turn one: entries 1-4 and the call on a.ts. */
 const TURN_ONE = (runId: string) => compression(runId, ["entry-1", "entry-2", "entry-3", "entry-4"], ["call-a"], "entry-5");
 
-/** Build the compress envelope for a range of units, as the compress tool does (state includes earlier blocks). */
-function buildRange(state: ReturnType<typeof emptyState>, index: ReturnType<typeof indexOf>, first: number, last: number) {
-  const snapshot = createSnapshot({ sessionId: SESSION, leafId: "entry-10", model: MODEL, generation: 1, ttlMs: 60_000, index, state, configHash: "stats" });
+/**
+ * Build the compress envelope for a range of units, as the compress tool does. The
+ * state supplies earlier blocks, and the branch is the messages' own entries.
+ */
+function buildRange(state: ReturnType<typeof emptyState>, messages: AgentMessage[], first: number, last: number) {
+  const index = indexOf(messages);
+  const snapshot = createSnapshot({ sessionId: SESSION, leafId: "entry-10", model: MODEL, generation: 1, ttlMs: 60_000, index, state, branch: toEntries(messages), configHash: "stats" });
   const built = buildCompressionEnvelope({
     sessionId: SESSION, extensionVersion: "0.2.0", snapshot, state, model: undefined, index,
     params: { topic: "range", content: [{ startId: unitAlias(first), endId: unitAlias(last), summary: "short summary" }] },
@@ -127,7 +139,7 @@ describe("deferred pruning of raw history", () => {
 
     expect(JSON.stringify(pending.messages)).toBe(JSON.stringify(before.messages));
     expect(pending.snapshot?.hash).toBe(before.snapshot?.hash);
-    expect(outgoingPrune(claimed, "call-b")).toBeUndefined();
+    expect(outgoingPrune(claimed, "call-b", layoutOf(messages, claimed))).toBeUndefined();
   });
 
   it("the claim reaches the request in the same one where the next compression first appears", () => {
@@ -144,7 +156,64 @@ describe("deferred pruning of raw history", () => {
     expect(JSON.stringify(withoutClaim.messages[changed])).toContain(RAW_B.slice(0, 40));
   });
 
-  it("replayed entries build the same request as the live state, including a claim that waits", () => {
+  it("a claim before the next compression's range start keeps waiting, and the request does not change", () => {
+    const messages = session();
+    const claimed = reduceEnvelope(emptyState(), prune([{ toolCallId: "call-a", kind: "dedup-output", estimatedTokens: 900 }]));
+    // Turn two starts after call-a, so the claim lies before the change point.
+    const turnTwo = buildRange(claimed, messages, 3, 5).envelope;
+    const withClaim = reduceEnvelope(claimed, turnTwo);
+    const withoutClaim = reduceEnvelope(emptyState(), turnTwo);
+
+    expect(JSON.stringify(transform(messages, withClaim).messages)).toBe(JSON.stringify(transform(messages, withoutClaim).messages));
+    expect(outgoingPrune(withClaim, "call-a", layoutOf(messages, withClaim))).toBeUndefined();
+    expect(JSON.stringify(transform(messages, withClaim).messages)).toContain(RAW_A.slice(0, 40));
+  });
+
+  it("a claim inside a later compression's range, or after it, takes effect", () => {
+    const messages = session();
+    const claim = prune([{ toolCallId: "call-a", kind: "dedup-output", estimatedTokens: 900 }]);
+    // The range starts on call-a's own unit, so the claim lies inside it. The block hides it.
+    const inside = reduceEnvelope(reduceEnvelope(emptyState(), claim), buildRange(reduceEnvelope(emptyState(), claim), messages, 1, 2).envelope);
+    expect(outgoingPrune(inside, "call-a", layoutOf(messages, inside))?.output).toBeDefined();
+
+    // A claim after the range: the range starts at unit 0, before call-b.
+    const after = prune([{ toolCallId: "call-b", kind: "dedup-output", estimatedTokens: 900 }]);
+    const earlier = reduceEnvelope(reduceEnvelope(emptyState(), after), buildRange(emptyState(), messages, 0, 2).envelope);
+    expect(JSON.stringify(transform(messages, earlier).messages)).toContain(CLEARED);
+  });
+
+  it("a merged block takes the start of its own range, not the start of the child it consumes", () => {
+    const messages = session();
+    // The first block is created before the claim, so it does not count for the claim.
+    let state = reduceEnvelope(emptyState(), buildRange(emptyState(), messages, 3, 5).envelope);
+    state = reduceEnvelope(state, prune([{ toolCallId: "call-a", kind: "dedup-output", estimatedTokens: 900 }]));
+    expect(outgoingPrune(state, "call-a", layoutOf(messages, state))).toBeUndefined();
+
+    // The merge starts at unit 2, which is still after call-a.
+    state = reduceEnvelope(state, buildRange(state, messages, 2, 5).envelope);
+    expect(state.corruptReason).toBeUndefined();
+    expect(outgoingPrune(state, "call-a", layoutOf(messages, state))).toBeUndefined();
+
+    // The next merge starts on call-a's own unit, so the claim lies inside the new range.
+    state = reduceEnvelope(state, buildRange(state, messages, 1, 5).envelope);
+    expect(state.corruptReason).toBeUndefined();
+    expect(outgoingPrune(state, "call-a", layoutOf(messages, state))?.output).toBeDefined();
+  });
+
+  it("an effective claim keeps its place when the projection loses its first unit", () => {
+    const messages = session();
+    const claim = prune([{ toolCallId: "call-b", kind: "dedup-output", estimatedTokens: 900 }]);
+    const state = reduceEnvelope(reduceEnvelope(emptyState(), claim), buildRange(emptyState(), messages, 0, 2).envelope);
+    const entries = toEntries(messages);
+    const units = indexOf(messages).units;
+
+    expect(outgoingPrune(state, "call-b", requestLayout(entries, units, state))?.output).toBeDefined();
+    // Native compaction can drop projected units, but the branch still holds them,
+    // so the claim's place and the block's start do not move.
+    expect(outgoingPrune(state, "call-b", requestLayout(entries, units.slice(1), state))?.output).toBeDefined();
+  });
+
+  it("replayed entries build the same request as the live state, including claims that wait", () => {
     const messages = session();
     const claim = prune([{ toolCallId: "call-b", kind: "dedup-output", estimatedTokens: 900 }]);
     const compressed = TURN_ONE("one");
@@ -152,7 +221,6 @@ describe("deferred pruning of raw history", () => {
     const live = reduceEnvelope(reduceEnvelope(emptyState(), claim), compressed);
     const replayed = reconstructFromBranch(branch([claim, compressed])).state;
     expect(replayed.corruptReason).toBeUndefined();
-    expect(replayed.lastCompressionOperationIndex).toBe(live.lastCompressionOperationIndex);
     expect(JSON.stringify(transform(messages, replayed).messages)).toBe(JSON.stringify(transform(messages, live).messages));
 
     // Decided after the last compression, so it waits. Live and replayed must agree.
@@ -162,10 +230,17 @@ describe("deferred pruning of raw history", () => {
     expect(JSON.stringify(transform(messages, replayedWaiting).messages)).toBe(JSON.stringify(transform(messages, liveWaiting).messages));
     expect(JSON.stringify(transform(messages, replayedWaiting).messages)).toBe(JSON.stringify(transform(messages, reduceEnvelope(emptyState(), compressed)).messages));
 
+    // Recorded before a range that starts after it, so it waits on both paths.
+    const earlyClaim = prune([{ toolCallId: "call-a", kind: "dedup-output", estimatedTokens: 900 }]);
+    const laterRange = buildRange(emptyState(), messages, 3, 5).envelope;
+    const liveStrict = reduceEnvelope(reduceEnvelope(emptyState(), earlyClaim), laterRange);
+    const replayedStrict = reconstructFromBranch(branch([earlyClaim, laterRange])).state;
+    expect(replayedStrict.corruptReason).toBeUndefined();
+    expect(JSON.stringify(transform(messages, replayedStrict).messages)).toBe(JSON.stringify(transform(messages, liveStrict).messages));
+
     // Ordering is per branch: a branch that never saw the compression cannot activate the claim.
     const forked = reconstructFromBranch(branch([claim])).state;
-    expect(forked.lastCompressionOperationIndex).toBe(-1);
-    expect(outgoingPrune(forked, "call-b")).toBeUndefined();
+    expect(outgoingPrune(forked, "call-b", layoutOf(messages, forked))).toBeUndefined();
   });
 
   it("a rejected compression does not activate pending claims", () => {
@@ -173,7 +248,7 @@ describe("deferred pruning of raw history", () => {
     // The anchor lies inside the block's own coverage, which the reducer refuses.
     const rejected = reduceEnvelope(claimed, compression("bad", ["entry-1", "entry-2", "entry-3", "entry-4"], ["call-a"], "entry-2"));
     expect(rejected.corruptReason).toBeDefined();
-    expect(rejected.lastCompressionOperationIndex).toBe(-1);
+    expect(rejected.blocks.size).toBe(0);
   });
 
   it("a sweep claim changes the request at once, with no compression", () => {
@@ -198,9 +273,9 @@ describe("deferred pruning of raw history", () => {
   });
 
   it("counts a token once when a decided pruning lies inside a compressed range", () => {
-    const index = indexOf(session());
+    const messages = session();
     const state = reduceEnvelope(emptyState(), prune([{ toolCallId: "call-b", kind: "dedup-output", estimatedTokens: 120 }]));
-    const built = buildRange(state, index, 0, 5);
+    const built = buildRange(state, messages, 0, 5);
 
     const [block] = built.blocks;
     expect(block.creditedPruneTokens).toBe(120);
@@ -212,15 +287,31 @@ describe("deferred pruning of raw history", () => {
     expect(savingsFromOperation(built.envelope.operation).compression?.tokens).toBe(block.estimatedSavingsTokens! - 120);
   });
 
+  it("counts a claim outside a later range once, even when a later compression covers it", () => {
+    const messages = session();
+    const claim = prune([{ toolCallId: "call-a", kind: "dedup-output", estimatedTokens: 120 }]);
+    // Turn two does not contain call-a, so this compression credits nothing for it.
+    const turnTwo = buildRange(reduceEnvelope(emptyState(), claim), messages, 3, 5);
+    let state = reduceEnvelope(reduceEnvelope(emptyState(), claim), turnTwo.envelope);
+    expect(state.savings.deduplication.tokens).toBe(120);
+    expect(state.savings.compression.tokens).toBe(turnTwo.blocks[0].estimatedSavingsTokens);
+
+    // A later compression covers call-a and subtracts the decided tokens once.
+    const all = buildRange(state, messages, 0, 5);
+    state = reduceEnvelope(state, all.envelope);
+    expect(state.corruptReason).toBeUndefined();
+    expect(state.savings.deduplication.tokens + state.savings.compression.tokens).toBe(turnTwo.blocks[0].estimatedSavingsTokens! + all.blocks[0].estimatedSavingsTokens!);
+  });
+
   it("a block that merges a compressed child subtracts only the pruning inside its own units", () => {
-    const index = indexOf(session());
+    const messages = session();
     let state = reduceEnvelope(emptyState(), prune([
       { toolCallId: "call-a", kind: "dedup-output", estimatedTokens: 50 },
       { toolCallId: "call-b", kind: "dedup-output", estimatedTokens: 120 },
     ]));
-    const child = buildRange(state, index, 0, 2);
+    const child = buildRange(state, messages, 0, 2);
     state = reduceEnvelope(state, child.envelope);
-    const parent = buildRange(state, index, 0, 5);
+    const parent = buildRange(state, messages, 0, 5);
     state = reduceEnvelope(state, parent.envelope);
     expect(state.corruptReason).toBeUndefined();
 
@@ -246,8 +337,9 @@ describe("deferred pruning of raw history", () => {
   });
 
   it("a pending claim is not counted as already saved by the nudge estimate", () => {
-    const index = indexOf(session());
-    const potential = (state: ReturnType<typeof emptyState>) => estimatePotentialSavings(index, state, CONFIG, "/tmp");
+    const messages = session();
+    const index = indexOf(messages);
+    const potential = (state: ReturnType<typeof emptyState>) => estimatePotentialSavings(index, state, CONFIG, "/tmp", layoutOf(messages, state));
     const pending = reduceEnvelope(emptyState(), prune([{ toolCallId: "call-b", kind: "dedup-output", estimatedTokens: 900 }]));
     expect(potential(pending)).toEqual(potential(emptyState()));
 

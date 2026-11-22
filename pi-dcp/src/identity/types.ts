@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { RequestLayout } from "../state/reducer.ts";
 
 export type EntryId = string;
 export type ToolCallId = string;
@@ -76,6 +77,8 @@ export interface BaselineSnapshot {
   blockAliases: Map<string, SnapshotBlockAlias>;
   activeBlockIds: BlockId[];
   blockRanges?: Map<BlockId, { start: number; end: number }>;
+  /** Branch positions of this request. Pruning claims are judged against them (see outgoingPrune). */
+  layout: RequestLayout;
   index?: CanonicalIndex;
   createdMonotonicMs: number;
 }

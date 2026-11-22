@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { buildSyntheticSession, contextEventMessages, createContextHarness } from "../helpers/synthetic-session.ts";
 import { currentHostSessionManager } from "../helpers/current-host.ts";
 import { deepFreeze } from "../../src/util/clone.ts";
-import { outgoingPrune } from "../../src/state/reducer.ts";
+import { outgoingPrune, requestLayout } from "../../src/state/reducer.ts";
 
 /**
  * SHA-256 of the transformed messages for the default synthetic session.
@@ -59,7 +59,9 @@ describe("realistic request path", () => {
     expect(output).toContain("[edited by host");
     // Every dedup-pruned output that takes effect is replaced by a short placeholder.
     const state = harness.runtime.reduced;
-    const effective = new Set([...state.toolPrunes.keys()].filter((id) => outgoingPrune(state, id)?.output));
+    // The same branch placement the request used, so the count matches what was sent.
+    const layout = requestLayout(session.entries as { id: string }[], harness.runtime.index!.units, state);
+    const effective = new Set([...state.toolPrunes.keys()].filter((id) => outgoingPrune(state, id, layout)?.output));
     const prunedResults = first.messages.filter((message): message is Extract<typeof message, { role: "toolResult" }> => message.role === "toolResult" && effective.has(message.toolCallId));
     expect(prunedResults.length).toBe(effective.size);
     for (const message of prunedResults) expect(JSON.stringify(message.content).length).toBeLessThan(200);
