@@ -625,6 +625,7 @@ function makePersistedSummary(instance: RuntimeSubagentInstance): PersistedTaskS
     toolCalls: [...instance.summary.toolCalls],
     finalOutput: instance.summary.latestOutput,
     usage: { ...instance.summary.usage },
+    contextWindow: instance.contextWindow,
     failed,
   };
 }

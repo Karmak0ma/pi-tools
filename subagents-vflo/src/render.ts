@@ -1,72 +1,161 @@
 /**
- * Rendering helpers for the subagent tool.
+ * Rendering of the subagent tool rows (subagent, subagent_continue,
+ * subagent_wait) and of the pushed background results message.
  *
- * Phase 1/2: Tool-row rendering only.
+ * Layout (agreed with mockups docs/mockups/tool-render-v2.html):
+ *
+ *   [subagent]
+ *   ◆ 2 TASKS · 1 done · 1 running                  9 turns  ↑109k ↓6.0k  $0.053
+ *
+ *    DONE  explore  haiku-4-5   ██░░░░░░░░  22%     4 turns  ↑38k ↓2.1k  $0.012
+ *    ⠋ RUN build    sonnet-4-5  ████░░░░░░  38%     5 turns  ↑71k ↓3.9k  $0.041
+ *          └ $ npm test -- login
+ *
+ * Decisions from the user, and why they shape this file:
+ * - One card on `customMessageBg` with a purple label, like pi-dcp and
+ *   pi-advisor-flow. The tools use `renderShell: "self"`, so Pi does not put
+ *   its own pending/success/error box around the card.
+ * - The answer of a task is never shown, not even when expanded. The answer
+ *   goes to the parent model; the user reads the parent's reply instead.
+ * - Only running and failed (or stopped) tasks show their last tool call. A
+ *   done task needs no activity line.
+ * - The context bar is `usage.contextTokens / contextWindow`. When the window
+ *   is unknown (model not in the registry, or a result stored before the
+ *   field existed) the bar is left out.
+ * - The spinner frame is taken from the clock. The redraws that make it turn
+ *   come from a timer in index.ts (deliverTasks), not from here: the render
+ *   functions stay pure and own no timers.
  */
 
 import * as os from "node:os";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import {
+  Box,
+  Spacer,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+  type Component,
+} from "@earendil-works/pi-tui";
 import {
   isTaskFailed,
   type LiveSubagentToolDetails,
   type PersistedSubagentToolDetails,
-  type PersistedTaskSummary,
   type TaskUsage,
 } from "./types.js";
 
-// ─── Render Cache ────────────────────────────────────────────────────────────
+// ─── Theme and context types ─────────────────────────────────────────────────
 
 /**
- * Cache for expensive rendered components.
- * Key: composite of task content hash + expanded state.
- * Prevents re-creating Markdown instances on every render frame.
+ * Theme subset used here. Kept narrow on purpose so that tests can pass a
+ * fake theme. `getBgAnsi` is needed to restore the card background after a
+ * badge (see `badge`).
  */
-interface RenderCacheEntry {
-  container: any;
-  contentKey: string;
+export interface RenderTheme {
+  fg(color: any, text: string): string;
+  bg(color: any, text: string): string;
+  bold(text: string): string;
+  getBgAnsi(color: any): string;
 }
 
-const renderCache = new Map<string, RenderCacheEntry>();
-const MAX_CACHE_SIZE = 20;
+/** Fields of Pi's ToolRenderContext that this file reads. All optional for tests. */
+export interface RenderSlot {
+  outputPad?: number;
+  executionStarted?: boolean;
+  // Narrowed to the one binding used here, so Pi's keyof-Keybindings signature fits.
+  keyHint?: (keybinding: "app.tools.expand", description: string) => string;
+}
 
-function computeContentKey(details: PersistedSubagentToolDetails): string {
-  // Hash based on: task count, each task's final output length, error messages, usage
-  const parts: string[] = [`tc:${details.taskCount}`];
-  for (const s of details.summaries) {
-    const ps = s as PersistedTaskSummary;
-    parts.push(`${ps.agent}:${ps.finalOutput?.length ?? 0}:${ps.errorMessage ?? ''}:${ps.usage?.output ?? 0}`);
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const LABEL = "[subagent]";
+/** Every badge is 6 cells wide, so agent names line up under each other. */
+const BADGE_WIDTH = 6;
+/** Indent of the lines under a task row: badge width plus one space. */
+const INDENT = " ".repeat(BADGE_WIDTH + 1);
+/** Context bar cells, plus 5 cells for " 100%". */
+const BAR_CELLS = 10;
+const BAR_WIDTH = BAR_CELLS + 5;
+/** Caps for the agent and model columns, so one long name cannot push the stats off the row. */
+const MAX_AGENT_WIDTH = 14;
+const MAX_MODEL_WIDTH = 22;
+/** Braille spinner, same frames as the mockup. One frame per SPINNER_MS. */
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+export const SPINNER_MS = 100;
+/** Task previews shown in the call card while the model still streams the arguments. */
+const CALL_PREVIEWS = 4;
+
+// ─── Small helpers ───────────────────────────────────────────────────────────
+
+/**
+ * A component that builds its lines at render time, when the width is known.
+ * The rows need the width to right-align the stats.
+ */
+class Lines implements Component {
+  constructor(private readonly theme: RenderTheme, private readonly build: (width: number) => string[]) {}
+  render(width: number): string[] {
+    // truncateToWidth ends a cut line with a full SGR reset, which also
+    // clears the card background for the padding Box adds after it. Switch
+    // the card background on again after every line (no effect when uncut).
+    const cardBg = this.theme.getBgAnsi("customMessageBg");
+    return this.build(width).map((line) => truncateToWidth(line, width, "…") + cardBg);
   }
-  return parts.join('|');
+  invalidate(): void {}
 }
 
-function getCachedResult(cacheKey: string, contentKey: string): any | undefined {
-  const entry = renderCache.get(cacheKey);
-  if (entry && entry.contentKey === contentKey) return entry.container;
-  return undefined;
+function card(theme: RenderTheme, slot: RenderSlot): Box {
+  return new Box(slot.outputPad ?? 1, 0, (text) => theme.bg("customMessageBg", text));
 }
 
-function setCachedResult(cacheKey: string, contentKey: string, container: any): void {
-  if (renderCache.size >= MAX_CACHE_SIZE) {
-    // Evict oldest entry
-    const firstKey = renderCache.keys().next().value;
-    if (firstKey) renderCache.delete(firstKey);
-  }
-  renderCache.set(cacheKey, { container, contentKey });
+function label(theme: RenderTheme): string {
+  return theme.fg("customMessageLabel", theme.bold(LABEL));
 }
 
-/** Clear the render cache (for testing or when tool rows are disposed). */
-export function clearRenderCache(): void {
-  renderCache.clear();
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
-
-// ─── Formatting Helpers ──────────────────────────────────────────────────────
 
 function formatTokens(count: number): string {
   if (count < 1000) return count.toString();
   if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
   if (count < 1000000) return `${Math.round(count / 1000)}k`;
   return `${(count / 1000000).toFixed(1)}M`;
+}
+
+function formatCost(cost: number): string {
+  // Three decimals: subagent runs mostly cost cents. Very cheap runs keep a
+  // fourth decimal so they do not read as free.
+  return cost > 0 && cost < 0.001 ? `$${cost.toFixed(4)}` : `$${cost.toFixed(3)}`;
+}
+
+/** Left part, then right part pushed to the right edge. Drops the right part when both do not fit. */
+function leftRight(left: string, right: string, width: number): string {
+  const gap = width - visibleWidth(left) - visibleWidth(right);
+  return right && gap >= 2 ? left + " ".repeat(gap) + right : left;
+}
+
+/**
+ * Pad or cut plain text (agent and model names) to a column width. Cut by
+ * hand, not with truncateToWidth, whose SGR reset would clear the card
+ * background in the middle of the row.
+ */
+function padTo(text: string, width: number): string {
+  const visible = visibleWidth(text);
+  if (visible > width) return `${[...text].slice(0, Math.max(0, width - 1)).join("")}…`;
+  return text + " ".repeat(width - visible);
+}
+
+/** Wrap text under a task row, indented, with an optional colored prefix on the first line. */
+function wrapIndented(text: string, width: number, prefix = ""): string[] {
+  const room = Math.max(10, width - INDENT.length - visibleWidth(prefix));
+  return wrapTextWithAnsi(text, room).map((line, index) =>
+    INDENT + (index === 0 ? prefix : " ".repeat(visibleWidth(prefix))) + line);
+}
+
+/** "anthropic/claude-sonnet-4-5" → "claude-sonnet-4-5". The provider adds width, not meaning. */
+function shortModel(model: string | undefined): string {
+  if (!model) return "";
+  const slash = model.indexOf("/");
+  return slash >= 0 ? model.slice(slash + 1) : model;
 }
 
 export function formatUsageStats(usage: TaskUsage, model?: string): string {
@@ -81,59 +170,6 @@ export function formatUsageStats(usage: TaskUsage, model?: string): string {
   return parts.join(" ");
 }
 
-function shortenPath(p: string): string {
-  const home = os.homedir();
-  return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
-}
-
-function formatToolCall(
-  toolName: string,
-  argsPreview: string,
-  themeFg: (color: any, text: string) => string,
-): string {
-  // Try to parse args for better formatting
-  let args: Record<string, unknown> = {};
-  try {
-    args = JSON.parse(argsPreview.replace(/\.\.\.$/,""));
-  } catch {
-    return themeFg("accent", toolName) + themeFg("dim", ` ${argsPreview}`);
-  }
-
-  switch (toolName) {
-    case "bash": {
-      const command = (args.command as string) || "...";
-      const preview = command.length > 60 ? `${command.slice(0, 60)}...` : command;
-      return themeFg("muted", "$ ") + themeFg("toolOutput", preview);
-    }
-    case "read": {
-      const rawPath = (args.file_path || args.path || "...") as string;
-      return themeFg("muted", "read ") + themeFg("accent", shortenPath(rawPath));
-    }
-    case "write": {
-      const rawPath = (args.file_path || args.path || "...") as string;
-      return themeFg("muted", "write ") + themeFg("accent", shortenPath(rawPath));
-    }
-    case "edit": {
-      const rawPath = (args.file_path || args.path || "...") as string;
-      return themeFg("muted", "edit ") + themeFg("accent", shortenPath(rawPath));
-    }
-    case "grep": {
-      const pattern = (args.pattern || "") as string;
-      const rawPath = (args.path || ".") as string;
-      return themeFg("muted", "grep ") + themeFg("accent", `/${pattern}/`) + themeFg("dim", ` in ${shortenPath(rawPath)}`);
-    }
-    case "find": {
-      const pattern = (args.pattern || "*") as string;
-      const rawPath = (args.path || ".") as string;
-      return themeFg("muted", "find ") + themeFg("accent", pattern) + themeFg("dim", ` in ${shortenPath(rawPath)}`);
-    }
-    default:
-      return themeFg("accent", toolName) + themeFg("dim", ` ${argsPreview}`);
-  }
-}
-
-// ─── Aggregate Usage ─────────────────────────────────────────────────────────
-
 export function aggregateUsage(summaries: Array<{ usage: TaskUsage }>): TaskUsage {
   const total: TaskUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
   for (const s of summaries) {
@@ -147,218 +183,265 @@ export function aggregateUsage(summaries: Array<{ usage: TaskUsage }>): TaskUsag
   return total;
 }
 
+function shortenPath(p: string): string {
+  const home = os.homedir();
+  return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+}
+
+function formatToolCall(toolName: string, argsPreview: string, theme: RenderTheme): string {
+  let args: Record<string, unknown> = {};
+  try {
+    args = JSON.parse(argsPreview.replace(/\.\.\.$/, ""));
+  } catch {
+    return theme.fg("accent", toolName) + theme.fg("dim", ` ${oneLine(argsPreview)}`);
+  }
+  const path = (fallback: string) => shortenPath(String(args.file_path || args.path || fallback));
+  switch (toolName) {
+    case "bash":
+      return theme.fg("muted", "$ ") + theme.fg("toolOutput", oneLine(String(args.command || "...")));
+    case "read":
+    case "write":
+    case "edit":
+      return theme.fg("muted", `${toolName} `) + theme.fg("accent", path("..."));
+    case "grep":
+      return theme.fg("muted", "grep ") + theme.fg("accent", `/${args.pattern ?? ""}/`) + theme.fg("dim", ` in ${path(".")}`);
+    case "find":
+      return theme.fg("muted", "find ") + theme.fg("accent", String(args.pattern || "*")) + theme.fg("dim", ` in ${path(".")}`);
+    default:
+      return theme.fg("accent", toolName) + theme.fg("dim", ` ${oneLine(argsPreview)}`);
+  }
+}
+
+// ─── Task view model ─────────────────────────────────────────────────────────
+
+/** What the badge says. "stop" = cancelled by the parent; "fail" = any other failure. */
+type Kind = "done" | "fail" | "run" | "wait" | "stop";
+
+/** The fields of a live or persisted summary that the renderer reads. */
+interface TaskView {
+  agent: string;
+  task: string;
+  model?: string;
+  warnings?: string[];
+  status?: string;
+  lifecycle?: string;
+  stopReason?: string;
+  errorMessage?: string;
+  stderrPreview?: string;
+  failed?: boolean;
+  cancelledByParent?: boolean;
+  toolCalls?: Array<{ name: string; argsPreview: string }>;
+  usage?: TaskUsage;
+  contextWindow?: number;
+}
+
+function kindOf(task: TaskView, live: boolean): Kind {
+  // Persisted summaries have no `status`; only live rows can run or wait.
+  if (live && task.status === "running") return "run";
+  if (live && task.status === "queued") return "wait";
+  if (task.cancelledByParent || task.status === "aborted") return "stop";
+  return isTaskFailed(task as Parameters<typeof isTaskFailed>[0]) ? "fail" : "done";
+}
+
+/** The kinds that show the last tool call (user choice: not for done or queued tasks). */
+const SHOWS_ACTIVITY: ReadonlySet<Kind> = new Set(["run", "fail", "stop"]);
+
+/**
+ * Status badge. Its background is a theme color, so after it the card
+ * background must be switched on again: `theme.bg` ends with "reset to the
+ * terminal default", which would leave the rest of the line uncolored.
+ */
+function badge(kind: Kind, theme: RenderTheme): string {
+  const spin = SPINNER[Math.floor(Date.now() / SPINNER_MS) % SPINNER.length];
+  const [bg, fg, text] = {
+    done: ["toolSuccessBg", "success", " DONE "],
+    fail: ["toolErrorBg", "error", " FAIL "],
+    run: ["toolPendingBg", "warning", ` ${spin} RUN`],
+    wait: ["selectedBg", "muted", " WAIT "],
+    stop: ["toolPendingBg", "muted", " STOP "],
+  }[kind];
+  return theme.getBgAnsi(bg) + theme.fg(fg, theme.bold(text)) + theme.getBgAnsi("customMessageBg");
+}
+
+function contextBar(task: TaskView, theme: RenderTheme): string {
+  const window = task.contextWindow;
+  if (!window || window <= 0) return " ".repeat(BAR_WIDTH);
+  const percent = Math.min(100, Math.round(((task.usage?.contextTokens ?? 0) / window) * 100));
+  const filled = Math.round((percent / 100) * BAR_CELLS);
+  // Same thresholds as the context gauges elsewhere in this setup.
+  const color = percent > 60 ? "error" : percent > 40 ? "warning" : "accent";
+  return theme.fg(color, "█".repeat(filled)) +
+    theme.fg("borderMuted", "█".repeat(BAR_CELLS - filled)) +
+    theme.fg("muted", `${String(percent).padStart(4)}%`);
+}
+
+function usageText(usage: TaskUsage, theme: RenderTheme, boldCost: boolean): string {
+  if (!usage.turns && !usage.input && !usage.output && !usage.cost) return "";
+  const turns = `${usage.turns} turn${usage.turns === 1 ? "" : "s"}`;
+  const tokens = `↑${formatTokens(usage.input)} ↓${formatTokens(usage.output)}`;
+  const cost = formatCost(usage.cost);
+  return theme.fg("muted", `${turns}  ${tokens}  `) + theme.fg("text", boldCost ? theme.bold(cost) : cost);
+}
+
 // ─── renderCall ──────────────────────────────────────────────────────────────
 
-export function renderCall(args: any, theme: any): any {
-  const tasks = args.tasks as Array<{ agent: string; task: string }> | undefined;
-  if (!tasks || tasks.length === 0) {
-    return new Text(theme.fg("toolTitle", theme.bold("subagent ")) + theme.fg("muted", "(no tasks)"), 0, 0);
+/**
+ * The top of the card: the label, and what the call asks for. Task previews
+ * show only until execution starts; after that the result rows list the
+ * tasks, and the full task text is in the expanded view.
+ */
+export function renderCall(
+  toolName: "subagent" | "subagent_continue" | "subagent_wait",
+  args: any,
+  theme: RenderTheme,
+  slot: RenderSlot = {},
+): Component {
+  const box = card(theme, slot);
+  box.addChild(new Spacer(1));
+  const input = args && typeof args === "object" ? args : {};
+  const lines: string[] = [];
+
+  if (toolName === "subagent_continue") {
+    const id = typeof input.taskId === "string" ? input.taskId : "…";
+    lines.push(`${label(theme)} ${theme.fg("text", "Continue")} ${theme.fg("accent", id)}`);
+    if (!slot.executionStarted && typeof input.task === "string") {
+      lines.push(`  ${theme.fg("dim", `"${oneLine(input.task)}"`)}`);
+    }
+  } else if (toolName === "subagent_wait") {
+    const ids = Array.isArray(input.ids) ? input.ids.filter((id: unknown) => typeof id === "string") : [];
+    const target = ids.length > 0 ? theme.fg("accent", ids.join(", ")) : theme.fg("muted", "all background tasks");
+    lines.push(`${label(theme)} ${theme.fg("text", "Wait for")} ${target}`);
+  } else {
+    const tasks = Array.isArray(input.tasks) ? input.tasks : [];
+    lines.push(`${label(theme)} ${theme.fg("text", "Delegate")} ${theme.fg("muted", `${tasks.length} task${tasks.length === 1 ? "" : "s"}`)}`);
+    if (!slot.executionStarted) {
+      for (const t of tasks.slice(0, CALL_PREVIEWS)) {
+        const agent = typeof t?.agent === "string" ? t.agent : "…";
+        const task = typeof t?.task === "string" ? oneLine(t.task) : "";
+        lines.push(`  ${theme.fg("accent", agent)} ${theme.fg("dim", `"${task}"`)}`);
+      }
+      if (tasks.length > CALL_PREVIEWS) lines.push(theme.fg("dim", `  … ${tasks.length - CALL_PREVIEWS} more`));
+    }
   }
 
-  let text = theme.fg("toolTitle", theme.bold("subagent ")) +
-    theme.fg("accent", `tasks (${tasks.length})`);
-
-  for (const t of tasks.slice(0, 4)) {
-    const preview = t.task.length > 50 ? `${t.task.slice(0, 50)}...` : t.task;
-    text += `\n  ${theme.fg("accent", t.agent.padEnd(8))} ${theme.fg("dim", `"${preview}"`)}`;
-  }
-  if (tasks.length > 4) {
-    text += `\n  ${theme.fg("muted", `... +${tasks.length - 4} more`)}`;
-  }
-
-  return new Text(text, 0, 0);
+  box.addChild(new Lines(theme, () => lines));
+  return box;
 }
 
 // ─── renderResult ────────────────────────────────────────────────────────────
 
-export function renderResult(result: any, options: { expanded: boolean }, theme: any): any {
+/**
+ * The rest of the card: header with totals, one row per task, and the
+ * activity or error lines. `title` is set only by the background results
+ * message, which has no call card above it.
+ */
+export function renderResult(
+  // Message content may be a plain string (custom messages); tool content is an array.
+  result: { content?: string | Array<{ type: string; text?: string }>; details?: unknown },
+  options: { expanded: boolean; title?: string },
+  theme: RenderTheme,
+  slot: RenderSlot = {},
+): Component {
+  const box = card(theme, slot);
+  if (options.title) {
+    box.addChild(new Spacer(1));
+    box.addChild(new Lines(theme, () => [`${label(theme)} ${theme.fg("text", options.title!)}`]));
+  }
+
   const details = result.details as (LiveSubagentToolDetails | PersistedSubagentToolDetails) | undefined;
-  // An async call's immediate result has no summaries yet (only "started"),
-  // so it renders as plain text like an empty result.
-  if (!details || details.taskCount === 0 || ("background" in details && details.background)) {
-    const text = result.content?.[0];
-    return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+  const text = typeof result.content === "string"
+    ? result.content
+    : (result.content ?? []).filter((part) => part.type === "text").map((part) => part.text ?? "").join("\n");
+
+  // No task summaries: an async call's "started" note, a validation error,
+  // or a wait that timed out before any task finished. Show the text as is.
+  if (!details || !details.summaries || details.summaries.length === 0) {
+    const failed = !!details && "overallFailed" in details && details.overallFailed;
+    box.addChild(new Lines(theme, (width) => wrapTextWithAnsi(theme.fg(failed ? "error" : "muted", text || "(no output)"), width)));
+    box.addChild(new Spacer(1));
+    return box;
   }
 
-  const summaries = details.summaries;
-  const mdTheme = getMarkdownTheme();
+  const live = "live" in details && details.live === true;
+  const tasks = details.summaries as TaskView[];
+  const kinds = tasks.map((task) => kindOf(task, live));
+  const showBar = tasks.some((task) => task.contextWindow && task.contextWindow > 0);
+  const agentWidth = Math.min(MAX_AGENT_WIDTH, Math.max(...tasks.map((t) => visibleWidth(t.agent))));
+  const modelWidth = Math.min(MAX_MODEL_WIDTH, Math.max(0, ...tasks.map((t) => visibleWidth(shortModel(t.model)))));
+  const waitNote = "waitNote" in details ? details.waitNote : undefined;
+  const expandHint = !options.expanded && !live && slot.keyHint ? slot.keyHint("app.tools.expand", "to expand") : "";
 
-  // Determine overall status
-  const completedCount = summaries.filter((s: any) => !isTaskFailed(s) && s.status !== "running" && s.status !== "queued").length;
-  const errorCount = summaries.filter((s: any) => isTaskFailed(s)).length;
-  const runningCount = "live" in details && details.live
-    ? summaries.filter((s: any) => s.status === "running").length
-    : 0;
-  const isLive = runningCount > 0;
+  box.addChild(new Lines(theme, (width) => {
+    const lines: string[] = [];
 
-  const icon = isLive
-    ? theme.fg("warning", "⏳")
-    : errorCount > 0 && completedCount === 0
-      ? theme.fg("error", "✗")
-      : errorCount > 0
-        ? theme.fg("warning", "◐")
-        : theme.fg("success", "✓");
+    // Header: count, per-kind counts, and totals on the right.
+    const count = (kind: Kind) => kinds.filter((k) => k === kind).length;
+    const parts: string[] = [];
+    const addPart = (kind: Kind, word: string, color: string) => {
+      if (count(kind) > 0) parts.push(theme.fg(color, `${count(kind)} ${word}`));
+    };
+    addPart("done", "done", "success");
+    addPart("fail", "failed", "error");
+    addPart("run", "running", "warning");
+    addPart("wait", "queued", "muted");
+    addPart("stop", "stopped", "muted");
+    const title = theme.fg("accent", theme.bold(`◆ ${tasks.length} TASK${tasks.length === 1 ? "" : "S"}`));
+    const header = [title, ...parts].join(theme.fg("muted", " · "));
+    lines.push(leftRight(header, usageText(aggregateUsage(tasks.map((t) => ({ usage: t.usage ?? zeroUsage() }))), theme, !live), width));
+    lines.push("");
 
-  const status = isLive
-    ? `${completedCount + errorCount}/${summaries.length} done, ${runningCount} running`
-    : `${completedCount}/${summaries.length}`;
+    tasks.forEach((task, index) => {
+      const kind = kinds[index];
+      // Blank line between tasks only when expanded: collapsed stays compact.
+      if (options.expanded && index > 0) lines.push("");
 
-  if (options.expanded && !isLive) {
-    // Use cache: expanded views with Markdown are expensive to build
-    const persistedDetails = details as PersistedSubagentToolDetails;
-    const contentKey = computeContentKey(persistedDetails);
-    const cacheKey = `expanded:${contentKey}`;
-    const cached = getCachedResult(cacheKey, contentKey);
-    if (cached) return cached;
+      const model = modelWidth > 0 ? ` ${theme.fg("muted", padTo(shortModel(task.model), modelWidth))}` : "";
+      const bar = showBar ? ` ${contextBar(task, theme)}` : "";
+      const left = `${badge(kind, theme)} ${theme.fg("accent", theme.bold(padTo(task.agent, agentWidth)))}${model}${bar}`;
+      lines.push(leftRight(left, task.usage ? usageText(task.usage, theme, false) : "", width));
 
-    const container = new Container();
-    container.addChild(new Text(
-      `${icon} ${theme.fg("toolTitle", theme.bold("tasks "))}${theme.fg("accent", status)}`,
-      0, 0,
-    ));
+      if (options.expanded) lines.push(...wrapIndented(theme.fg("text", oneLine(task.task)), width, theme.fg("dim", "task ")));
 
-    for (const s of summaries as PersistedTaskSummary[]) {
-      const isFailed = isTaskFailed(s);
-      const sIcon = s.stopReason === "aborted"
-        ? theme.fg("warning", "⊘")
-        : isFailed
-          ? theme.fg("error", "✗")
-          : theme.fg("success", "✓");
-      container.addChild(new Spacer(1));
-      container.addChild(new Text(
-        `${theme.fg("muted", "─── ")}${theme.fg("accent", s.agent)} ${sIcon}`,
-        0, 0,
-      ));
-
-      // Show tool calls
-      for (const tc of s.toolCalls.slice(0, 10)) {
-        container.addChild(new Text(
-          theme.fg("muted", "  → ") + formatToolCall(tc.name, tc.argsPreview, theme.fg.bind(theme)),
-          0, 0,
-        ));
-      }
-      if (s.toolCalls.length > 10) {
-        container.addChild(new Text(theme.fg("muted", `  ... +${s.toolCalls.length - 10} more`), 0, 0));
+      if (SHOWS_ACTIVITY.has(kind)) {
+        const calls = task.toolCalls ?? [];
+        const last = calls[calls.length - 1];
+        // A running task always gets this line, even before its first tool
+        // call: the row keeps the same height while the child streams.
+        if (last) {
+          const earlier = options.expanded && calls.length > 1 ? theme.fg("dim", `   +${calls.length - 1} earlier`) : "";
+          lines.push(`${INDENT}${theme.fg("dim", "└ ")}${formatToolCall(last.name, last.argsPreview, theme)}${earlier}`);
+        } else if (kind === "run") {
+          lines.push(`${INDENT}${theme.fg("dim", "└ thinking…")}`);
+        }
       }
 
-      // Show final output as markdown
-      if (s.finalOutput) {
-        container.addChild(new Spacer(1));
-        container.addChild(new Markdown(s.finalOutput.trim(), 0, 0, mdTheme));
+      if (kind === "fail" || kind === "stop") {
+        const message = task.errorMessage || (kind === "stop" ? "cancelled" : task.stopReason === "aborted" ? "aborted" : "unknown error");
+        if (options.expanded) {
+          lines.push(...wrapIndented(theme.fg("error", oneLine(message)), width, theme.fg("error", "✗ ")));
+          if (task.stderrPreview) lines.push(...wrapIndented(theme.fg("dim", oneLine(task.stderrPreview)), width, theme.fg("dim", "stderr ")));
+        } else {
+          lines.push(`${INDENT}${theme.fg("error", `✗ ${oneLine(message)}`)}`);
+        }
       }
 
-      // Show error message
-      if (s.errorMessage) {
-        container.addChild(new Text(
-          theme.fg("error", `  ✗ ${s.errorMessage}`),
-          0, 0,
-        ));
+      for (const warning of task.warnings ?? []) {
+        if (options.expanded) lines.push(...wrapIndented(theme.fg("warning", oneLine(warning)), width, theme.fg("warning", "⚠ ")));
+        else lines.push(`${INDENT}${theme.fg("warning", `⚠ ${oneLine(warning)}`)}`);
       }
+    });
 
-      // Show stderr preview
-      if (s.stderrPreview) {
-        const preview = s.stderrPreview.length > 200 ? s.stderrPreview.slice(0, 200) + "..." : s.stderrPreview;
-        container.addChild(new Text(
-          theme.fg("dim", `  stderr: ${preview}`),
-          0, 0,
-        ));
-      }
-
-      // Warnings
-      if (s.warnings.length > 0) {
-        container.addChild(new Text(
-          theme.fg("warning", `  ⚠ ${s.warnings.join("; ")}`),
-          0, 0,
-        ));
-      }
-
-      // Per-task usage
-      const taskUsage = formatUsageStats(s.usage, s.model);
-      if (taskUsage) container.addChild(new Text(theme.fg("dim", `  ${taskUsage}`), 0, 0));
+    if (waitNote) {
+      lines.push("");
+      for (const line of waitNote.split("\n")) lines.push(...wrapTextWithAnsi(theme.fg("muted", line), width));
     }
+    if (expandHint) lines.push(leftRight("", theme.fg("dim", expandHint), width));
+    return lines;
+  }));
+  box.addChild(new Spacer(1));
+  return box;
+}
 
-    // Total usage
-    const totalUsage = formatUsageStats(aggregateUsage(summaries as PersistedTaskSummary[]));
-    if (totalUsage) {
-      container.addChild(new Spacer(1));
-      container.addChild(new Text(theme.fg("dim", `Total: ${totalUsage}`), 0, 0));
-    }
-
-    setCachedResult(cacheKey, contentKey, container);
-    return container;
-  }
-
-  // Collapsed view
-  let text = `${icon} ${theme.fg("toolTitle", theme.bold("tasks "))}${theme.fg("accent", status)}`;
-
-  // When live streaming, use a fixed-height compact format to prevent height changes
-  if (isLive) {
-    for (const s of summaries as any[]) {
-      const isFailed = isTaskFailed(s);
-      const sIcon = (s.status === "running")
-        ? theme.fg("warning", "⏳")
-        : (s.status === "aborted" || s.stopReason === "aborted")
-          ? theme.fg("warning", "⊘")
-          : isFailed
-            ? theme.fg("error", "✗")
-            : theme.fg("success", "✓");
-
-      const toolCount = (s.toolCalls || []).length;
-      const toolInfo = toolCount > 0 ? theme.fg("dim", ` (${toolCount} tool call${toolCount > 1 ? "s" : ""})`) : "";
-      text += `\n${theme.fg("muted", "─── ")}${theme.fg("accent", s.agent)} ${sIcon}${toolInfo}`;
-    }
-    return new Text(text, 0, 0);
-  }
-
-  // Completed/static collapsed view — full detail
-  for (const s of summaries as any[]) {
-    const isFailed = isTaskFailed(s);
-    const sIcon = (s.status === "running")
-      ? theme.fg("warning", "⏳")
-      : (s.status === "aborted" || s.stopReason === "aborted")
-        ? theme.fg("warning", "⊘")
-        : isFailed
-          ? theme.fg("error", "✗")
-          : theme.fg("success", "✓");
-
-    text += `\n${theme.fg("muted", "─── ")}${theme.fg("accent", s.agent)} ${sIcon}`;
-
-    // Show tool calls (max 3)
-    const toolCalls = s.toolCalls || [];
-    for (const tc of toolCalls.slice(0, 3)) {
-      text += `\n  ${theme.fg("muted", "→ ")}${formatToolCall(tc.name, tc.argsPreview, theme.fg.bind(theme))}`;
-    }
-
-    // Show output preview or error
-    const output = s.finalOutput || s.latestOutput || "";
-    if (isFailed) {
-      const errMsg = s.errorMessage || (s.stopReason === "aborted" ? "(aborted)" : "(unknown error)");
-      text += `\n  ${theme.fg("error", errMsg)}`;
-      if (s.stderrPreview) {
-        const stderrLine = s.stderrPreview.split("\n")[0];
-        const truncStderr = stderrLine.length > 80 ? stderrLine.slice(0, 80) + "..." : stderrLine;
-        text += `\n  ${theme.fg("dim", `stderr: ${truncStderr}`)}`;
-      }
-    } else if (output) {
-      const preview = output.split("\n").slice(0, 2).join("\n");
-      const truncated = preview.length > 100 ? preview.slice(0, 100) + "..." : preview;
-      text += `\n  ${theme.fg("toolOutput", truncated)}`;
-    } else if (s.status === "running") {
-      text += `\n  ${theme.fg("muted", "(running...)")}`;
-    }
-  }
-
-  // Warnings
-  const allWarnings = summaries.flatMap((s: any) => s.warnings || []);
-  if (allWarnings.length > 0) {
-    text += `\n${theme.fg("warning", `⚠ ${allWarnings.join("; ")}`)}`;
-  }
-
-  // Total usage
-  const totalUsage = formatUsageStats(aggregateUsage(summaries as any[]));
-  if (totalUsage) text += `\n${theme.fg("dim", `Total: ${totalUsage}`)}`;
-
-  if (!options.expanded && !isLive) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
-
-  return new Text(text, 0, 0);
+function zeroUsage(): TaskUsage {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }

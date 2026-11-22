@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>subagents-vflo · tool render mockups — 5 options</title>
+<!--
+  Round 1 of the subagent tool render mockups. Today the tool row is plain
+  Text: "subagent tasks (2)" with task previews, then a result with "───
+  agent ✓" rules, raw "→ tool" lines and a "Total:" usage line. These mockups
+  explore richer renders, in the same spirit as the pi-dcp compress receipt
+  (pi-dcp/docs/mockups/compress-render*.html).
+
+  Every option is drawn from the same sample data (see DATA below) with the
+  monokai-vflo theme colors, at 96 terminal columns. Each option shows three
+  states: running (live updates), done collapsed, done expanded (Ctrl+O).
+
+  The sample has one success and one failure on purpose, so every option has
+  to show both outcomes.
+-->
+<style>
+  :root {
+    --page:#2c2e34; --text:#e2e2e3; --muted:#7f8490; --dim:#595f6f;
+    --border:#414550; --borderMuted:#3b3e48;
+    --success:#9ed072; --warning:#e7c664; --error:#fc5d7c;
+    --label:#b39df3; --accent:#76cce0; --code:#f39660;
+    --customBg:#2b2d3a; --pendingBg:#3c4052; --successBg:#3c4c43; --errorBg:#523c45; --selectedBg:#414550;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#1e1f24; color:var(--text); font:14px/1.5 system-ui,sans-serif; }
+  header.page, section, footer { max-width:1100px; margin:0 auto; padding:0 40px; }
+  header.page { padding-top:28px; }
+  h1 { font-size:22px; margin:0 0 6px; }
+  h2 { font-size:18px; margin:40px 0 4px; } h2 span { color:var(--label); margin-right:8px; }
+  p, li { color:#a9adb8; } p b, li b { color:var(--text); }
+  .state { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:#8b90a0; margin:14px 0 4px; }
+  .term { background:var(--page); border-radius:8px; border:1px solid #3a3c45; padding:14px 0; overflow-x:auto; box-shadow:0 6px 24px rgba(0,0,0,.35); }
+  .term pre { margin:0; font:13px/1.45 "JetBrains Mono","Cascadia Code","Fira Code",ui-monospace,monospace; white-space:pre; }
+  .row { display:block; padding:0 16px; min-height:1.45em; }
+  .bg-custom{background:var(--customBg)} .bg-pending{background:var(--pendingBg)}
+  .bg-success{background:var(--successBg)} .bg-error{background:var(--errorBg)}
+  .t{color:var(--text)} .m{color:var(--muted)} .d{color:var(--dim)} .s{color:var(--success)}
+  .w{color:var(--warning)} .e{color:var(--error)} .l{color:var(--label)} .a{color:var(--accent)}
+  .c{color:var(--code)} .bd{color:var(--border)} .bm{color:var(--borderMuted)}
+  .b{font-weight:700} .i{font-style:italic}
+  /* Badges: a colored background on a few cells (theme bg tokens only). */
+  .Bs{background:var(--successBg);color:var(--success);font-weight:700}
+  .Be{background:var(--errorBg);color:var(--error);font-weight:700}
+  .Bp{background:var(--pendingBg);color:var(--warning);font-weight:700}
+  nav { display:flex; gap:8px; flex-wrap:wrap; margin:14px 0; }
+  nav a { color:var(--text); background:#2c2e34; border:1px solid #414550; padding:4px 12px; border-radius:999px; text-decoration:none; font-size:13px; }
+  .pros { display:grid; grid-template-columns:1fr 1fr; gap:16px; font-size:13px; }
+  .pros ul { margin:4px 0; padding-left:18px; }
+  code { color:var(--text); background:#2c2e34; padding:0 4px; border-radius:3px; }
+  footer { margin-top:40px; margin-bottom:60px; }
+</style>
+</head>
+<body>
+<header class="page">
+  <h1>subagents-vflo · tool render — 5 options</h1>
+  <p>Sample: one call with <b>2 parallel tasks</b>. <code>explore</code> succeeds. <code>build</code> fails its tests. Each option shows <b>running</b>, <b>done (collapsed)</b> and <b>done (expanded, Ctrl+O)</b>. Width: 96 columns, theme monokai-vflo.</p>
+  <p>The same render would also be used by <code>subagent_continue</code>, <code>subagent_wait</code> and the pushed background result message, so all four look the same.</p>
+  <nav><a href="#o0">Today</a><a href="#o1">1 · Card</a><a href="#o2">2 · Table</a><a href="#o3">3 · Tree</a><a href="#o4">4 · Badges + context bars</a><a href="#o5">5 · Gutter stripe</a></nav>
+</header>
+<main id="out"></main>
+
+<footer>
+  <h3>Notes</h3>
+  <ul>
+    <li><b>Duration</b> (<code>0:42</code>, <code>1:18</code>) is shown in some options. Task summaries do not store start or end times today, so this needs two new fields. Every other number in the mockups already exists (<code>usage.turns/input/output/cacheRead/cost/contextTokens</code>, <code>toolCalls</code>, <code>model</code>).</li>
+    <li>The running state must keep a fixed height (today's code does this on purpose), so that the transcript does not jump while tokens stream. Every option shows one line per task plus at most one "latest tool" line per running task.</li>
+    <li>Collapsed output previews use the first non-heading line of the final output. Expanded views render the final output as Markdown, like today.</li>
+    <li>Model-visible tool result text does not change. Only the TUI render changes.</li>
+  </ul>
+</footer>
+
+<script>
+// ── Sample data ─────────────────────────────────────────────────────────
+// Numbers are realistic for haiku explore / sonnet build children.
+const DATA = [
+  { agent:"explore", model:"haiku-4-5", task:"Research auth-related source files. Report paths and open questions.",
+    ok:true, turns:4, tools:9, input:"38k", output:"2.1k", cache:"31k", cost:"$0.012", ctx:22, time:"0:42",
+    calls:["{m|read }{a|src/auth/session.ts}", "{m|$ }{t|rg -n \"jwt\" src}", "{m|read }{a|src/auth/middleware.ts}", "{m|find }{a|*.test.ts}{d| in test/auth}"],
+    preview:"Auth lives in 2 files: session.ts (JWT issue/verify) and middleware.ts (guard).",
+    md:[ "{a b|## Auth files}", "", "{t|- }{c|src/auth/session.ts}{t| — issues and verifies JWTs}", "{t|- }{c|src/auth/middleware.ts}{t| — request guard, reads the cookie}", "", "{t b|Open question:}{t| refresh tokens are never revoked.}" ] },
+  { agent:"build", model:"sonnet-4-5", task:"Add rate limiting to the login endpoint, with tests.",
+    ok:false, turns:7, tools:14, input:"96k", output:"5.4k", cache:"88k", cost:"$0.058", ctx:47, time:"1:18",
+    calls:["{m|write }{a|src/middleware/rate-limit.ts}", "{m|edit }{a|src/routes/login.ts}", "{m|$ }{t|npm test -- login}"],
+    error:"Tests failed: 2 of 14 (login.rate-limit.test.ts)",
+    stderr:"expected 429, received 200 at login.rate-limit.test.ts:31",
+    md:[ "{t|Added }{c|rateLimit(60s, 5 tries)}{t| to the login route.}", "{t|Two tests still fail: the limiter runs after the auth guard.}" ] },
+];
+const TOTAL = { cost:"$0.070", tokens:"134k", tools:23 };
+const W = 96;
+
+// ── Tiny markup: {cls|text} → <span class="cls">text</span> ────────────
+const esc = (s) => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const html = (s) => esc(s).replace(/\{([\w ]+)\|((?:[^{}])*)\}/g, (_, c, t) => `<span class="${c}">${t}</span>`);
+const vis = (s) => s.replace(/\{[\w ]+\|((?:[^{}])*)\}/g, "$1").length;
+const pad = (s, n) => s + " ".repeat(Math.max(0, n - vis(s)));
+// Left and right parts on one line, right part flush to column W.
+const lr = (l, r, w = W) => l + " ".repeat(Math.max(1, w - vis(l) - vis(r))) + r;
+const cut = (s, n) => s.length > n ? s.slice(0, n - 1) + "…" : s;
+const rule = (label, cls = "bd", w = W) => label + `{${cls}|` + "─".repeat(Math.max(0, w - vis(label))) + "}";
+
+// A block is { bg, lines }; a state is a list of blocks (to mix row colors).
+function term(blocks) {
+  return `<div class="term"><pre>` + blocks.flatMap(({ bg = "", lines }) =>
+    lines.map((l) => `<span class="row ${bg}">${html(l) || " "}</span>`)).join("") + `</pre></div>`;
+}
+const [E, B] = DATA;
+
+// ── Today (for reference) ───────────────────────────────────────────────
+const today = {
+  title:"Today", tag:"0", desc:"The current render, for reference.",
+  running:[{ bg:"bg-pending", lines:[
+    "{t b|subagent }{a|tasks (2)}",
+    "  {a|explore } {d|\"Research auth-related source files. Report paths and op...\"}",
+    "  {a|build   } {d|\"Add rate limiting to the login endpoint, with tests.\"}",
+    "{w|⏳} {t b|tasks }{a|1/2 done, 1 running}",
+    "{m|─── }{a|explore} {s|✓}{d| (9 tool calls)}",
+    "{m|─── }{a|build} {w|⏳}{d| (11 tool calls)}" ]}],
+  collapsed:[{ bg:"bg-success", lines:[
+    "{t b|subagent }{a|tasks (2)}",
+    "  {a|explore } {d|\"Research auth-related source files. Report paths and op...\"}",
+    "  {a|build   } {d|\"Add rate limiting to the login endpoint, with tests.\"}",
+    "{w|◐} {t b|tasks }{a|1/2}",
+    "{m|─── }{a|explore} {s|✓}",
+    ...E.calls.slice(0,3).map(c => `  {m|→ }${c}`),
+    `  {m|## Auth files}`,
+    "{m|─── }{a|build} {e|✗}",
+    ...B.calls.map(c => `  {m|→ }${c}`),
+    `  {e|${B.error}}`,
+    `  {d|stderr: ${B.stderr}}`,
+    "{d|Total: 11 turns ↑134k ↓7.5k R119k $0.0703}",
+    "{m|(Ctrl+O to expand)}" ]}],
+  expanded:null,
+};
+
+// ── Option 1 · Card (pi-dcp / advisor family) ──────────────────────────
+// customMessageBg box, [subagent] label, ◆ header, one row per task with a
+// right-aligned stats column. Expanded: a titled rule per task, tool list,
+// Markdown output.
+function cardTaskRow(t, icon, extraRight) {
+  const left = `${icon} {a b|${pad(t.agent, 8)}}{t|${cut(t.task, 46)}}`;
+  return lr(left, extraRight ?? `{m|${String(t.tools).padStart(2)} tools  ${t.input.padStart(4)}  }{t|${t.cost}}`);
+}
+const o1 = {
+  title:"Card", tag:"1",
+  desc:"Same family as the pi-dcp receipt and pi-advisor-flow: a <code>customMessageBg</code> card with a <code>[subagent]</code> label and a <code>◆</code> header. One row per task with right-aligned stats. Expanded: one titled rule per task, tool calls, then Markdown output.",
+  pros:["Matches the compress receipt and advisor cards, so the transcript has one visual language.", "Stats line up in a column; easy to compare tasks."],
+  cons:["Card background is the same for running, success and failure; only icons show the state.", "Long task text is cut to fit the stats column."],
+  running:[{ bg:"bg-custom", lines:[
+    "{l|[subagent]}",
+    lr("{a b|◆ 2 TASKS}{m| · 1 done · }{w|1 running}", "{w|⠋ }{m|1:18}"),
+    "",
+    cardTaskRow(E, "{s|✓}"),
+    cardTaskRow(B, "{w|⠋}", "{m|11 tools   71k  }{t|$0.041}"),
+    `           {d|└ }{m|$ }{t|npm test -- login}` ]}],
+  collapsed:[{ bg:"bg-custom", lines:[
+    "{l|[subagent]}",
+    lr("{a b|◆ 2 TASKS}{m| · }{s|1 done}{m| · }{e|1 failed}", `{m|${TOTAL.tools} tools  ${TOTAL.tokens}  }{t b|${TOTAL.cost}}`),
+    "",
+    cardTaskRow(E, "{s|✓}"),
+    `           {d|└ }{m|${E.preview}}`,
+    cardTaskRow(B, "{e|✗}"),
+    `           {d|└ }{e|${B.error}}`,
+    "",
+    lr("", "{d|Ctrl+O to expand}") ]}],
+  expanded:[{ bg:"bg-custom", lines:[
+    "{l|[subagent]}",
+    lr("{a b|◆ 2 TASKS}{m| · }{s|1 done}{m| · }{e|1 failed}", `{m|${TOTAL.tools} tools  ${TOTAL.tokens}  }{t b|${TOTAL.cost}}`),
+    "",
+    rule(`{s|✓} {a b|explore} {m|· ${E.model} · ${E.turns} turns · ${E.cost} }`),
+    `{d|task  }{t|${E.task}}`,
+    ...E.calls.map(c => `{d|  → }${c}`), "{d|  … +5 more}",
+    "", ...E.md, "",
+    rule(`{e|✗} {a b|build} {m|· ${B.model} · ${B.turns} turns · ${B.cost} }`),
+    `{d|task  }{t|${B.task}}`,
+    ...B.calls.map(c => `{d|  → }${c}`), "{d|  … +11 more}",
+    "", ...B.md, "",
+    `{e|✗ ${B.error}}`,
+    `{d|stderr  ${B.stderr}}` ]}],
+};
+
+// ── Option 2 · Table (dashboard) ───────────────────────────────────────
+// Pi's normal tool shell colors (pending → success / error), a real table
+// with a header row and a total row. Expanded adds outputs below the table.
+const cols = (st, ag, model, tools, turns, inp, out, cost) =>
+  `${pad(st, 3)}${pad(ag, 10)}${pad(model, 13)}${tools.padStart(6)}${turns.padStart(7)}${inp.padStart(7)}${out.padStart(7)}${cost.padStart(9)}`;
+const hdr = "{d|" + cols("", "AGENT", "MODEL", "TOOLS", "TURNS", "↑IN", "↓OUT", "COST") + "}";
+const trow = (icon, t, override) => {
+  const o = { tools:String(t.tools), turns:String(t.turns), input:t.input, output:t.output, cost:t.cost, ...override };
+  return `${icon}  {a b|${pad(t.agent, 10)}}{m|${pad(t.model, 13)}}{t|${o.tools.padStart(6)}${o.turns.padStart(7)}${o.input.padStart(7)}${o.output.padStart(7)}}{t|${o.cost.padStart(9)}}`;
+};
+const o2 = {
+  title:"Table", tag:"2",
+  desc:"A dashboard table inside Pi's normal tool box. The box color follows the outcome: pending while running, green when all tasks pass, red when any task fails. Header row, one row per task, a total row. Task text and output previews go under the table.",
+  pros:["Most information per line; numbers compare at a glance.", "Uses Pi's own tool box colors, so the outcome is visible from far away."],
+  cons:["Wide: needs about 70 columns before it must drop columns.", "Feels like a report, less like a conversation; task text is pushed below."],
+  running:[{ bg:"bg-pending", lines:[
+    "{t b|subagent} {m|· 2 tasks · parallel}",
+    "", hdr,
+    trow("{s|✓}", E),
+    trow("{w|⠋}", B, { tools:"11", turns:"5", input:"71k", output:"3.9k", cost:"$0.041" }),
+    `{d|   └ }{m|$ }{t|npm test -- login}` ]}],
+  collapsed:[{ bg:"bg-error", lines:[
+    lr("{t b|subagent} {m|· 2 tasks · }{s|1 ✓}{m| · }{e|1 ✗}", "{d|Ctrl+O to expand}"),
+    "", hdr,
+    trow("{s|✓}", E),
+    trow("{e|✗}", B),
+    "{bd|" + "─".repeat(65) + "}",
+    `   {t b|${pad("total", 23)}}{t|${"23".padStart(6)}${"11".padStart(7)}${"134k".padStart(7)}${"7.5k".padStart(7)}}{t b|${TOTAL.cost.padStart(9)}}`,
+    "",
+    `{s|✓} {a|explore}  {m|${E.preview}}`,
+    `{e|✗} {a|build}    {e|${B.error}}` ]}],
+  expanded:[{ bg:"bg-error", lines:[
+    "{t b|subagent} {m|· 2 tasks · }{s|1 ✓}{m| · }{e|1 ✗}",
+    "", hdr, trow("{s|✓}", E), trow("{e|✗}", B),
+    "{bd|" + "─".repeat(65) + "}",
+    `   {t b|${pad("total", 23)}}{t|${"23".padStart(6)}${"11".padStart(7)}${"134k".padStart(7)}${"7.5k".padStart(7)}}{t b|${TOTAL.cost.padStart(9)}}`,
+    "",
+    rule(`{s|✓} {a b|explore} `), `{d|task }{t|${E.task}}`, ...E.calls.map(c => `{d|  → }${c}`), "", ...E.md, "",
+    rule(`{e|✗} {a b|build} `), `{d|task }{t|${B.task}}`, ...B.calls.map(c => `{d|  → }${c}`), "", ...B.md, "",
+    `{e|✗ ${B.error}}`, `{d|stderr  ${B.stderr}}` ]}],
+};
+
+// ── Option 3 · Tree ────────────────────────────────────────────────────
+// Like a process tree. Tool calls nest under their task with box-drawing
+// guides, so the flow of work reads top to bottom.
+const o3 = {
+  title:"Tree", tag:"3",
+  desc:"A process tree on a plain background. Each task is a branch; its last tool calls and its result nest under it with guide lines. No box, so it is the lightest option visually.",
+  pros:["Shows what each child did, in order, without expanding.", "Light: no background, reads like part of the conversation."],
+  cons:["Taller when collapsed (tool lines per task).", "Numbers are less prominent than in a table or card."],
+  running:[{ lines:[
+    lr("{a b|subagent} {m|2 tasks}", "{w|⠋ }{m|1:18}"),
+    `{bd|├─} {s|✓} {a b|explore}  {m|${cut(E.task, 50)}}  {d|9 tools · 0:42}`,
+    `{bd|└─} {w|⠋} {a b|build}    {m|${cut(B.task, 50)}}  {d|11 tools}`,
+    `{bd|   └─} {m|$ }{t|npm test -- login}` ]}],
+  collapsed:[{ lines:[
+    lr("{a b|subagent} {m|2 tasks · }{s|1 done}{m| · }{e|1 failed}", `{d|${TOTAL.tokens} · }{t|${TOTAL.cost}}`),
+    `{bd|├─} {s|✓} {a b|explore}  {m|${cut(E.task, 50)}}`,
+    `{bd|│  ├─} {d|9 tools · ${E.turns} turns · ${E.time} · ${E.cost}}`,
+    `{bd|│  └─} {t|${E.preview}}`,
+    `{bd|└─} {e|✗} {a b|build}    {m|${cut(B.task, 50)}}`,
+    `{bd|   ├─} {d|14 tools · ${B.turns} turns · ${B.time} · ${B.cost}}`,
+    `{bd|   └─} {e|${B.error}}`,
+    "{d|Ctrl+O to expand}" ]}],
+  expanded:[{ lines:[
+    lr("{a b|subagent} {m|2 tasks · }{s|1 done}{m| · }{e|1 failed}", `{d|${TOTAL.tokens} · }{t|${TOTAL.cost}}`),
+    `{bd|├─} {s|✓} {a b|explore} {m|· ${E.model}}`,
+    `{bd|│  │ } {d|task }{t|${E.task}}`,
+    ...E.calls.map((c, i) => `{bd|│  ├─} ${c}`), "{bd|│  ├─} {d|… +5 more}",
+    `{bd|│  └─} {d|${E.turns} turns · ↑${E.input} ↓${E.output} · ${E.time} · ${E.cost}}`,
+    ...E.md.map(l => `{bd|│    } ${l}`),
+    "{bd|│}",
+    `{bd|└─} {e|✗} {a b|build} {m|· ${B.model}}`,
+    `{bd|   │ } {d|task }{t|${B.task}}`,
+    ...B.calls.map(c => `{bd|   ├─} ${c}`), "{bd|   ├─} {d|… +11 more}",
+    `{bd|   └─} {d|${B.turns} turns · ↑${B.input} ↓${B.output} · ${B.time} · ${B.cost}}`,
+    ...B.md.map(l => `{bd|     } ${l}`),
+    `{bd|     } {e|✗ ${B.error}}`,
+    `{bd|     } {d|stderr  ${B.stderr}}` ]}],
+};
+
+// ── Option 4 · Badges + context bars ───────────────────────────────────
+// A colored status badge per task and a bar for the child's context fill
+// (usage.contextTokens / window), colored like the sidebar (≤40 accent,
+// ≤60 warning, >60 error). The bar tells how close a child got to its limit.
+function bar(p, w = 16) {
+  const f = Math.round(p / 100 * w), cls = p > 60 ? "e" : p > 40 ? "w" : "a";
+  return `{${cls}|${"█".repeat(f)}}{bm|${"█".repeat(w - f)}}{m| ${String(p).padStart(2)}%}`;
+}
+const badge = (k) => k === "ok" ? "{Bs| DONE }" : k === "err" ? "{Be| FAIL }" : "{Bp| RUN  }";
+const o4 = {
+  title:"Badges + context bars", tag:"4",
+  desc:"Each task gets a colored status badge (theme background tokens) and a bar that shows how full the child's context window is, colored like the sidebar. Plain background around it.",
+  pros:["Status is readable at a glance, even in a long scroll.", "The context bar warns when a child is near its limit (useful for long build tasks)."],
+  cons:["Badges are loud; two or three calls in a row make the transcript busy.", "The bar shows the child's context, not progress; users may read it as progress."],
+  running:[{ lines:[
+    lr("{t b|subagent} {m|· 2 tasks}", "{w|⠋ }{m|1:18}"),
+    `${badge("ok")} {a b|${pad("explore", 8)}} ${bar(E.ctx)}  {m|${cut(E.task, 38)}}`,
+    `${badge("run")} {a b|${pad("build", 8)}} ${bar(38)}  {m|${cut(B.task, 38)}}`,
+    `                                      {d|└ }{m|$ }{t|npm test -- login}` ]}],
+  collapsed:[{ lines:[
+    lr("{t b|subagent} {m|· 2 tasks · }{s|1 done}{m| · }{e|1 failed}", `{m|${TOTAL.tokens}  }{t b|${TOTAL.cost}}`),
+    `${badge("ok")} {a b|${pad("explore", 8)}} ${bar(E.ctx)}  {m|${cut(E.task, 38)}}`,
+    `                {t|${E.preview}}`,
+    `${badge("err")} {a b|${pad("build", 8)}} ${bar(B.ctx)}  {m|${cut(B.task, 38)}}`,
+    `                {e|${B.error}}`,
+    "{d|Ctrl+O to expand}" ]}],
+  expanded:[{ lines:[
+    lr("{t b|subagent} {m|· 2 tasks · }{s|1 done}{m| · }{e|1 failed}", `{m|${TOTAL.tokens}  }{t b|${TOTAL.cost}}`),
+    "",
+    `${badge("ok")} {a b|explore} {m|· ${E.model} · ${E.turns} turns · ↑${E.input} ↓${E.output} · ${E.cost}}`,
+    `       {d|context }${bar(E.ctx, 24)}`,
+    `       {d|task    }{t|${E.task}}`,
+    ...E.calls.map(c => `       {d|→ }${c}`),
+    "", ...E.md.map(l => `       ${l}`), "",
+    `${badge("err")} {a b|build} {m|· ${B.model} · ${B.turns} turns · ↑${B.input} ↓${B.output} · ${B.cost}}`,
+    `       {d|context }${bar(B.ctx, 24)}`,
+    `       {d|task    }{t|${B.task}}`,
+    ...B.calls.map(c => `       {d|→ }${c}`),
+    "", ...B.md.map(l => `       ${l}`), "",
+    `       {e|✗ ${B.error}}`,
+    `       {d|stderr  ${B.stderr}}` ]}],
+};
+
+// ── Option 5 · Gutter stripe ───────────────────────────────────────────
+// Minimal. One line per task. A colored ▌ stripe on the left shows the
+// state and runs down the whole task section when expanded, like a quote.
+const st = (k) => `{${k}|▌}`;
+const o5 = {
+  title:"Gutter stripe", tag:"5",
+  desc:"Minimal. One summary line, then one line per task with the first line of its answer. A colored <code>▌</code> stripe on the left marks the state (yellow running, green done, red failed). Expanded, the stripe runs down the full task section, like a quote block.",
+  pros:["Most compact collapsed view (3 lines for 2 tasks).", "The stripe stays readable at any width; nothing is right-aligned."],
+  cons:["Fewer numbers on screen; cost and tokens only in the header.", "Least \"designed\" — close to today's style, just cleaner."],
+  running:[{ lines:[
+    "{t b|subagent} {m|· 2 tasks · }{w|1 running}",
+    `${st("s")} {a b|explore}  {d|9 tools · ${E.time}  }{t|${cut(E.preview, 60)}}`,
+    `${st("w")} {a b|build}    {d|11 tools · 1:18  }{m|$ }{t|npm test -- login}` ]}],
+  collapsed:[{ lines:[
+    lr("{t b|subagent} {m|· 2 tasks · }{s|1 done}{m| · }{e|1 failed}", `{d|${TOTAL.tokens} · }{t|${TOTAL.cost}}{d| · Ctrl+O}`),
+    `${st("s")} {a b|explore}  {d|9 tools · ${E.time}  }{t|${cut(E.preview, 60)}}`,
+    `${st("e")} {a b|build}    {d|14 tools · ${B.time}  }{e|${B.error}}` ]}],
+  expanded:[{ lines:[
+    lr("{t b|subagent} {m|· 2 tasks · }{s|1 done}{m| · }{e|1 failed}", `{d|${TOTAL.tokens} · }{t|${TOTAL.cost}}`),
+    "",
+    `${st("s")} {a b|explore} {m|· ${E.model} · ${E.turns} turns · ↑${E.input} ↓${E.output} · ${E.time} · ${E.cost}}`,
+    `${st("s")} {d|task }{t|${E.task}}`,
+    ...E.calls.map(c => `${st("s")} {d|→ }${c}`),
+    st("s"), ...E.md.map(l => `${st("s")} ${l}`),
+    "",
+    `${st("e")} {a b|build} {m|· ${B.model} · ${B.turns} turns · ↑${B.input} ↓${B.output} · ${B.time} · ${B.cost}}`,
+    `${st("e")} {d|task }{t|${B.task}}`,
+    ...B.calls.map(c => `${st("e")} {d|→ }${c}`),
+    st("e"), ...B.md.map(l => `${st("e")} ${l}`),
+    st("e"), `${st("e")} {e|✗ ${B.error}}`, `${st("e")} {d|stderr  ${B.stderr}}` ]}],
+};
+
+// ── Page ────────────────────────────────────────────────────────────────
+const out = document.getElementById("out");
+for (const [i, o] of [today, o1, o2, o3, o4, o5].entries()) {
+  const pros = o.pros ? `<div class="pros"><div><b class="s">+</b><ul>${o.pros.map(p => `<li>${p}</li>`).join("")}</ul></div><div><b class="e">−</b><ul>${o.cons.map(p => `<li>${p}</li>`).join("")}</ul></div></div>` : "";
+  out.insertAdjacentHTML("beforeend", `<section id="o${i}">
+    <h2><span>${o.tag}</span>${o.title}</h2><p>${o.desc}</p>${pros}
+    <div class="state">Running</div>${term(o.running)}
+    <div class="state">Done · collapsed</div>${term(o.collapsed)}
+    ${o.expanded ? `<div class="state">Done · expanded (Ctrl+O)</div>${term(o.expanded)}` : ""}
+  </section>`);
+}
+</script>
+</body>
+</html>

@@ -562,6 +562,25 @@ Structured summaries are stored in the tool call's `details` field for later ref
 - Token usage (input/output)
 - Tool calls made
 - Error messages and stderr previews
+- Context window of the child's model (for the context bar)
+
+### Tool row
+
+`subagent`, `subagent_continue` and `subagent_wait` draw one card with a
+`[subagent]` label. The header shows the task counts per state and the total
+turns, tokens and cost. Each task has one row: a state badge (`DONE`, `FAIL`,
+`RUN` with a spinner, `WAIT`, `STOP`), the agent, the model, a context bar and
+the task's turns, tokens and cost.
+
+- The context bar is the child's context use divided by its model's context
+  window. It is hidden when the window is unknown.
+- Only running and failed tasks show their last tool call. Failed tasks also
+  show the error.
+- The task's answer is not shown, also not when expanded. The answer goes to
+  the parent model. `Ctrl+O` adds the task text, the error and stderr in full.
+- While a blocking call runs, the row is redrawn every 100 ms so the spinner
+  keeps moving during long tool calls. The bar and the numbers change after
+  each model turn of the child.
 
 ## Development
 

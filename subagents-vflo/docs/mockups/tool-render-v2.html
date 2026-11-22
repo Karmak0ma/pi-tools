@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>subagents-vflo · tool render v2</title>
+<!--
+  Round 2 of the subagent tool render (round 1: tool-render.html).
+  User choices from round 1:
+    - Card background (customMessageBg) and the purple [subagent] label of
+      option 1.
+    - Status badges and context bars of option 4. A running task shows a
+      spinner in its badge.
+    - No duration: Pi already prints the tool call duration under the row.
+    - Per task: model, turns, tokens and cost.
+    - Only the last tool call of each task (the current one while running,
+      the final one when done).
+  Assumption to confirm: "mode" in the request means the model.
+-->
+<style>
+  :root {
+    --page:#2c2e34; --text:#e2e2e3; --muted:#7f8490; --dim:#595f6f;
+    --border:#414550; --borderMuted:#3b3e48;
+    --success:#9ed072; --warning:#e7c664; --error:#fc5d7c;
+    --label:#b39df3; --accent:#76cce0; --code:#f39660;
+    --customBg:#2b2d3a; --pendingBg:#3c4052; --successBg:#3c4c43; --errorBg:#523c45;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#1e1f24; color:var(--text); font:14px/1.5 system-ui,sans-serif; }
+  header.page, section, footer { max-width:1100px; margin:0 auto; padding:0 40px; }
+  header.page { padding-top:28px; }
+  h1 { font-size:22px; margin:0 0 6px; }
+  h2 { font-size:18px; margin:34px 0 4px; }
+  p, li { color:#a9adb8; } p b, li b { color:var(--text); }
+  .state { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:#8b90a0; margin:14px 0 4px; }
+  .term { background:var(--page); border-radius:8px; border:1px solid #3a3c45; padding:14px 0; overflow-x:auto; box-shadow:0 6px 24px rgba(0,0,0,.35); }
+  .term pre { margin:0; font:13px/1.45 "JetBrains Mono","Cascadia Code","Fira Code",ui-monospace,monospace; white-space:pre; }
+  .row { display:block; padding:0 16px; min-height:1.45em; }
+  .bg-custom{background:var(--customBg)}
+  .t{color:var(--text)} .m{color:var(--muted)} .d{color:var(--dim)} .s{color:var(--success)}
+  .w{color:var(--warning)} .e{color:var(--error)} .l{color:var(--label)} .a{color:var(--accent)}
+  .c{color:var(--code)} .bd{color:var(--border)} .bm{color:var(--borderMuted)}
+  .b{font-weight:700}
+  .Bs{background:var(--successBg);color:var(--success);font-weight:700}
+  .Be{background:var(--errorBg);color:var(--error);font-weight:700}
+  .Bp{background:var(--pendingBg);color:var(--warning);font-weight:700}
+  .Bq{background:var(--borderMuted);color:var(--muted);font-weight:700}
+  .Ba{background:var(--pendingBg);color:var(--muted);font-weight:700}
+  code { color:var(--text); background:#2c2e34; padding:0 4px; border-radius:3px; }
+  footer { margin-top:36px; margin-bottom:60px; }
+  /* Animate the spinner so the running state reads as live. */
+  .spin::after { content:"⠋"; animation:spin 0.8s steps(1) infinite; }
+  @keyframes spin { 0%{content:"⠋"} 10%{content:"⠙"} 20%{content:"⠹"} 30%{content:"⠸"} 40%{content:"⠼"} 50%{content:"⠴"} 60%{content:"⠦"} 70%{content:"⠧"} 80%{content:"⠇"} 90%{content:"⠏"} }
+</style>
+</head>
+<body>
+<header class="page">
+  <h1>subagents-vflo · tool render v2</h1>
+  <p>Card background and purple <code>[subagent]</code> label from option 1. Badges and context bars from option 4. A running task has a spinner in its badge. Each task row shows <b>model, turns, tokens (↑in ↓out) and cost</b>. The line under it shows <b>only the last tool call</b>. No duration (Pi prints it under the tool row).</p>
+  <p>Sample: same as round 1. <code>explore</code> succeeds, <code>build</code> fails. 96 columns, monokai-vflo.</p>
+</header>
+<main id="out"></main>
+
+<footer>
+  <h3>Notes</h3>
+  <ul>
+    <li><b>Context bar</b> = the child's <code>usage.contextTokens</code> divided by its model's context window. Colors match the sidebar: accent ≤ 40%, warning 41–60%, error &gt; 60%. If the window is not known, the bar is hidden and the row keeps its alignment.</li>
+    <li><b>Header totals</b> are the sum of all tasks (turns, ↑in, ↓out, cost).</li>
+    <li><b>Collapsed failed task</b>: shows the error line under the last tool call. A successful task shows no output preview when collapsed (Ctrl+O shows the full Markdown answer).</li>
+    <li><b>Running</b>: fixed height (2 lines per task), so the transcript does not jump while the child streams. Queued tasks show a grey <code>WAIT</code> badge and an empty bar.</li>
+    <li>Also shown: <code>STOP</code> for a task the parent cancelled.</li>
+  </ul>
+</footer>
+
+<script>
+const DATA = [
+  { agent:"explore", model:"haiku-4-5", task:"Research auth-related source files. Report paths and open questions.",
+    turns:4, input:"38k", output:"2.1k", cost:"$0.012", ctx:22,
+    last:"{m|find }{a|*.test.ts}{d| in test/auth}", more:8,
+    md:[ "{a b|## Auth files}", "", "{t|- }{c|src/auth/session.ts}{t| — issues and verifies JWTs}", "{t|- }{c|src/auth/middleware.ts}{t| — request guard, reads the cookie}", "", "{t b|Open question:}{t| refresh tokens are never revoked.}" ] },
+  { agent:"build", model:"sonnet-4-5", task:"Add rate limiting to the login endpoint, with tests.",
+    turns:7, input:"96k", output:"5.4k", cost:"$0.058", ctx:47,
+    last:"{m|$ }{t|npm test -- login}", more:13,
+    error:"Tests failed: 2 of 14 (login.rate-limit.test.ts)",
+    stderr:"expected 429, received 200 at login.rate-limit.test.ts:31",
+    md:[ "{t|Added }{c|rateLimit(60s, 5 tries)}{t| to the login route.}", "{t|Two tests still fail: the limiter runs after the auth guard.}" ] },
+];
+const W = 96;
+const esc = (s) => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const html = (s) => esc(s).replace(/\{([\w ]+)\|((?:[^{}])*)\}/g, (_, c, t) => `<span class="${c}">${t}</span>`);
+const vis = (s) => s.replace(/\{[\w ]+\|((?:[^{}])*)\}/g, "$1").length;
+const pad = (s, n) => s + " ".repeat(Math.max(0, n - vis(s)));
+const lpad = (s, n) => " ".repeat(Math.max(0, n - vis(s))) + s;
+const lr = (l, r) => l + " ".repeat(Math.max(1, W - vis(l) - vis(r))) + r;
+const rule = (label) => label + "{bd|" + "─".repeat(Math.max(0, W - vis(label))) + "}";
+const term = (lines) => `<div class="term"><pre>` + lines.map((l) =>
+  `<span class="row bg-custom">${html(l).replace("⠋", '<span class="spin"></span>') || " "}</span>`).join("") + `</pre></div>`;
+
+// Badge: 6 cells wide so every row lines up. Running uses the spinner.
+const BADGE = { ok:"{Bs| DONE }", err:"{Be| FAIL }", run:"{Bp| ⠋ RUN}", wait:"{Bq| WAIT }", stop:"{Ba| STOP }" };
+function bar(p, w = 10) {
+  if (p === null) return " ".repeat(w + 5);
+  const f = Math.round(p / 100 * w), cls = p > 60 ? "e" : p > 40 ? "w" : "a";
+  return `{${cls}|${"█".repeat(f)}}{bm|${"█".repeat(w - f)}}{m|${lpad(String(p), 4)}%}`;
+}
+// One task row: badge · agent · model · context bar · turns · tokens · cost.
+function row(k, t, o = {}) {
+  const v = { ...t, ...o };
+  const left = `${BADGE[k]} {a b|${pad(v.agent, 8)}} {m|${pad(v.model, 11)}} ${bar(v.ctx)}`;
+  const right = v.turns === 0 ? "" :
+    `{m|${lpad(`${v.turns} turns`, 9)}  ↑${lpad(v.input, 4)} ↓${lpad(v.output, 4)}  }{t|${v.cost}}`;
+  return lr(left, right);
+}
+const under = (s) => `       {d|└ }${s}`;
+const total = (turns, inp, out, cost, b = true) =>
+  `{m|${turns} turns  ↑${inp} ↓${out}  }{t${b ? " b" : ""}|${cost}}`;
+const [E, B] = DATA;
+
+const states = [
+  ["Running", [
+    "{l|[subagent]}",
+    lr("{a b|◆ 2 TASKS}{m| · }{s|1 done}{m| · }{w|1 running}", total(9, "109k", "6.0k", "$0.053", false)),
+    "",
+    row("ok", E), under(E.last),
+    row("run", B, { turns:5, input:"71k", output:"3.9k", cost:"$0.041", ctx:38 }), under("{m|$ }{t|npm test -- login}") ]],
+  ["Done · collapsed", [
+    "{l|[subagent]}",
+    lr("{a b|◆ 2 TASKS}{m| · }{s|1 done}{m| · }{e|1 failed}", total(11, "134k", "7.5k", "$0.070")),
+    "",
+    row("ok", E), under(E.last),
+    row("err", B), under(B.last), `       {e|✗ ${B.error}}`,
+    "",
+    lr("", "{d|Ctrl+O to expand}") ]],
+  ["Done · expanded (Ctrl+O)", [
+    "{l|[subagent]}",
+    lr("{a b|◆ 2 TASKS}{m| · }{s|1 done}{m| · }{e|1 failed}", total(11, "134k", "7.5k", "$0.070")),
+    "",
+    row("ok", E),
+    `       {d|task }{t|${E.task}}`,
+    under(E.last) + `{d|   +${E.more} earlier}`,
+    "", ...E.md.map((l) => l && `       ${l}`), "",
+    row("err", B),
+    `       {d|task }{t|${B.task}}`,
+    under(B.last) + `{d|   +${B.more} earlier}`,
+    "", ...B.md.map((l) => l && `       ${l}`), "",
+    `       {e|✗ ${B.error}}`,
+    `       {d|stderr  ${B.stderr}}` ]],
+  ["Other badges · queued and cancelled (running, 3 tasks)", [
+    "{l|[subagent]}",
+    lr("{a b|◆ 3 TASKS}{m| · }{w|1 running}{m| · 1 queued · 1 stopped}", total(5, "71k", "3.9k", "$0.041", false)),
+    "",
+    row("run", B, { turns:5, input:"71k", output:"3.9k", cost:"$0.041", ctx:38 }), under("{m|$ }{t|npm test -- login}"),
+    row("wait", { agent:"explore", model:"haiku-4-5", ctx:0, turns:0 }), under("{d|queued}"),
+    row("stop", { agent:"review", model:"sonnet-4-5", ctx:12, turns:2, input:"14k", output:"0.6k", cost:"$0.006" }), under("{m|read }{a|src/routes/login.ts}") ]],
+];
+
+const out = document.getElementById("out");
+for (const [name, lines] of states)
+  out.insertAdjacentHTML("beforeend", `<section><div class="state">${name}</div>${term(lines)}</section>`);
+</script>
+</body>
+</html>

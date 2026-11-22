@@ -207,6 +207,12 @@ export interface LiveTaskSummary {
   toolCalls: Array<{ name: string; argsPreview: string }>;
   latestOutput: string;
   usage: TaskUsage;
+  /**
+   * Context window of the child's model, in tokens. The tool row divides
+   * `usage.contextTokens` by it to draw the context bar. Undefined when the
+   * model is not in the parent's model registry; the bar is then hidden.
+   */
+  contextWindow?: number;
 }
 
 // ─── Persisted Details Types ─────────────────────────────────────────────────
@@ -225,6 +231,8 @@ export interface PersistedTaskSummary {
   toolCalls: Array<{ name: string; argsPreview: string }>;
   finalOutput: string;
   usage: TaskUsage;
+  /** Same as LiveTaskSummary.contextWindow. Absent in results stored before it existed. */
+  contextWindow?: number;
   failed?: boolean;
   /**
    * True only when the parent aborted this task. A closed child or an
@@ -252,6 +260,12 @@ export interface PersistedSubagentToolDetails {
   deliveryId?: string;
   /** Set on an async call's immediate result: tasks were started, not finished. */
   background?: true;
+  /**
+   * subagent_wait only: the note about tasks that are still running when the
+   * wait ended. Kept apart from `content` so the renderer can show it under
+   * the finished tasks without parsing the model-facing text.
+   */
+  waitNote?: string;
 }
 
 // ─── Resolution Types ────────────────────────────────────────────────────────

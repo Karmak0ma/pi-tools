@@ -14,8 +14,7 @@
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { discoverAgents, findAgent, formatAgentList } from "./agents.js";
-import { renderCall, renderResult } from "./render.js";
-import { Container, Text } from "@earendil-works/pi-tui";
+import { renderCall, renderResult, SPINNER_MS } from "./render.js";
 import { type ModelRegistry, buildToolResolutionOptions, resolveCwd } from "./resolver.js";
 import { buildMultiTaskToolResult, buildSingleTaskToolResult } from "./multi-task-result.js";
 import { BackgroundDeliveries, type BackgroundResult } from "./background-deliveries.js";
@@ -329,10 +328,14 @@ export default function (pi: ExtensionAPI) {
 
   if (typeof pi.registerMessageRenderer === "function") {
     pi.registerMessageRenderer<PersistedSubagentToolDetails>(BACKGROUND_RESULT_MESSAGE, (message, options, theme) => {
-      const container = new Container();
-      container.addChild(new Text(theme.fg("toolTitle", theme.bold("subagent background results")), 0, 0));
-      container.addChild(renderResult({ content: message.content, details: message.details }, options, theme));
-      return container;
+      // The message has no call card above it, so the result card carries
+      // the label itself.
+      return renderResult(
+        { content: message.content, details: message.details },
+        { expanded: options.expanded, title: "Background results" },
+        theme,
+        options,
+      );
     });
   }
 
@@ -383,6 +386,12 @@ export default function (pi: ExtensionAPI) {
       else rowRefresh.throttled();
     });
     rowRefresh.immediate();
+    // The row redraws only on child events, so during a long tool call the
+    // spinner in the RUN badge would freeze. This timer redraws the row so
+    // the spinner keeps turning. It lives here, not in the renderer, because
+    // this function has a clear end (the finally below) where it is stopped.
+    const spinner = setInterval(() => rowRefresh.immediate(), SPINNER_MS);
+    spinner.unref?.();
 
     // Blocking call: aborting the tool call (Escape) cancels its tasks.
     const cancelInvocation = () => manager.cancel(taskIds);
@@ -393,6 +402,7 @@ export default function (pi: ExtensionAPI) {
     try {
       results = await manager.wait(taskIds);
     } finally {
+      clearInterval(spinner);
       unsubscribe();
       signal?.removeEventListener("abort", cancelInvocation);
       rowRefresh.flush();
@@ -479,12 +489,14 @@ export default function (pi: ExtensionAPI) {
       return deliverTasks(toolCallId, taskIds, params.async === true, signal, onUpdate, ctx);
     },
 
-    renderCall(args, theme, _context) {
-      return renderCall(args, theme);
+    // The tool draws its own card (see render.ts), so Pi must not put its
+    // pending/success/error box around it.
+    renderShell: "self",
+    renderCall(args, theme, context) {
+      return renderCall("subagent", args, theme, context);
     },
-
-    renderResult(result, options, theme, _context) {
-      return renderResult(result, options, theme);
+    renderResult(result, options, theme, context) {
+      return renderResult(result, options, theme, context);
     },
   });
 
@@ -509,8 +521,12 @@ export default function (pi: ExtensionAPI) {
       }
       return deliverTasks(toolCallId, [taskId], params.async === true, signal, onUpdate, ctx);
     },
-    renderResult(result, options, theme) {
-      return renderResult(result, options, theme);
+    renderShell: "self",
+    renderCall(args, theme, context) {
+      return renderCall("subagent_continue", args, theme, context);
+    },
+    renderResult(result, options, theme, context) {
+      return renderResult(result, options, theme, context);
     },
   });
 
@@ -608,12 +624,18 @@ export default function (pi: ExtensionAPI) {
           .filter((instance) => instance !== undefined)
           .map((instance) => formatStatusLine(instance, deliveries));
         parts.push(`${reason}; still running (not cancelled):\n${lines.join("\n")}`);
+        // The card shows the finished tasks as rows; this note goes under them.
+        if (details) details.waitNote = parts[parts.length - 1];
       }
       const text = parts.join("\n\n---\n\n") + unknownIdsNote(unknown);
       return { content: [{ type: "text" as const, text }], details };
     },
-    renderResult(result, options, theme, _context) {
-      return renderResult(result, options, theme);
+    renderShell: "self",
+    renderCall(args, theme, context) {
+      return renderCall("subagent_wait", args, theme, context);
+    },
+    renderResult(result, options, theme, context) {
+      return renderResult(result, options, theme, context);
     },
   });
 
@@ -675,7 +697,9 @@ function liveToolUpdate(tracker: SubagentTracker, taskIds: string[]) {
     (i) => i.status === "completed" || i.status === "error" || i.status === "aborted",
   ).length;
   const runningCount = instances.filter((i) => i.status === "running").length;
-  const liveSummaries: LiveTaskSummary[] = instances.map((i) => ({ ...i.summary }));
+  // contextWindow lives on the instance (resolved once at spawn); the row
+  // needs it beside the usage to draw the context bar.
+  const liveSummaries: LiveTaskSummary[] = instances.map((i) => ({ ...i.summary, contextWindow: i.contextWindow }));
   return {
     content: [
       { type: "text" as const, text: `Tasks: ${doneCount}/${taskIds.length} done, ${runningCount} running...` },
