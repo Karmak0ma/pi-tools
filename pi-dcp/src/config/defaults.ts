@@ -4,6 +4,12 @@ export const defaults = {
   debug: false,
   pruneNotification: "detailed",
   pruneNotificationType: "chat",
+  // Which bar the compress receipt draws in the TUI (detailed notifications
+  // only). "regained" is the default: one bar answers both "how full is the
+  // context now" and "how much did this call give back". The other styles are
+  // a user preference, not a behavior change, so they never touch the
+  // model-visible tool result text.
+  receiptStyle: "regained",
   commands: { enabled: true, protectedTools: ["compress", "write", "edit", "todo"] as string[] },
   manualMode: { enabled: false, automaticStrategies: true },
   turnProtection: { enabled: false, turns: 4 },
@@ -43,12 +49,25 @@ export const defaults = {
   summary: { maxChars: 100000 },
 } as const;
 
+/**
+ * Compress receipt bar styles, shown in the TUI only.
+ * - simple: share of the window this call reclaimed. Needs no usage data, so
+ *   every other style falls back to it when Pi cannot report usage.
+ * - before-after: usage before and after the call, colored by usage level.
+ * - regained: one bar, what is still used plus what this call gave back.
+ * - full: the context laid out in order (system, raw history, summaries),
+ *   plus what this call gave back and a per-compression history.
+ */
+export const RECEIPT_STYLES = ["simple", "before-after", "regained", "full"] as const;
+export type ReceiptStyle = typeof RECEIPT_STYLES[number];
+
 export type EffectiveConfig = {
   enabled: boolean;
   disabledModels: string[];
   debug: boolean;
   pruneNotification: "off" | "minimal" | "summary" | "detailed";
   pruneNotificationType: "chat" | "toast" | "both";
+  receiptStyle: ReceiptStyle;
   commands: { enabled: boolean; protectedTools: string[] };
   manualMode: { enabled: boolean; automaticStrategies: boolean };
   turnProtection: { enabled: boolean; turns: number };

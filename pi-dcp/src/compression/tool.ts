@@ -1,5 +1,4 @@
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { CompressionParameters, isCompressionParams, normalizeCompressionParams } from "./schema.ts";
 import { buildCompressionEnvelope } from "./service.ts";
 import { blockAlias, computeSnapshotHash, modelKey, orderedActiveBlocks } from "../identity/snapshot.ts";
@@ -9,7 +8,9 @@ import { projectSessionManager } from "../identity/project.ts";
 import { buildProtocolUnits } from "../identity/protocol.ts";
 import { reduceEnvelope } from "../state/reducer.ts";
 import { OPERATION_CUSTOM_TYPE } from "../state/operations.ts";
-import { formatNotification, notify, renderCompressionNotification, type CompressionNotification } from "../ui/notify.ts";
+import { formatNotification, notify, type CompressionNotification } from "../ui/notify.ts";
+import { buildContextLayout, compressionHistory, estimateSystemTokens, type ContextSegment } from "../ui/receipt-data.ts";
+import { renderCompressCall, renderCompressResult } from "../ui/receipt.ts";
 import { hashJson } from "../util/hash.ts";
 import { clearBaselines, findBaselineForParent, latestBaseline, noteSuccessfulCompression, pinBaseline, unpinBaseline, type DcpRuntime } from "../runtime.ts";
 import { persistSavingsBestEffort } from "../stats.ts";
@@ -90,11 +91,16 @@ Validation
     async execute(toolCallId, params, _signal, _onUpdate, ctx) {
       return executeCompression(toolCallId, params, ctx, pi, runtime);
     },
-    renderResult(result, _options, theme) {
-      const notification = result.details?.notification;
-      if (notification) return renderCompressionNotification(notification, theme);
-      const text = result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-      return new Text(theme.fg("toolOutput", text), 0, 0);
+    // The tool draws its own card (customMessageBg), like pi-advisor-flow.
+    // Without renderCall, Pi printed the raw JSON arguments, so summaries
+    // showed up as one string full of literal "\n" escapes.
+    renderShell: "self",
+    renderCall(args, theme, context) {
+      return renderCompressCall(args, theme, context);
+    },
+    renderResult(result, options, theme, context) {
+      // Style read at render time: a settings change redraws old receipts too.
+      return renderCompressResult(result, runtime.config.receiptStyle, theme, { ...context, expanded: options.expanded });
     },
   };
   pi.registerTool(tool);
@@ -250,8 +256,24 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
     // Cut by code point, so the cut never splits a surrogate pair in the notification.
     const storedTopics = [...new Set(built.blocks.map((block) => block.topic))].join("; ");
     const receiptTopic = Array.from(storedTopics).length > MAX_RECEIPT_TOPIC_CHARS ? `${Array.from(storedTopics).slice(0, MAX_RECEIPT_TOPIC_CHARS - 3).join("")}...` : storedTopics;
-    const contextWindow = ctx.getContextUsage()?.contextWindow || ctx.model?.contextWindow || 0;
+    const usage = ctx.getContextUsage();
+    const contextWindow = usage?.contextWindow || ctx.model?.contextWindow || 0;
     const contextPercent = contextWindow > 0 ? Math.round((estimatedTokens / contextWindow) * 1000) / 10 : undefined;
+    // Usage as Pi reports it right now. The new blocks only apply from the next
+    // request, so this is still the size BEFORE this call. Pi reports null when
+    // it has no measurement (for example just after a native compaction); the
+    // receipt then falls back to the simple style, which needs no usage.
+    const usageBeforeTokens = typeof usage?.tokens === "number" && usage.tokens > 0 ? usage.tokens : undefined;
+    const layout = usageBeforeTokens === undefined ? undefined : safeLayout(() => buildContextLayout({
+      units: baseline.units,
+      entries: baseline.index?.entries ?? [],
+      state: dryRun,
+      targetTokens: usageBeforeTokens - estimatedTokens,
+      systemFallbackTokens: () => {
+        const active = new Set(pi.getActiveTools());
+        return estimateSystemTokens(ctx.getSystemPrompt(), pi.getAllTools().filter((tool) => active.has(tool.name)));
+      },
+    }));
     const report: CompressionNotification = {
       action: "compressed",
       topic: receiptTopic,
@@ -263,6 +285,10 @@ async function executeCompression(toolCallId: string, rawParams: unknown, ctx: E
       messageCount: coveredEntryIds.size,
       contextPercent,
       sessionTotalTokens: dryRun.savings.compression.tokens,
+      contextWindow: contextWindow || undefined,
+      usageBeforeTokens,
+      layout,
+      history: compressionHistory(dryRun),
     };
     notify(ctx, runtime.config, report);
     // The statistics belong in the tool result, not in a separate chat message.
@@ -437,6 +463,15 @@ function validateBaselineHistory(baseline: BaselineSnapshot, ctx: ExtensionConte
     if (callCount !== 1) return { ok: false, stage: "duplicate_tool_call" };
   }
   return { ok: true };
+}
+
+/**
+ * The layout is display-only. A bug or an unexpected message shape in it must
+ * never fail a compression that is already committed, so any error just drops
+ * the layout and the receipt falls back to a simpler style.
+ */
+function safeLayout(build: () => ContextSegment[] | undefined): ContextSegment[] | undefined {
+  try { return build(); } catch { return undefined; }
 }
 
 function failure(reason: string, extra: Record<string, unknown> = {}, runtime: DcpRuntime, baseline?: BaselineSnapshot): { content: [{ type: "text"; text: string }]; details: Record<string, unknown> } {

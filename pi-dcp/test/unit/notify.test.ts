@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaults } from "../../src/config/defaults.ts";
-import { formatNotification, renderCompressionNotification, type CompressionNotification } from "../../src/ui/notify.ts";
+import { formatNotification, type CompressionNotification } from "../../src/ui/notify.ts";
 
 const compression: CompressionNotification = {
   action: "compressed",
@@ -33,40 +33,6 @@ describe("compression notifications", () => {
 
   it("respects notification off", () => {
     expect(formatNotification({ ...defaults, pruneNotification: "off" } as any, compression)).toBeUndefined();
-  });
-
-  it("renders the same receipt through the supplied live theme", () => {
-    const calls: string[] = [];
-    const theme = {
-      fg(color: string, text: string) {
-        calls.push(color);
-        return `<${color}>${text}</${color}>`;
-      },
-      bold(text: string) {
-        calls.push("bold");
-        return `<bold>${text}</bold>`;
-      },
-    } as any;
-
-    const lines = renderCompressionNotification(compression, theme).render(240).join("\n");
-
-    expect(lines).toContain("Compression #7");
-    expect(lines).toContain("notification mockup research");
-    expect(lines).toContain("18,400 tokens");
-    expect(lines).toContain("12 tools / 8 messages");
-    expect(lines).toContain("94,200 tokens compressed total");
-    expect(calls).toContain("success");
-    expect(calls).toContain("accent");
-    expect(calls).toContain("toolOutput");
-    expect(calls).toContain("muted");
-
-    const alternateTheme = {
-      fg: (color: string, text: string) => `[alternate:${color}]${text}[/alternate]`,
-      bold: (text: string) => text,
-    } as any;
-    const alternateLines = renderCompressionNotification(compression, alternateTheme).render(240).join("\n");
-    expect(alternateLines).toContain("[alternate:success]");
-    expect(alternateLines).not.toBe(lines);
   });
 
   it("falls back safely when the context window is unavailable", () => {

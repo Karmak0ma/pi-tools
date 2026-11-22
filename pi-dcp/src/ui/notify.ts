@@ -1,6 +1,6 @@
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { EffectiveConfig } from "../config/defaults.ts";
+import type { ContextSegment } from "./receipt-data.ts";
 
 export interface Notification {
   action: string;
@@ -24,6 +24,19 @@ export interface CompressionNotification extends Notification {
   messageCount: number;
   contextPercent?: number;
   sessionTotalTokens: number;
+  /*
+   * The fields below feed the TUI bar styles (ui/receipt.ts). All are
+   * optional: receipts stored by older versions lack them, and Pi may not
+   * know the usage. The renderer then falls back to the simple style.
+   */
+  /** Context window the percentages refer to. */
+  contextWindow?: number;
+  /** Pi's reported context usage when the call ran, i.e. before this call applies. */
+  usageBeforeTokens?: number;
+  /** Ordered context layout after this call, scaled to usage before − savings. */
+  layout?: ContextSegment[];
+  /** Estimated savings per compression in this session, oldest first, this call last. */
+  history?: number[];
 }
 
 const CONTEXT_BAR_WIDTH = 32;
@@ -31,11 +44,9 @@ const CONTEXT_BAR_WIDTH = 32;
 /**
  * Render one notification, or undefined when notifications are off.
  *
- * Detailed compression notifications use the same four-line information
- * hierarchy as the selected option 3 prototype. This plain-text form is used
- * in tool results, print/RPC modes, and toast delivery. The TUI result renderer
- * below applies live theme colors without putting ANSI sequences into the
- * model-visible tool result.
+ * This plain-text form is used in tool results, print/RPC modes, and toast
+ * delivery. The TUI draws the receipt itself (ui/receipt.ts) from the same
+ * data, so no ANSI sequences ever reach the model-visible tool result.
  */
 export function formatNotification(config: EffectiveConfig, item: Notification): string | undefined {
   if (config.pruneNotification === "off") return undefined;
@@ -46,22 +57,6 @@ export function formatNotification(config: EffectiveConfig, item: Notification):
     ? ` (${item.topic || ""}${item.count === undefined ? "" : `, ${item.count} item(s)`}${item.durationMs === undefined ? "" : `, ${item.durationMs}ms`}${item.confidence ? `, ${item.confidence}` : ""})`
     : "";
   return `${item.action}${estimate}${detail}`;
-}
-
-/**
- * Render option 3 for the interactive TUI.
- *
- * The `Theme` instance is supplied by Pi's renderer. Each result refresh calls
- * this function again, so a live theme switch regenerates every colored span
- * instead of leaving stale ANSI colors in the transcript.
- */
-export function renderCompressionNotification(item: CompressionNotification, theme: Theme): Text {
-  const topic = item.topic?.trim() || "compressed context";
-  const title = `${theme.fg("success", theme.bold(`✓ Compression #${item.compressionCount}`))}  ${theme.fg("customMessageText", topic)}`;
-  const context = renderContextBar(item.contextPercent, theme);
-  const call = `${theme.fg("muted", "this call ")}${theme.fg("toolOutput", `${formatInteger(item.estimatedTokens ?? 0)} tokens`)}${theme.fg("muted", ` from ${formatInteger(item.toolCount)} tools / ${formatInteger(item.messageCount)} messages`)}`;
-  const session = `${theme.fg("muted", "session   ")}${theme.fg("accent", `${formatInteger(item.sessionTotalTokens)} tokens compressed total`)}`;
-  return new Text(`${title}\n${context}\n${call}\n${session}`, 0, 0);
 }
 
 /** Show the notification as a toast when the configuration asks for one. */
@@ -87,13 +82,6 @@ function formatCompressionNotification(item: CompressionNotification): string {
     `this call ${formatInteger(item.estimatedTokens ?? 0)} tokens from ${formatInteger(item.toolCount)} tools / ${formatInteger(item.messageCount)} messages`,
     `session   ${formatInteger(item.sessionTotalTokens)} tokens compressed total`,
   ].join("\n");
-}
-
-function renderContextBar(percent: number | undefined, theme: Theme): string {
-  if (percent === undefined) return `${theme.fg("muted", "context  [?]")}  ${theme.fg("muted", "? reclaimed")}`;
-  const reclaimed = Math.min(CONTEXT_BAR_WIDTH, Math.max(0, Math.round(CONTEXT_BAR_WIDTH * percent / 100)));
-  const retained = CONTEXT_BAR_WIDTH - reclaimed;
-  return `${theme.fg("muted", "context  ")}${theme.fg("warning", "█".repeat(retained))}${theme.fg("success", "█".repeat(reclaimed))}${theme.fg("success", `  ${formatPercent(percent)} reclaimed`)}`;
 }
 
 function plainContextBar(percent: number | undefined): string {

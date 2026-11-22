@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pi-dcp · compress render v2 — 4 bar styles</title>
+<!--
+  Round 2 of the compress tool render mockups (round 1: compress-render.html).
+  User choices from round 1:
+    - Frame, header and expanded body: option 1 (customMessageBg card, [dcp]
+      label, markdown summary, ◆ header).
+    - Stats: option 2's right-aligned table.
+    - Bar: a settings choice between 4 styles (Simple, Before/After,
+      Regained, Full).
+    - The collapsed view shows the bar, like option 4.
+  The page draws every bar with JS from the same numbers, with the same rules
+  the TUI code will use: whole cells for inner segment edges, eighth-blocks
+  (▏▎▍▌▋▊▉) only at the end of the last filled segment. A terminal cell has
+  one foreground color, so it cannot draw a partial edge between two colored
+  segments without using a background color outside the theme tokens.
+-->
+<style>
+  :root {
+    --page:#2c2e34; --text:#e2e2e3; --muted:#7f8490; --dim:#595f6f;
+    --border:#414550; --borderMuted:#3b3e48;
+    --success:#9ed072; --warning:#e7c664; --error:#fc5d7c;
+    --label:#b39df3; --link:#76cce0; --code:#f39660; --blue:#76cce0;
+    --customBg:#2b2d3a;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#1e1f24; color:var(--text); font:14px/1.5 system-ui,sans-serif; }
+  header.page, section, footer { max-width:1100px; margin:0 auto; padding:0 40px; }
+  header.page { padding-top:28px; }
+  h1 { font-size:22px; margin:0 0 6px; }
+  h2 { font-size:18px; margin:34px 0 4px; } h2 span { color:var(--label); margin-right:8px; }
+  p, li { color:#a9adb8; } p b, li b { color:var(--text); }
+  .state { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:#8b90a0; margin:14px 0 4px; }
+  .term { background:var(--page); border-radius:8px; border:1px solid #3a3c45; padding:14px 0; overflow-x:auto; box-shadow:0 6px 24px rgba(0,0,0,.35); }
+  .term pre { margin:0; font:13px/1.45 "JetBrains Mono","Cascadia Code","Fira Code",ui-monospace,monospace; white-space:pre; }
+  .row { display:block; padding:0 16px; min-height:1.45em; background:var(--customBg); }
+  .t{color:var(--text)} .m{color:var(--muted)} .d{color:var(--dim)} .s{color:var(--success)}
+  .w{color:var(--warning)} .e{color:var(--error)} .l{color:var(--label)} .k{color:var(--link)}
+  .c{color:var(--code)} .u{color:var(--blue)} .bm{color:var(--borderMuted)} .bd{color:var(--border)}
+  .b{font-weight:700}
+  nav { display:flex; gap:8px; flex-wrap:wrap; margin:14px 0; }
+  nav a { color:var(--text); background:#2c2e34; border:1px solid #414550; padding:4px 12px; border-radius:999px; text-decoration:none; font-size:13px; }
+  .note { font-size:12px; color:#a9adb8; }
+  .note code, p code, li code { color:var(--text); background:#2c2e34; padding:0 4px; border-radius:3px; }
+  footer { margin-top:36px; margin-bottom:60px; }
+</style>
+</head>
+<body>
+<header class="page">
+  <h1>pi-dcp · compress render v2 — 4 bar styles</h1>
+  <p>Frame and expanded body from option 1, stats table from option 2. Each style shows the <b>collapsed</b> view (bar in the header, like option 4) and the <b>expanded</b> view (Ctrl+O).</p>
+  <p>Sample: window <b>200k</b>. Before the call <b>128.6k</b> used (64.3%). This call reclaims <b>36.8k</b> (18.4%), so after <b>91.8k</b> (45.9%). Session total reclaimed <b>92.3k</b> (46.2%) over 3 compressions.</p>
+  <p>Usage colors match <code>sidebar-vflo</code>: <span class="u b">blue</span> ≤ 40%, <span class="w b">yellow</span> 41–60%, <span class="e b">red</span> &gt; 60%.</p>
+  <nav><a href="#s1">1 · Simple</a><a href="#s2">2 · Before/After</a><a href="#s3">3 · Regained</a><a href="#s4">4 · Full</a><a href="#menu">Settings menu</a></nav>
+</header>
+<main id="out"></main>
+
+<section id="menu">
+  <h2><span>⚙</span>Settings menu</h2>
+  <p>New row in <code>/dcp settings</code> (same <code>ctx.ui.select</code> style as the other rows). Saved as <code>receiptStyle</code> in the pi-dcp settings file. Only applies when <code>Prune notifications</code> is <code>detailed</code>.</p>
+  <div class="term"><pre id="menu-term"></pre></div>
+</section>
+
+<footer>
+  <h3>Notes</h3>
+  <ul>
+    <li><b>Before</b> comes from <code>ctx.getContextUsage().tokens</code> when the call runs. <b>After</b> is before − this call's estimated savings. Pi only measures the real value after the next model response, so "after" is an estimate. When Pi reports <code>tokens: null</code> (for example right after a native compaction), styles 2–4 fall back to style 1.</li>
+    <li>Blue uses the theme token <code>mdLink</code> (cyan-blue in monokai-vflo). The theme <code>accent</code> token is grey in monokai-vflo, so it cannot be "blue" here. The sidebar gets blue only from its own hard-coded preset.</li>
+    <li>The model-visible tool result text does not change. Only the TUI rendering changes.</li>
+  </ul>
+</footer>
+
+<script>
+// ── Sample numbers (tokens) ─────────────────────────────────────────────
+const W = 200_000, BEFORE = 128_600, CALL = 36_812, AFTER = BEFORE - CALL, SESSION = 92_340;
+const RUNS = [{ n:1, tok:21_300 }, { n:2, tok:34_228 }, { n:3, tok:CALL }];
+const pct = (x) => x / W * 100;
+
+// ── Tiny span helpers ───────────────────────────────────────────────────
+const esc = (s) => s.replace(/&/g,"&amp;").replace(/</g,"&lt;");
+const sp = (cls, s) => `<span class="${cls}">${esc(s)}</span>`;
+const row = (html = " ") => `<span class="row">${html}</span>`;
+const fmt = (n) => Math.round(n).toLocaleString("en-US");
+const k = (n) => `${(n/1000).toFixed(1)}k`;
+const p1 = (x) => `${x.toFixed(1)}%`;
+// sidebar-vflo thresholds: >60 red, >40 yellow, else blue
+const usageCls = (x) => x > 60 ? "e" : x > 40 ? "w" : "u";
+
+/**
+ * Segmented bar. Inner edges are whole cells; only the last filled segment
+ * ends with an eighth-block. The track uses █ in borderMuted.
+ */
+function bar(segments, width) {
+  const EIGHTHS = ["", "▏","▎","▍","▌","▋","▊","▉"];
+  let out = "", used = 0;
+  segments.forEach((seg, i) => {
+    const last = i === segments.length - 1;
+    const exact = seg.pct / 100 * width;
+    let full = last ? Math.floor(exact) : Math.round(exact);
+    full = Math.min(full, width - used);
+    out += sp(seg.cls, "█".repeat(full)); used += full;
+    if (last && used < width) {
+      const e = Math.round((exact - Math.floor(exact)) * 8);
+      if (e === 8) { out += sp(seg.cls, "█"); used++; }
+      else if (e > 0) { out += sp(seg.cls, EIGHTHS[e]); used++; }
+    }
+  });
+  return out + sp("bm", "█".repeat(Math.max(0, width - used)));
+}
+/** Option 2's ▰▱ cell bar. */
+const cellBar = (x, width) => { const f = Math.round(x / 100 * width); return sp("s", "▰".repeat(f)) + sp("bd", "▱".repeat(width - f)); };
+const pad = (s, n) => s.padStart(n);
+
+// ── Shared frame (option 1) ─────────────────────────────────────────────
+const head = () => sp("l b", "[dcp]") + " " + sp("t", "Compress context") + "  " + sp("k", "m0029 → m0114") + "  " + sp("t b", "Merge main into phase-10f: resolution and validation");
+const hint = sp("d", "  Ctrl+O to expand");
+const body = [
+  row(),
+  row(sp("t","  Merged ") + sp("c","main") + sp("t"," into ") + sp("c","phase-10f") + sp("t","; 7 conflicts resolved, all tests pass.")),
+  row(),
+  row(sp("t b","  Decisions")),
+  row(sp("s","  - ") + sp("t","Kept phase-10f ") + sp("c","reducer.ts") + sp("t",": main's version drops the nestedDepth check.")),
+  row(sp("s","  - ") + sp("t","Took main's ") + sp("c","schema.ts") + sp("t"," (adds ") + sp("c","recall") + sp("t","); re-applied per-range topic.")),
+  row(),
+  row(sp("t b","  Open issues")),
+  row(sp("s","  - ") + sp("t","bench-context.ts still reads the v1 envelope; fix before release.")),
+  row(),
+  row(sp("m b","  Recall")),
+  row(sp("d","  › ") + sp("m","conflict list for lifecycle.ts hunks 3–5")),
+  row(sp("d","  › ") + sp("m","vitest output: 214 passed, 0 failed")),
+  row(sp("d","  › ") + sp("m","rejected: rebase instead of merge (shared branch)")),
+  row(),
+];
+// Option 2's right-aligned stats table, shared by every style.
+const table = [
+  row(sp("m","  this call ") + sp("t b", pad(fmt(CALL), 8)) + sp("m"," tok   ") + sp("t", pad("12",3)) + sp("m"," tools   ") + sp("t", pad("41",3)) + sp("m"," messages")),
+  row(sp("m","  session   ") + sp("t b", pad(fmt(SESSION), 8)) + sp("m"," tok   ") + sp("t", pad("3",3)) + sp("m"," compressions")),
+  row(sp("d","  stored as ") + sp("k","b0004") + sp("d"," · labels apply from the next request")),
+];
+const receiptHead = row(sp("s b","  ◆ CONTEXT COMPRESSED · #3"));
+
+// ── The 4 styles ────────────────────────────────────────────────────────
+const styles = [
+  {
+    id: "s1", name: "Simple",
+    why: "Option 1 frame with option 2's <b>▰▱</b> bar and 0–100 scale. Shows only the share this call reclaimed. Needs no context usage, so it is also the fallback for the other styles.",
+    collapsed: () => [row(head()), row(sp("s","  ✓ ") + cellBar(pct(CALL), 20) + "  " + sp("s b", p1(pct(CALL))) + sp("m"," reclaimed · ") + sp("t", k(CALL)) + sp("m"," tok") + hint)],
+    receipt: () => [
+      row(sp("m","  reclaimed ") + cellBar(pct(CALL), 40) + "  " + sp("s b", p1(pct(CALL))) + sp("m", ` of ${W/1000}k`)),
+      row(sp("d","            0         25        50        75        100")),
+    ],
+  },
+  {
+    id: "s2", name: "Before/After",
+    why: "Two bars on the same scale, with eighth-blocks like option 4. Each bar takes the sidebar color for its own usage. In this sample, before is <b>red</b> (64%) and after is <b>yellow</b> (46%), so the drop across a threshold is visible.",
+    collapsed: () => [row(head()), row(sp("s","  ✓ ") + bar([{pct:pct(BEFORE),cls:usageCls(pct(BEFORE))}], 14) + " " + sp(usageCls(pct(BEFORE)), p1(pct(BEFORE))) + sp("m","  →  ") + bar([{pct:pct(AFTER),cls:usageCls(pct(AFTER))}], 14) + " " + sp(usageCls(pct(AFTER))+" b", p1(pct(AFTER))) + "  " + sp("s b", `−${p1(pct(CALL))}`) + hint)],
+    receipt: () => [
+      row(sp("m","  before    ") + bar([{pct:pct(BEFORE),cls:usageCls(pct(BEFORE))}], 40) + "  " + sp("t", pad(k(BEFORE),6)) + sp("m"," / 200k  ") + sp(usageCls(pct(BEFORE)), pad(p1(pct(BEFORE)),6))),
+      row(sp("m","  after     ") + bar([{pct:pct(AFTER),cls:usageCls(pct(AFTER))}], 40) + "  " + sp("t b", pad(k(AFTER),6)) + sp("m"," / 200k  ") + sp(usageCls(pct(AFTER))+" b", pad(p1(pct(AFTER)),6)) + "  " + sp("s b", `−${p1(pct(CALL))}`)),
+    ],
+  },
+  {
+    id: "s3", name: "Regained",
+    why: "One bar: what the context still uses in <b>blue</b>, what this call gave back in <b>green</b>, free space as the track. The bar end shows where usage was before the call.",
+    collapsed: () => [row(head()), row(sp("s","  ✓ ") + bar([{pct:pct(AFTER),cls:"u"},{pct:pct(CALL),cls:"s"}], 28) + "  " + sp("u", p1(pct(AFTER))) + sp("m"," used  ") + sp("s b", `+${p1(pct(CALL))}`) + sp("m"," regained") + hint)],
+    receipt: () => [
+      row(sp("m","  context   ") + bar([{pct:pct(AFTER),cls:"u"},{pct:pct(CALL),cls:"s"}], 40) + sp("d","  200k")),
+      row(sp("m","            ") + sp("u","■") + sp("m"," used ") + sp("t b", k(AFTER)) + sp("u", ` ${p1(pct(AFTER))}`) + sp("m","    ") + sp("s","■") + sp("m"," regained ") + sp("t b", k(CALL)) + sp("s b", ` ${p1(pct(CALL))}`)),
+    ],
+  },
+  {
+    id: "s4", name: "Full",
+    why: "Option 5 detail, but the bar has only two parts: <b>used now</b> (blue) and <b>reclaimed over the whole session</b> (green). Together they show how full the context would be without pi-dcp. A history strip shows each compression; the newest is green.",
+    collapsed: () => [row(head()), row(sp("s","  ✓ ") + bar([{pct:pct(AFTER),cls:"u"},{pct:pct(SESSION),cls:"s"}], 28) + "  " + sp("u", p1(pct(AFTER))) + sp("m"," used  ") + sp("s b", p1(pct(SESSION))) + sp("m"," reclaimed") + sp("d", ` (+${p1(pct(CALL))} now)`) + hint)],
+    receipt: () => {
+      const max = Math.max(...RUNS.map(r => r.tok)), SP = " ▁▂▃▄▅▆▇█";
+      const spark = RUNS.map((r, i) => sp(i === RUNS.length - 1 ? "s" : "u", SP[Math.max(1, Math.round(r.tok / max * 8))]) + "  ").join("");
+      return [
+        row(sp("m","  context   ") + bar([{pct:pct(AFTER),cls:"u"},{pct:pct(SESSION),cls:"s"}], 40) + sp("d","  200k")),
+        row(sp("m","            ") + sp("u","■") + sp("m"," used ") + sp("t b", k(AFTER)) + sp("u", ` ${p1(pct(AFTER))}`) + sp("m","    ") + sp("s","■") + sp("m"," reclaimed ") + sp("t b", k(SESSION)) + sp("s b", ` ${p1(pct(SESSION))}`) + sp("m","    without dcp ") + sp("t", p1(pct(AFTER + SESSION)))),
+        row(),
+        row(sp("m","  history   ") + spark + sp("d","  ") + RUNS.map(r => sp("m", `#${r.n} `) + sp("t", k(r.tok))).join(sp("d"," · "))),
+      ];
+    },
+  },
+];
+
+const out = document.getElementById("out");
+for (const s of styles) {
+  out.insertAdjacentHTML("beforeend", `<section id="${s.id}">
+    <h2><span>${s.id.slice(1)}</span>${s.name}</h2><p>${s.why}</p>
+    <div class="state">Collapsed</div><div class="term"><pre>${[row(), ...s.collapsed(), row()].join("")}</pre></div>
+    <div class="state">Expanded (Ctrl+O)</div><div class="term"><pre>${[row(), row(head()), ...body, receiptHead, row(), ...s.receipt(), row(), ...table, row()].join("")}</pre></div>
+  </section>`);
+}
+
+// Settings menu mock: Pi's select list look.
+const items = ["Prune notifications: detailed", "Receipt style: regained", "Notification channel: chat"];
+const sub = ["simple — reclaimed share only", "before-after — usage before and after, colored by level", "regained — one bar: used + regained", "full — used + session reclaimed + history", "Back"];
+document.getElementById("menu-term").innerHTML = [
+  row(sp("t b","pi-dcp settings")), row(sp("d","  …")),
+  ...items.map((t, i) => row(i === 1 ? sp("k","→ ") + sp("k", t) : sp("t","  " + t))),
+  row(sp("d","  …")), row(),
+  row(sp("t b","Receipt style")),
+  ...sub.map((t, i) => row(i === 2 ? sp("k","→ ") + sp("k", t) : sp("t","  " + t))),
+].join("");
+</script>
+</body>
+</html>

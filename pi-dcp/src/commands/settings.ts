@@ -2,6 +2,7 @@ import type { ExtensionCommandContext, ExtensionAPI } from "@earendil-works/pi-c
 import { clearBaselines, resetSemanticNudges, setDcpToolActive, type DcpRuntime } from "../runtime.ts";
 import { isEnabledForModel } from "../config/models.ts";
 import { defaults, type EffectiveConfig } from "../config/defaults.ts";
+import { pickReceiptStyle } from "../ui/receipt-picker.ts";
 import { settingsPath, writeSettings } from "../config/settings.ts";
 
 const CANCEL = "Cancel without saving";
@@ -35,6 +36,7 @@ export async function settingsCommand(ctx: ExtensionCommandContext, pi: Extensio
     if (choice.startsWith("Protect complete user messages: ")) { draft.compress.protectUserMessages = await chooseToggle(ctx, "Protect complete user messages", draft.compress.protectUserMessages); continue; }
     if (choice.startsWith("Prune notifications: ")) { const value = await ctx.ui.select("Prune notification level", ["off", "minimal", "summary", "detailed", "Back"]); if (value && value !== "Back") draft.pruneNotification = value as EffectiveConfig["pruneNotification"]; continue; }
     if (choice.startsWith("Notification channel: ")) { const value = await ctx.ui.select("Notification channel", ["chat — transcript message", "toast — popup notification", "both — transcript and popup", "Back"]); if (value?.startsWith("chat")) draft.pruneNotificationType = "chat"; else if (value?.startsWith("toast")) draft.pruneNotificationType = "toast"; else if (value?.startsWith("both")) draft.pruneNotificationType = "both"; continue; }
+    if (choice.startsWith("Receipt style: ")) { const style = await pickReceiptStyle(ctx, draft.receiptStyle); if (style) draft.receiptStyle = style; continue; }
     if (choice.startsWith("Protected tools: ")) { const value = await listInput(ctx, "Protected tool names", draft.compress.protectedTools); if (value !== undefined) draft.compress.protectedTools = value; continue; }
     if (choice.startsWith("Protected paths: ")) { const value = await listInput(ctx, "Protected file glob patterns", draft.protectedFilePatterns); if (value !== undefined) draft.protectedFilePatterns = value; continue; }
     if (choice === "Reset visible settings to defaults") { const confirmed = await ctx.ui.confirm("Reset pi-dcp settings?", "This resets the settings shown in this menu. Save and close to persist the reset."); if (confirmed) draft = { ...visibleDefaults(), disabledModels: draft.disabledModels }; }
@@ -57,6 +59,7 @@ function menuOptions(config: EffectiveConfig): string[] { return [
   `Protect complete user messages: ${config.compress.protectUserMessages ? "on" : "off"}`,
   `Prune notifications: ${config.pruneNotification}`,
   `Notification channel: ${config.pruneNotificationType}`,
+  `Receipt style: ${config.receiptStyle}`,
   `Protected tools: ${config.compress.protectedTools.length ? config.compress.protectedTools.join(", ") : "none"}`,
   `Protected paths: ${config.protectedFilePatterns.length ? config.protectedFilePatterns.join(", ") : "none"}`,
   "Reset visible settings to defaults",

@@ -1,4 +1,4 @@
-import { defaults, type EffectiveConfig } from "./defaults.ts";
+import { defaults, RECEIPT_STYLES, type EffectiveConfig } from "./defaults.ts";
 
 const known = new Set(Object.keys(defaults));
 const excluded = new Set(["mode", "experimental", "tokenizer", "aggregate", "checkpoint", "cache", "prompt", "nativeCompactionCancellation", "compaction"]);
@@ -35,6 +35,7 @@ export function mergeConfig(base: EffectiveConfig, patch: Record<string, unknown
     if (key === "enabled" || key === "debug") { result[key] = booleanValue(raw, key) as never; continue; }
     if (key === "nudge") { mergeNudge(result.nudge, raw, warnings); continue; }
     if (key === "pruneNotification") { result.pruneNotification = enumValue(raw, ["off", "minimal", "summary", "detailed"], key); continue; }
+    if (key === "receiptStyle") { result.receiptStyle = enumValue(raw, RECEIPT_STYLES, key); continue; }
     if (key === "pruneNotificationType") { result.pruneNotificationType = enumValue(raw, ["chat", "toast", "both"], key); continue; }
     const target = result[key as "commands" | "manualMode" | "turnProtection" | "compress" | "strategies" | "summary"] as unknown as Record<string, unknown>;
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${key} must be an object`);

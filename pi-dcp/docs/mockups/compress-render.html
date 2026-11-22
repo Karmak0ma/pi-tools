@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pi-dcp · compress tool render mockups</title>
+<!--
+  Why this file exists:
+  The compress tool has no renderCall, so Pi shows its raw JSON arguments.
+  The summary then appears as one long string with literal "\n" escapes, in
+  the grey toolOutput color. These five mockups show options for a custom
+  renderCall + renderResult. Each option uses ONLY Pi theme tokens
+  (theme.fg / theme.bg names shown in the legend), so any option can be built
+  with Text / Box / Markdown from @earendil-works/pi-tui and still follow the
+  user's theme. Colors below are the monokai-vflo values of those tokens.
+  Every glyph is a real terminal character on a fixed cell grid, so what you
+  see is what the TUI can draw.
+-->
+<style>
+  :root {
+    /* monokai-vflo theme values, named by Pi theme token */
+    --page: #2c2e34;
+    --text: #e2e2e3;
+    --muted: #7f8490;       /* muted, toolOutput, accent */
+    --dim: #595f6f;         /* dim, thinkingText */
+    --border: #414550;
+    --borderMuted: #3b3e48;
+    --success: #9ed072;
+    --warning: #e7c664;
+    --error: #fc5d7c;
+    --label: #b39df3;       /* customMessageLabel */
+    --link: #76cce0;        /* mdLink */
+    --code: #f39660;        /* mdCode */
+    --customBg: #2b2d3a;    /* customMessageBg */
+    --successBg: #3c4c43;   /* toolSuccessBg */
+    --pendingBg: #3c4052;   /* toolPendingBg */
+    --selectedBg: #414550;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #1e1f24; color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+  header.page { padding: 28px 40px 8px; max-width: 1100px; margin: 0 auto; }
+  header.page h1 { margin: 0 0 6px; font-size: 22px; }
+  header.page p { color: #a9adb8; margin: 4px 0; }
+  nav { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 0; }
+  nav a { color: var(--text); background: #2c2e34; border: 1px solid #414550; padding: 4px 12px; border-radius: 999px; text-decoration: none; font-size: 13px; }
+  nav a:hover { border-color: var(--label); }
+  section.option { max-width: 1100px; margin: 26px auto; padding: 0 40px; }
+  section.option > h2 { font-size: 18px; margin: 0 0 4px; }
+  section.option > h2 span { color: var(--label); font-weight: 600; margin-right: 8px; }
+  .why { color: #a9adb8; margin: 0 0 12px; max-width: 900px; }
+  .why b { color: var(--text); }
+  .needs { display: inline-block; font-size: 12px; color: var(--warning); border: 1px solid #5b5340; border-radius: 4px; padding: 1px 8px; margin-left: 6px; }
+  .state { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #8b90a0; margin: 14px 0 4px; }
+
+  /* The terminal. 100 columns of monospace cells. */
+  .term { background: var(--page); border-radius: 8px; border: 1px solid #3a3c45; padding: 14px 0; overflow-x: auto; box-shadow: 0 6px 24px rgba(0,0,0,.35); }
+  .term pre { margin: 0; font: 13px/1.45 "JetBrains Mono", "Cascadia Code", "Fira Code", ui-monospace, monospace; white-space: pre; color: var(--text); }
+  .row { padding: 0 16px; display: block; min-height: 1.45em; }
+  .bg-custom { background: var(--customBg); }
+  .bg-success { background: var(--successBg); }
+  .bg-pending { background: var(--pendingBg); }
+  .bg-selected { background: var(--selectedBg); }
+
+  /* theme.fg tokens */
+  .t { color: var(--text); } .m { color: var(--muted); } .d { color: var(--dim); }
+  .s { color: var(--success); } .w { color: var(--warning); } .e { color: var(--error); }
+  .l { color: var(--label); } .k { color: var(--link); } .c { color: var(--code); }
+  .bd { color: var(--border); } .bm { color: var(--borderMuted); }
+  .b { font-weight: 700; } .i { font-style: italic; }
+
+  .legend { font-size: 12px; color: #a9adb8; margin-top: 8px; }
+  .legend code { color: var(--text); background: #2c2e34; padding: 0 4px; border-radius: 3px; }
+  footer { max-width: 1100px; margin: 30px auto 60px; padding: 0 40px; color: #a9adb8; }
+  footer li { margin: 4px 0; }
+</style>
+</head>
+<body>
+
+<header class="page">
+  <h1>pi-dcp · <code>compress</code> tool rendering — 5 options</h1>
+  <p>Each option shows three states: the call while collapsed (default), the call while expanded (<b>Ctrl+O</b>), and the result receipt.</p>
+  <p>Same sample data in all options: 1 range <code>m0029 → m0114</code>, 18,412 tokens reclaimed of a 200k window (9.2%), compression #3, 73,905 tokens in session total.</p>
+  <nav>
+    <a href="#o1">1 · Advisor card</a>
+    <a href="#o2">2 · Ledger with scale</a>
+    <a href="#o3">3 · Before → after</a>
+    <a href="#o4">4 · Compact line</a>
+    <a href="#o5">5 · Session dashboard</a>
+    <a href="#today">Today (for reference)</a>
+  </nav>
+</header>
+
+<!-- ───────────────────────── TODAY ───────────────────────── -->
+<section class="option" id="today">
+  <h2><span>0</span>Today (reference)</h2>
+  <p class="why">No <code>renderCall</code>: Pi prints the JSON. The summary is one string with <code>\n</code> escapes. The receipt uses <code>toolOutput</code>/<code>muted</code> grey for most text.</p>
+  <div class="term"><pre>
+<span class="row bg-success"><span class="t b">compress</span></span><span class="row bg-success"><span class="m">  content: [</span></span><span class="row bg-success"><span class="m">    {</span></span><span class="row bg-success"><span class="m">      "startId": "m0029",</span></span><span class="row bg-success"><span class="m">      "endId": "m0114",</span></span><span class="row bg-success"><span class="m">      "topic": "Merge main into phase-10f: resolution and validation",</span></span><span class="row bg-success"><span class="m">      "summary": "Merged `main` into `phase-10f`; 7 conflicts resolved.\n\n**Decisions**\n- Kept phase-10f reducer.ts because main's version drops nestedDepth...\n- ...</span></span><span class="row bg-success"> </span><span class="row bg-success"><span class="s b">✓ Compression #3</span>  <span class="t">Merge main into phase-10f: resolution and validation</span></span><span class="row bg-success"><span class="m">context  </span><span class="w">█████████████████████████████</span><span class="s">███</span><span class="s">  9% reclaimed</span></span><span class="row bg-success"><span class="m">this call </span><span class="m">18,412 tokens</span><span class="m"> from 12 tools / 41 messages</span></span><span class="row bg-success"><span class="m">session   </span><span class="m">73,905 tokens compressed total</span></span>
+</pre></div>
+</section>
+
+<!-- ───────────────────────── OPTION 1 ───────────────────────── -->
+<section class="option" id="o1">
+  <h2><span>1</span>Advisor card</h2>
+  <p class="why">Closest to pi-advisor-flow. The tool draws its own shell (<code>renderShell: "self"</code>) on <code>customMessageBg</code> with a purple <b>[dcp]</b> label, like <b>[advisor]</b>. The summary renders through Pi's <code>Markdown</code> component, so headings, bullets and <code>code</code> get real formatting. The receipt uses a <b>◆ header</b> and a thin <b>━</b> bar: dim for kept context, green for reclaimed.</p>
+
+  <div class="state">Call · collapsed</div>
+  <div class="term"><pre>
+<span class="row bg-custom"> </span><span class="row bg-custom"><span class="l b">[dcp]</span> <span class="t">Compress context</span> <span class="d">· 1 range</span></span><span class="row bg-custom"><span class="d">  </span><span class="k">m0029 → m0114</span>  <span class="t">Merge main into phase-10f: resolution and validation</span></span><span class="row bg-custom"><span class="d">  summary 2,184 chars · 4 recall cues · Ctrl+O to read</span></span><span class="row bg-custom"> </span>
+</pre></div>
+
+  <div class="state">Call · expanded (Ctrl+O)</div>
+  <div class="term"><pre>
+<span class="row bg-custom"> </span><span class="row bg-custom"><span class="l b">[dcp]</span> <span class="t">Compress context</span> <span class="d">· 1 range</span></span><span class="row bg-custom"><span class="d">  </span><span class="k">m0029 → m0114</span>  <span class="t b">Merge main into phase-10f: resolution and validation</span></span><span class="row bg-custom"> </span><span class="row bg-custom"><span class="t">  Merged </span><span class="c">main</span><span class="t"> into </span><span class="c">phase-10f</span><span class="t">; 7 conflicts resolved, all tests pass.</span></span><span class="row bg-custom"> </span><span class="row bg-custom"><span class="t b">  Decisions</span></span><span class="row bg-custom"><span class="s">  - </span><span class="t">Kept phase-10f </span><span class="c">reducer.ts</span><span class="t">: main's version drops the nestedDepth check.</span></span><span class="row bg-custom"><span class="s">  - </span><span class="t">Took main's </span><span class="c">schema.ts</span><span class="t"> (adds </span><span class="c">recall</span><span class="t">); re-applied per-range topic.</span></span><span class="row bg-custom"> </span><span class="row bg-custom"><span class="t b">  Open issues</span></span><span class="row bg-custom"><span class="s">  - </span><span class="t">bench-context.ts still reads the v1 envelope; fix before release.</span></span><span class="row bg-custom"> </span><span class="row bg-custom"><span class="m b">  Recall</span></span><span class="row bg-custom"><span class="d">  › </span><span class="m">conflict list for lifecycle.ts hunks 3–5</span></span><span class="row bg-custom"><span class="d">  › </span><span class="m">vitest output: 214 passed, 0 failed</span></span><span class="row bg-custom"><span class="d">  › </span><span class="m">rejected: rebase instead of merge (shared branch)</span></span><span class="row bg-custom"><span class="d">  › </span><span class="m">git rerere cache path</span></span><span class="row bg-custom"> </span>
+</pre></div>
+
+  <div class="state">Result</div>
+  <div class="term"><pre>
+<span class="row bg-custom"> </span><span class="row bg-custom"><span class="s b">◆ CONTEXT COMPRESSED · #3</span></span><span class="row bg-custom"><span class="d">  </span><span class="t">Merge main into phase-10f: resolution and validation</span></span><span class="row bg-custom"> </span><span class="row bg-custom"><span class="m">  context   </span><span class="bd">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span><span class="s b">━━━━</span>  <span class="s b">9.2%</span><span class="m"> reclaimed</span></span><span class="row bg-custom"><span class="m">  this call </span><span class="t b">18,412</span><span class="m"> tokens · </span><span class="t">12</span><span class="m"> tools · </span><span class="t">41</span><span class="m"> messages</span></span><span class="row bg-custom"><span class="m">  session   </span><span class="t b">73,905</span><span class="m"> tokens across </span><span class="t">3</span><span class="m"> compressions</span></span><span class="row bg-custom"><span class="d">  stored b0004 · labels apply from the next request</span></span><span class="row bg-custom"> </span>
+</pre></div>
+  <p class="legend">Tokens: <code>bg customMessageBg</code> shell · <code>customMessageLabel</code> [dcp] · <code>mdLink</code> range ids · <code>Markdown</code> + <code>getMarkdownTheme()</code> summary · <code>border</code> kept bar · <code>success</code> reclaimed bar · <code>text</code> for every number.</p>
+</section>
+
+<!-- ───────────────────────── OPTION 2 ───────────────────────── -->
+<section class="option" id="o2">
+  <h2><span>2</span>Ledger with scale</h2>
+  <p class="why">A left gutter <b>▌</b> in the tool color ties call and result together without a background. Stats are a right-aligned table, so numbers line up and scan fast. The bar uses <b>▰▱</b> cells with a 0–100% scale under it, so 9% reads as "small" at a glance instead of a lone green sliver.</p>
+
+  <div class="state">Call · collapsed</div>
+  <div class="term"><pre>
+<span class="row"><span class="l">▌</span> <span class="l b">compress</span>  <span class="k">m0029 → m0114</span>  <span class="t">Merge main into phase-10f: resolution and validation</span></span><span class="row"><span class="l">▌</span> <span class="d">2,184 chars · 4 recall · Ctrl+O</span></span>
+</pre></div>
+
+  <div class="state">Call · expanded (Ctrl+O)</div>
+  <div class="term"><pre>
+<span class="row"><span class="l">▌</span> <span class="l b">compress</span>  <span class="k">m0029 → m0114</span>  <span class="t">Merge main into phase-10f: resolution and validation</span></span><span class="row"><span class="l">▌</span></span><span class="row"><span class="l">▌</span> <span class="d">┌ summary ───────────────────────────────────────────────────────────────────</span></span><span class="row"><span class="l">▌</span> <span class="d">│</span> <span class="t">Merged </span><span class="c">main</span><span class="t"> into </span><span class="c">phase-10f</span><span class="t">; 7 conflicts resolved, all tests pass.</span></span><span class="row"><span class="l">▌</span> <span class="d">│</span></span><span class="row"><span class="l">▌</span> <span class="d">│</span> <span class="s b">Decisions</span></span><span class="row"><span class="l">▌</span> <span class="d">│</span> <span class="s">• </span><span class="t">Kept phase-10f </span><span class="c">reducer.ts</span><span class="t">: main's version drops the nestedDepth check.</span></span><span class="row"><span class="l">▌</span> <span class="d">│</span> <span class="s">• </span><span class="t">Took main's </span><span class="c">schema.ts</span><span class="t"> (adds </span><span class="c">recall</span><span class="t">); re-applied per-range topic.</span></span><span class="row"><span class="l">▌</span> <span class="d">│</span></span><span class="row"><span class="l">▌</span> <span class="d">│</span> <span class="s b">Open issues</span></span><span class="row"><span class="l">▌</span> <span class="d">│</span> <span class="s">• </span><span class="t">bench-context.ts still reads the v1 envelope; fix before release.</span></span><span class="row"><span class="l">▌</span> <span class="d">├ recall ────────────────────────────────────────────────────────────────────</span></span><span class="row"><span class="l">▌</span> <span class="d">│</span> <span class="m">conflict list for lifecycle.ts hunks 3–5</span></span><span class="row"><span class="l">▌</span> <span class="d">│</span> <span class="m">vitest output: 214 passed, 0 failed</span></span><span class="row"><span class="l">▌</span> <span class="d">│</span> <span class="m">rejected: rebase instead of merge (shared branch)</span></span><span class="row"><span class="l">▌</span> <span class="d">│</span> <span class="m">git rerere cache path</span></span><span class="row"><span class="l">▌</span> <span class="d">└────────────────────────────────────────────────────────────────────────────</span></span>
+</pre></div>
+
+  <div class="state">Result</div>
+  <div class="term"><pre>
+<span class="row"><span class="s">▌</span> <span class="s b">✓ compressed</span>  <span class="t">#3 · 1 block stored as </span><span class="k">b0004</span></span><span class="row"><span class="s">▌</span></span><span class="row"><span class="s">▌</span> <span class="m">reclaimed </span> <span class="s">▰▰▰▰</span><span class="bd">▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱</span>  <span class="s b">  9.2%</span><span class="m"> of 200k</span></span><span class="row"><span class="s">▌</span>            <span class="d">0         25        50        75        100</span></span><span class="row"><span class="s">▌</span></span><span class="row"><span class="s">▌</span> <span class="m">this call </span>  <span class="t b">   18,412</span><span class="m"> tok</span>   <span class="t">12</span><span class="m"> tools</span>   <span class="t">41</span><span class="m"> messages</span></span><span class="row"><span class="s">▌</span> <span class="m">session   </span>  <span class="t b">   73,905</span><span class="m"> tok</span>   <span class="t"> 3</span><span class="m"> compressions</span></span>
+</pre></div>
+  <p class="legend">Tokens: <code>customMessageLabel</code> call gutter · <code>success</code> result gutter · <code>dim</code> frame lines · <code>mdHeading</code> section titles · <code>border</code> empty cells · no background, so it sits well with any theme.</p>
+</section>
+
+<!-- ───────────────────────── OPTION 3 ───────────────────────── -->
+<section class="option" id="o3">
+  <h2><span>3</span>Before → after <span class="needs">needs context usage before the call</span></h2>
+  <p class="why">The bar today only shows the reclaimed share. This option shows <b>how full the context was and how full it is now</b>, which is what the user actually cares about. Two stacked bars on the same scale; the reclaimed part shows as <b>░</b> in green on the "after" bar. Requires <code>ctx.getContextUsage().tokens</code> at call time (Pi already exposes it; we just do not store it in the receipt yet). Call view: rule-style header with a markdown body.</p>
+
+  <div class="state">Call · collapsed</div>
+  <div class="term"><pre>
+<span class="row bg-pending"><span class="t b">compress</span> <span class="d">─</span> <span class="t">Merge main into phase-10f: resolution and validation</span></span><span class="row bg-pending"><span class="m">  range </span><span class="k">m0029 → m0114</span><span class="m">   summary </span><span class="t">2,184</span><span class="m"> chars   recall </span><span class="t">4</span><span class="d">   (Ctrl+O to expand)</span></span>
+</pre></div>
+
+  <div class="state">Call · expanded (Ctrl+O)</div>
+  <div class="term"><pre>
+<span class="row bg-success"><span class="t b">compress</span> <span class="d">─</span> <span class="t">Merge main into phase-10f: resolution and validation</span></span><span class="row bg-success"><span class="m">  range </span><span class="k">m0029 → m0114</span><span class="m">   summary </span><span class="t">2,184</span><span class="m"> chars   recall </span><span class="t">4</span></span><span class="row bg-success"><span class="bd">  ──────────────────────────────────────────────────────────────────────────────</span></span><span class="row bg-success"><span class="t">  Merged </span><span class="c">main</span><span class="t"> into </span><span class="c">phase-10f</span><span class="t">; 7 conflicts resolved, all tests pass.</span></span><span class="row bg-success"> </span><span class="row bg-success"><span class="s b">  Decisions</span></span><span class="row bg-success"><span class="s">  - </span><span class="t">Kept phase-10f </span><span class="c">reducer.ts</span><span class="t">: main's version drops the nestedDepth check.</span></span><span class="row bg-success"><span class="s">  - </span><span class="t">Took main's </span><span class="c">schema.ts</span><span class="t"> (adds </span><span class="c">recall</span><span class="t">); re-applied per-range topic.</span></span><span class="row bg-success"> </span><span class="row bg-success"><span class="s b">  Open issues</span></span><span class="row bg-success"><span class="s">  - </span><span class="t">bench-context.ts still reads the v1 envelope; fix before release.</span></span><span class="row bg-success"><span class="bd">  ──────────────────────────────────────────────────────────────────────────────</span></span><span class="row bg-success"><span class="m">  recall  </span><span class="t">conflict list for lifecycle.ts hunks 3–5</span><span class="d"> · </span><span class="t">vitest output: 214 passed</span><span class="d"> ·</span></span><span class="row bg-success"><span class="m">          </span><span class="t">rejected: rebase instead of merge</span><span class="d"> · </span><span class="t">git rerere cache path</span></span>
+</pre></div>
+
+  <div class="state">Result</div>
+  <div class="term"><pre>
+<span class="row bg-success"><span class="s b">✓ Compression #3</span>  <span class="t">Merge main into phase-10f: resolution and validation</span></span><span class="row bg-success"> </span><span class="row bg-success"><span class="m">  before  </span><span class="w">████████████████████████████</span><span class="bd">░░░░░░░░░░░░</span>  <span class="t">142k</span><span class="m"> / 200k  </span><span class="t">71%</span></span><span class="row bg-success"><span class="m">  after   </span><span class="t">████████████████████████</span><span class="s">░░░░</span><span class="bd">░░░░░░░░░░░░</span>  <span class="t b">124k</span><span class="m"> / 200k  </span><span class="t b">62%</span>  <span class="s b">−9.2%</span></span><span class="row bg-success"> </span><span class="row bg-success"><span class="m">  </span><span class="t b">18,412</span><span class="m"> tokens from </span><span class="t">12</span><span class="m"> tools and </span><span class="t">41</span><span class="m"> messages · session total </span><span class="t b">73,905</span><span class="m"> over </span><span class="t">3</span><span class="m"> runs</span></span>
+</pre></div>
+  <p class="legend">Tokens: <code>toolPendingBg</code> / <code>toolSuccessBg</code> (Pi default shell) · <code>warning</code> "before" fill · <code>text</code> "after" fill · <code>success</code> reclaimed cells · <code>border</code> free space.</p>
+</section>
+
+<!-- ───────────────────────── OPTION 4 ───────────────────────── -->
+<section class="option" id="o4">
+  <h2><span>4</span>Compact line</h2>
+  <p class="why">For users who compress often and want a quiet transcript. Collapsed, call and result together take <b>two lines</b>. The mini-bar uses eighth-blocks <b>▏▎▍▌▋▊▉█</b> so 9.2% is drawn exactly, not rounded to whole cells. Expanded shows the full summary and the full receipt as in option 1.</p>
+
+  <div class="state">Call + result · collapsed</div>
+  <div class="term"><pre>
+<span class="row"><span class="l b">◆ compress</span>  <span class="k">m0029→m0114</span>  <span class="t">Merge main into phase-10f: resolution and validation</span></span><span class="row"><span class="s">  ✓ </span><span class="s">█▊</span><span class="bm">██████████████████</span> <span class="s b">9.2%</span>  <span class="t">18.4k</span><span class="m"> tok · 12 tools · 41 msgs · session </span><span class="t">73.9k</span><span class="d">   Ctrl+O</span></span>
+</pre></div>
+
+  <div class="state">Call + result · expanded (Ctrl+O)</div>
+  <div class="term"><pre>
+<span class="row"><span class="l b">◆ compress</span>  <span class="k">m0029→m0114</span>  <span class="t">Merge main into phase-10f: resolution and validation</span></span><span class="row"> </span><span class="row"><span class="d">  │ </span><span class="t">Merged </span><span class="c">main</span><span class="t"> into </span><span class="c">phase-10f</span><span class="t">; 7 conflicts resolved, all tests pass.</span></span><span class="row"><span class="d">  │</span></span><span class="row"><span class="d">  │ </span><span class="s b">Decisions</span></span><span class="row"><span class="d">  │ </span><span class="s">- </span><span class="t">Kept phase-10f </span><span class="c">reducer.ts</span><span class="t">: main's version drops the nestedDepth check.</span></span><span class="row"><span class="d">  │ </span><span class="s">- </span><span class="t">Took main's </span><span class="c">schema.ts</span><span class="t"> (adds </span><span class="c">recall</span><span class="t">); re-applied per-range topic.</span></span><span class="row"><span class="d">  │</span></span><span class="row"><span class="d">  │ </span><span class="s b">Open issues</span></span><span class="row"><span class="d">  │ </span><span class="s">- </span><span class="t">bench-context.ts still reads the v1 envelope; fix before release.</span></span><span class="row"><span class="d">  │</span></span><span class="row"><span class="d">  │ </span><span class="m b">recall </span><span class="m">conflict list for lifecycle.ts hunks 3–5 · vitest output: 214 passed ·</span></span><span class="row"><span class="d">  │ </span><span class="m">       rejected: rebase instead of merge · git rerere cache path</span></span><span class="row"> </span><span class="row"><span class="s">  ✓ </span><span class="s b">Compression #3</span><span class="d"> · stored as </span><span class="k">b0004</span></span><span class="row"><span class="m">    reclaimed  </span><span class="s">███▋</span><span class="bm">████████████████████████████████████</span> <span class="s b">9.2%</span><span class="m"> of 200k</span></span><span class="row"><span class="m">    this call  </span><span class="t b">18,412</span><span class="m"> tokens · </span><span class="t">12</span><span class="m"> tools · </span><span class="t">41</span><span class="m"> messages</span></span><span class="row"><span class="m">    session    </span><span class="t b">73,905</span><span class="m"> tokens · </span><span class="t">3</span><span class="m"> compressions</span></span>
+</pre></div>
+  <p class="legend">Tokens: <code>customMessageLabel</code> ◆ compress · <code>success</code> fill · <code>borderMuted</code> track (solid █ in a quiet color reads as a track, not as data) · no background.</p>
+</section>
+
+<!-- ───────────────────────── OPTION 5 ───────────────────────── -->
+<section class="option" id="o5">
+  <h2><span>5</span>Session dashboard <span class="needs">needs per-run token totals (derivable from state.runs + block savings)</span></h2>
+  <p class="why">Treats the receipt as a small report. A full-width title band, a segmented context bar that splits the reclaimed share into <b>this call</b> and <b>earlier calls</b>, and a history strip with one column per compression. Good if you want to watch savings build over a long session. Heaviest of the five.</p>
+
+  <div class="state">Call · collapsed</div>
+  <div class="term"><pre>
+<span class="row bg-custom"><span class="l b"> DCP </span><span class="d"> │ </span><span class="t b">Compress</span><span class="d"> │ </span><span class="m">1 range </span><span class="d">│ </span><span class="k">m0029 → m0114</span></span><span class="row bg-custom"><span class="d">       │ </span><span class="t">Merge main into phase-10f: resolution and validation</span></span><span class="row bg-custom"><span class="d">       │ </span><span class="d">2,184 chars · 4 recall cues · Ctrl+O</span></span>
+</pre></div>
+
+  <div class="state">Call · expanded (Ctrl+O)</div>
+  <div class="term"><pre>
+<span class="row bg-custom"><span class="l b"> DCP </span><span class="d"> │ </span><span class="t b">Compress</span><span class="d"> │ </span><span class="m">1 range </span><span class="d">│ </span><span class="k">m0029 → m0114</span></span><span class="row bg-custom"><span class="d">       │ </span><span class="t b">Merge main into phase-10f: resolution and validation</span></span><span class="row bg-custom"><span class="d">       │</span></span><span class="row bg-custom"><span class="d">       │ </span><span class="t">Merged </span><span class="c">main</span><span class="t"> into </span><span class="c">phase-10f</span><span class="t">; 7 conflicts resolved, all tests pass.</span></span><span class="row bg-custom"><span class="d">       │</span></span><span class="row bg-custom"><span class="d">       │ </span><span class="s b">Decisions</span></span><span class="row bg-custom"><span class="d">       │ </span><span class="s">- </span><span class="t">Kept phase-10f </span><span class="c">reducer.ts</span><span class="t">: main's version drops the nestedDepth check.</span></span><span class="row bg-custom"><span class="d">       │ </span><span class="s">- </span><span class="t">Took main's </span><span class="c">schema.ts</span><span class="t"> (adds </span><span class="c">recall</span><span class="t">); re-applied per-range topic.</span></span><span class="row bg-custom"><span class="d">       │</span></span><span class="row bg-custom"><span class="d">       │ </span><span class="s b">Open issues</span></span><span class="row bg-custom"><span class="d">       │ </span><span class="s">- </span><span class="t">bench-context.ts still reads the v1 envelope; fix before release.</span></span><span class="row bg-custom"><span class="d">       │</span></span><span class="row bg-custom"><span class="m b">RECALL</span><span class="d"> │ </span><span class="m">conflict list for lifecycle.ts hunks 3–5</span></span><span class="row bg-custom"><span class="d">       │ </span><span class="m">vitest output: 214 passed, 0 failed</span></span><span class="row bg-custom"><span class="d">       │ </span><span class="m">rejected: rebase instead of merge (shared branch)</span></span><span class="row bg-custom"><span class="d">       │ </span><span class="m">git rerere cache path</span></span>
+</pre></div>
+
+  <div class="state">Result</div>
+  <div class="term"><pre>
+<span class="row bg-success"><span class="s b"> ✓ CONTEXT COMPRESSED </span><span class="d">                                              </span><span class="t">run #3 · b0004 </span></span><span class="row bg-custom"> </span><span class="row bg-custom"><span class="m">  window   </span><span class="s">████</span><span class="k">███████████</span><span class="bm">█████████████████████████</span><span class="d">  200k</span></span><span class="row bg-custom"><span class="m">           </span><span class="s">■</span><span class="m"> this call </span><span class="t b">18.4k</span><span class="m"> (9.2%)   </span><span class="k">■</span><span class="m"> earlier </span><span class="t">55.5k</span><span class="m"> (27.7%)   </span><span class="t b">36.9%</span><span class="m"> total</span></span><span class="row bg-custom"> </span><span class="row bg-custom"><span class="m">  history  </span><span class="k">▅  </span><span class="k">█  </span><span class="s">▃  </span><span class="d">         ·  </span><span class="t">12</span><span class="m"> tools · </span><span class="t">41</span><span class="m"> messages this call</span></span><span class="row bg-custom"><span class="m">           </span><span class="d">#1 #2 #3</span></span><span class="row bg-custom"> </span>
+</pre></div>
+  <p class="legend">Tokens: <code>toolSuccessBg</code> title band · <code>customMessageBg</code> body · <code>success</code> this call · <code>mdLink</code> earlier calls · <code>borderMuted</code> unused window.</p>
+</section>
+
+<footer>
+  <h3>Shared changes, whichever option you pick</h3>
+  <ul>
+    <li>Add <code>renderCall</code>: never print raw JSON. Render <code>summary</code> with Pi's <code>Markdown</code> component, so <code>\n</code> becomes real line breaks and lists/code get styled.</li>
+    <li>Collapsed by default; <b>Ctrl+O</b> (Pi's expand key) shows the full summary and recall cues.</li>
+    <li>Multi-range calls: one header line per range in collapsed view; expanded view stacks each range with its own topic.</li>
+    <li>Numbers in <code>text</code> (bright), labels in <code>muted</code>, decoration in <code>dim</code>/<code>border</code>. Today most text uses <code>toolOutput</code>, which is grey in most themes.</li>
+    <li>The model-visible tool result text stays plain and unchanged; only the TUI renderer changes.</li>
+  </ul>
+</footer>
+
+</body>
+</html>

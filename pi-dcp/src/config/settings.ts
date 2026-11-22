@@ -12,6 +12,7 @@ export interface SettingsPatch {
   turnProtection: EffectiveConfig["turnProtection"];
   pruneNotification: EffectiveConfig["pruneNotification"];
   pruneNotificationType: EffectiveConfig["pruneNotificationType"];
+  receiptStyle: EffectiveConfig["receiptStyle"];
   protectedFilePatterns: string[];
 }
 
@@ -34,6 +35,7 @@ export function settingsPatch(config: EffectiveConfig): SettingsPatch {
     turnProtection: { ...config.turnProtection },
     pruneNotification: config.pruneNotification,
     pruneNotificationType: config.pruneNotificationType,
+    receiptStyle: config.receiptStyle,
     protectedFilePatterns: [...config.protectedFilePatterns],
   };
 }

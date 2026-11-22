@@ -69,7 +69,14 @@ Notification level controls how much detail is shown (`off`, `minimal`, `summary
 - `toast` uses Pi's transient UI notification.
 - `both` does both.
 
-The detailed TUI receipt shows the compression number, a before/after context strip, tokens reclaimed and the percentage of the context window reclaimed, tools/messages covered by the call, the topic, and cumulative session savings. Its colors come from Pi's supplied `Theme` on every render, so changing the active theme updates existing receipts. Print/RPC output uses the same layout without ANSI color escapes. Chat notifications are not compression nudges and do not request model action.
+The compress tool draws its own card in the TUI. Collapsed, it shows the range, the topic, and one bar line. Expanded (Ctrl+O), it shows each summary rendered as Markdown, the recall cues, and the full receipt: compression number, bar, and a table with tokens, tools, and messages for this call and the session total. The bar style is set with `receiptStyle`, or in `/dcp settings`, where the style list shows a live preview of the highlighted style next to it (under it on terminals narrower than 124 columns). It only applies to `detailed` notifications:
+
+- `simple`: the share of the context window this call reclaimed.
+- `before-after`: context usage before and after the call, each colored by level like the sidebar (above 60% red, above 40% yellow, else accent).
+- `regained` (default): one bar with what is still used plus what this call gave back.
+- `full`: the context in order (system prompt and tools in grey, raw history, each pi-dcp summary in purple), this call's savings in green, and a per-compression history.
+
+`before-after`, `regained`, and `full` need Pi's context usage. When Pi has no measurement (for example right after a native compaction), the receipt falls back to `simple`. All sizes except Pi's usage are character-based estimates. Colors come from Pi's supplied `Theme` on every render, so changing the theme or the style updates existing receipts. Print/RPC output and the model-visible tool result stay plain text without ANSI escapes. Chat notifications are not compression nudges and do not request model action.
 
 The editable file uses the same shape as the menu. For example:
 
@@ -89,7 +96,8 @@ The editable file uses the same shape as the menu. For example:
   "manualMode": { "automaticStrategies": true },
   "turnProtection": { "enabled": true, "turns": 4 },
   "pruneNotification": "summary",
-  "pruneNotificationType": "both"
+  "pruneNotificationType": "both",
+  "receiptStyle": "full"
 }
 ```
 
