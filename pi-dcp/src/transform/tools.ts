@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { outgoingPrune, type ReducedState, type RequestLayout } from "../state/reducer.ts";
-import { redactOldErrorArguments } from "../strategies/purge-errors.ts";
+import { isPlainObject } from "../util/canonical-json.ts";
 import { adapterForQuestion } from "../questions/registry.ts";
 
 const CLEARED = "[Old tool result content cleared by pi-dcp]";
@@ -90,6 +90,23 @@ function redactCompressSummaries(argumentsValue: unknown): unknown {
       return withoutSummary;
     }),
   };
+}
+
+/**
+ * Legacy redactor for an `old-error-input` claim.
+ *
+ * pi-dcp no longer creates these claims. Automatic old-error-input pruning saved
+ * about 81 tokens per decision, and each application risked dropping the signed
+ * thinking of every later turn. Stored sessions still hold claims that earlier
+ * versions recorded, and those keep applying here under the same activation rule as
+ * every other claim (state/reducer.ts). Removing this redactor would change the bytes
+ * of a request the provider has already cached, so it stays.
+ */
+function redactOldErrorArguments(args: unknown): unknown {
+  if (!isPlainObject(args)) return args;
+  const result = Object.create(Object.getPrototypeOf(args)) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(args)) result[key] = typeof value === "string" ? "[Old tool input cleared by pi-dcp]" : value;
+  return result;
 }
 
 export function clearedMarker(): string { return CLEARED; }

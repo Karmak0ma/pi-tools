@@ -27,6 +27,11 @@ export interface PruneClaim { opId: string; operationIndex: number; estimatedTok
 export interface ReducedToolPrune {
   /** immediate: a sweep switched this output on, so it applies without a compression. */
   output?: PruneClaim & { kind: "dedup-output" | "sweep-output"; immediate?: true };
+  /**
+   * LEGACY. Earlier versions recorded this claim automatically; no version creates it
+   * now. A stored claim still applies under the same activation rule as the others,
+   * so a replayed session shows the same request it showed live.
+   */
   oldErrorInput?: PruneClaim;
   questionInput?: PruneClaim;
 }

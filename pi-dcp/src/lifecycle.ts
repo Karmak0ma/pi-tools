@@ -520,12 +520,10 @@ async function onSettled(ctx: ExtensionContext, runtime: DcpRuntime, pi: Extensi
       if (strategiesAllowed && suffixHash !== runtime.lastSettledSuffixHash) {
         const decisions = evaluateSettledStrategies(index, runtime.reduced, {
           cwd: ctx.cwd,
-          protectedTools: [...runtime.config.strategies.deduplication.protectedTools, ...runtime.config.strategies.purgeErrors.protectedTools],
+          protectedTools: [...runtime.config.strategies.deduplication.protectedTools],
           protectedFilePatterns: runtime.config.protectedFilePatterns,
           turnProtection: runtime.config.turnProtection,
           deduplication: runtime.config.strategies.deduplication.enabled,
-          purgeErrors: runtime.config.strategies.purgeErrors.enabled,
-          purgeTurns: runtime.config.strategies.purgeErrors.turns,
           automaticStrategiesAllowed: !runtime.reduced.manualMode || runtime.config.manualMode.automaticStrategies,
         });
         if (decisions.length) {

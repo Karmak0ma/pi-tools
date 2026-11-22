@@ -7,10 +7,10 @@ export const PI_BUILTIN_TOOLS = new Set(["read", "write", "edit", "bash", "grep"
 
 /**
  * Tools whose output/arguments must never be silently cleared by pi-dcp's
- * own PRUNING strategies (sweep, deduplicate, purge-errors), regardless of
+ * own PRUNING strategies (sweep, deduplicate), regardless of
  * what a caller's own `protectedTools` config contains. Mutating tools keep
  * the record of what changed; pi-dcp's own `compress` tool call keeps the
- * record that a compression happened (dedup/purge-errors default their own
+ * record that a compression happened (dedup defaults its own
  * `protectedTools` to `[]` and rely on this floor); `todo` keeps the task
  * list legible.
  *
@@ -50,7 +50,7 @@ function matchFilePatterns(args: unknown, options: ProtectionOptions): { protect
 }
 
 /**
- * Prune-style protection: sweep, deduplicate, purge-errors. Always includes
+ * Prune-style protection: sweep and deduplicate. Always includes
  * `PRUNE_PROTECTED_TOOLS` as a floor on top of the caller's own
  * `protectedTools` list, so a caller cannot accidentally unprotect a
  * mutating tool by leaving its list empty (the strategy defaults do exactly

@@ -4,6 +4,8 @@ import type { DcpRuntime } from "../runtime.ts";
 import { closeOverlayCustomUi } from "../ui/overlay-close.ts";
 import { SAVINGS_SOURCES, readSavingsLedger, type SavingsSource, type SavingsTotals } from "../stats.ts";
 
+// "old-error-input" has no live producer any more. Its label stays so the Total tab
+// still names the totals that earlier versions recorded under it.
 const SOURCE_LABELS: Record<SavingsSource, string> = {
   compression: "Range compression",
   deduplication: "Duplicate outputs",

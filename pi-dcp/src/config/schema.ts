@@ -46,6 +46,10 @@ export function mergeConfig(base: EffectiveConfig, patch: Record<string, unknown
       // Both are ignored with a named warning, not an error, as nudge.type is, so an
       // old settings file still loads.
       if (key === "summary" && (child === "maxExpandedChars" || child === "maxNestedDepth")) { warnings.push(`deprecated configuration key ignored: summary.${child}`); continue; }
+      // Removed with the automatic old-error-input strategy. Any value is accepted and
+      // ignored, not validated: an old file must still load, and validating a setting
+      // that no longer does anything would only reject it for no benefit.
+      if (key === "strategies" && child === "purgeErrors") { warnings.push("deprecated configuration key ignored: strategies.purgeErrors"); continue; }
       if (!(child in target)) { warnings.push(`unknown configuration key: ${key}.${child}`); continue; }
       if (child === "protectedTools" || child === "protectedFilePatterns") target[child] = stringArray(childValue, `${key}.${child}`);
       else if (child === "modelMaxLimits" || child === "modelMinLimits") target[child] = limitsMap(childValue, `${key}.${child}`);

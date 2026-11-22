@@ -82,6 +82,8 @@ export interface CompressionCreated {
 
 export interface PrunedToolDecision {
   toolCallId: ToolCallId;
+  // old-error-input is LEGACY: earlier versions recorded it automatically, and no
+  // version creates it now. It stays in the union so stored sessions still replay.
   kind: "dedup-output" | "old-error-input" | "sweep-output" | "question-input";
   estimatedTokens: number;
 }

@@ -7,6 +7,7 @@ import { reconstructFromBranch } from "../../src/state/reconstruct.ts";
 import { transformOutgoingContext } from "../../src/transform/pipeline.ts";
 import { estimatePotentialSavings } from "../../src/transform/semantic-nudge.ts";
 import { evaluateSettledStrategies } from "../../src/strategies/settle.ts";
+import { collectToolRecords } from "../../src/strategies/deduplicate.ts";
 import { buildProtocolUnits } from "../../src/identity/protocol.ts";
 import { createSnapshot, unitAlias } from "../../src/identity/snapshot.ts";
 import { buildCompressionEnvelope } from "../../src/compression/service.ts";
@@ -26,6 +27,7 @@ const CONFIG = structuredClone(defaults) as any;
 const RAW_A = "A output ".repeat(400);
 const RAW_B = "B output ".repeat(400);
 const CLEARED = "[Old tool result content cleared by pi-dcp]";
+const OLD_INPUT_CLEARED = "[Old tool input cleared by pi-dcp]";
 
 const user = (text: string, timestamp: number): AgentMessage => ({ role: "user", content: text, timestamp } as AgentMessage);
 const call = (id: string, path: string, timestamp: number): AgentMessage => ({ role: "assistant", content: [{ type: "toolCall", id, name: "read", arguments: { path } }], provider: "test", model: "model", api: "test", stopReason: "toolUse", timestamp } as any);
@@ -131,6 +133,8 @@ function firstDifference(before: readonly unknown[], after: readonly unknown[]):
 }
 
 describe("deferred pruning of raw history", () => {
+  // old-error-input is legacy: no version creates it now, but stored sessions hold it,
+  // and it must wait under the same rule as a live claim.
   it.each(["dedup-output", "old-error-input"] as const)("a %s claim leaves the request byte-identical until the next compression", (kind) => {
     const messages = session();
     const claimed = reduceEnvelope(emptyState(), prune([{ toolCallId: "call-b", kind, estimatedTokens: 900 }]));
@@ -327,13 +331,52 @@ describe("deferred pruning of raw history", () => {
 
   it("automatic strategies claim neither the current turn nor a tool call that an active block covers", () => {
     const index = indexOf(repeatedReads());
-    const settled = { cwd: "/tmp", deduplication: true, purgeErrors: false, purgeTurns: 4, protectedTools: [], protectedFilePatterns: [] };
+    const settled = { cwd: "/tmp", deduplication: true, protectedTools: [], protectedFilePatterns: [] };
 
     // call-a1 is an older duplicate in a closed turn. call-x1 is an older duplicate
     // in the current turn, which automatic strategies leave alone.
     expect(evaluateSettledStrategies(index, emptyState(), settled).map((decision) => decision.toolCallId)).toEqual(["call-a1"]);
     const covered = reduceEnvelope(emptyState(), compression("one", ["entry-1", "entry-2", "entry-3", "entry-4"], ["call-a1"], "entry-5"));
     expect(evaluateSettledStrategies(index, covered, settled)).toEqual([]);
+  });
+
+  it("automatic strategies no longer record old-error-input, even for a failed call many turns old", () => {
+    // Under the removed default (four user turns) this failed call would have been claimed.
+    const messages: AgentMessage[] = [
+      user("first request", 1),
+      call("call-err", "src/missing.ts", 2), { ...result("call-err", "ENOENT", 3), isError: true } as AgentMessage, reply("failed", 4),
+      user("second request", 5), reply("two", 6),
+      user("third request", 7), reply("three", 8),
+      user("fourth request", 9), reply("four", 10),
+      user("fifth request", 11), reply("five", 12),
+      user("current request", 13), reply("working", 14),
+    ];
+    const index = indexOf(messages);
+    // The precondition: the index does see the failed call, so the empty result is not vacuous.
+    expect(collectToolRecords(index).find((record) => record.toolCallId === "call-err")?.result?.isError).toBe(true);
+    const settled = { cwd: "/tmp", deduplication: true, protectedTools: [], protectedFilePatterns: [] };
+    expect(evaluateSettledStrategies(index, emptyState(), settled)).toEqual([]);
+  });
+
+  it("a stored old-error-input claim applies only once a compression starts at or before its call", () => {
+    const messages = session();
+    // call-a sits before the range that starts at unit 3, so its claim keeps waiting.
+    const waiting = reduceEnvelope(reduceEnvelope(emptyState(), prune([{ toolCallId: "call-a", kind: "old-error-input", estimatedTokens: 81 }])), buildRange(emptyState(), messages, 3, 5).envelope);
+    expect(JSON.stringify(transform(messages, waiting).messages)).toContain('"path":"src/a.ts"');
+    expect(JSON.stringify(transform(messages, waiting).messages)).not.toContain(OLD_INPUT_CLEARED);
+
+    // call-b lies after the start of a compression at unit 0, so its claim applies. The
+    // call stays visible because the range ends before it.
+    const legacyClaim = prune([{ toolCallId: "call-b", kind: "old-error-input", estimatedTokens: 81 }]);
+    const turnOne = buildRange(emptyState(), messages, 0, 2).envelope;
+    const applied = reduceEnvelope(reduceEnvelope(emptyState(), legacyClaim), turnOne);
+    expect(JSON.stringify(transform(messages, applied).messages)).toContain(OLD_INPUT_CLEARED);
+    expect(JSON.stringify(transform(messages, applied).messages)).not.toContain('"path":"src/b.ts"');
+
+    // A session that stores the legacy claim replays to the same request.
+    const replayed = reconstructFromBranch(branch([legacyClaim, turnOne])).state;
+    expect(replayed.corruptReason).toBeUndefined();
+    expect(JSON.stringify(transform(messages, replayed).messages)).toBe(JSON.stringify(transform(messages, applied).messages));
   });
 
   it("a pending claim is not counted as already saved by the nudge estimate", () => {

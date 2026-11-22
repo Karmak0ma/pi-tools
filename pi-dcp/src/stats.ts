@@ -21,6 +21,9 @@ export const SAVINGS_SOURCES = [
   "compression",
   "deduplication",
   "sweep",
+  // LEGACY: no version creates it now, but the append-only ledger of earlier versions
+  // holds it. isSavingsRecord rejects unknown sources, so dropping it here would
+  // silently discard those historical lines from the Total tab.
   "old-error-input",
   "question-input",
 ] as const;

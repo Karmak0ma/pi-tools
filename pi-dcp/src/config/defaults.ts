@@ -41,8 +41,9 @@ export const defaults = {
     protectUserMessages: false,
   },
   strategies: {
+    // strategies.purgeErrors (automatic old-error-input pruning) was removed. A
+    // settings file that still names it is ignored with a warning (config/schema.ts).
     deduplication: { enabled: true, protectedTools: [] as string[] },
-    purgeErrors: { enabled: true, turns: 4, protectedTools: [] as string[] },
   },
   // No nesting setting: merge depth is the stored-format bound MAX_NESTED_DEPTH
   // (state/operations.ts). A configured lower value would refuse merges that replay accepts.
@@ -94,7 +95,6 @@ export type EffectiveConfig = {
   };
   strategies: {
     deduplication: { enabled: boolean; protectedTools: string[] };
-    purgeErrors: { enabled: boolean; turns: number; protectedTools: string[] };
   };
   summary: { maxChars: number };
 };

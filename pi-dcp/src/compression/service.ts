@@ -163,6 +163,9 @@ function prunedTokensInRange(state: ReducedState, units: readonly { toolCallIds:
     if (consumed.has(toolCallId)) continue;
     const prune = state.toolPrunes.get(toolCallId);
     if (!prune) continue;
+    // oldErrorInput is legacy (see reducer.ts). Its tokens still lie inside the range.
+    // Skipping it here would count them twice: once as the decision, and again inside
+    // the block's own saving.
     total += (prune.output?.estimatedTokens ?? 0) + (prune.oldErrorInput?.estimatedTokens ?? 0) + (prune.questionInput?.estimatedTokens ?? 0);
   }
   return total;
