@@ -28,7 +28,7 @@
     "selectedBg": "#414550"
   },
   "colors": {
-    "accent": "focus",
+    "accent": "cyan",
     "border": "borderSoft",
     "borderAccent": "focusBright",
     "borderMuted": "bg3",
