@@ -57,20 +57,21 @@ describe("sidebar todo display", () => {
 		expect(visibleTodos(state)).toEqual([todo(1, "completed")]);
 	});
 
-	it("rebuilds ages from the current branch, ignoring failed and malformed results", () => {
-		const start = [assistant(), result([todo(1, "completed")])];
-		const fourLater = [
-			...start,
-			...Array.from({ length: 4 }, () => assistant()),
-			assistant("aborted"),
-			assistant("error"),
+	it("rebuilds from the last valid snapshot with fresh ages, ignoring failed and malformed results", () => {
+		// Many turns after the completion: the old age must not hide the task on reload.
+		const branch = [
+			assistant(), result([todo(1, "completed")]),
+			...Array.from({ length: 20 }, () => assistant()),
 			result([], true),
 			{ type: "message", message: { role: "toolResult", toolName: "todo", details: { tasks: "invalid" } } },
 		];
-		expect(visibleTodos(todoDisplayFromBranch(fourLater))).toEqual([todo(1, "completed")]);
-		expect(visibleTodos(todoDisplayFromBranch([...fourLater, assistant()]))).toEqual([]);
-		expect(todoDisplayFromBranch([...fourLater, result([])]).todos).toEqual([]);
-		// Moving to a different branch must not carry an old branch's age.
+		const state = todoDisplayFromBranch(branch);
+		expect(visibleTodos(state)).toEqual([todo(1, "completed")]);
+		// The rebuilt completion still ages out through live turns.
+		state.turns += 5;
+		expect(visibleTodos(state)).toEqual([]);
+		expect(todoDisplayFromBranch([...branch, result([])]).todos).toEqual([]);
+		// Moving to a different branch must not carry an old branch's state.
 		expect(visibleTodos(todoDisplayFromBranch([assistant(), result([todo(2, "pending")])]))).toEqual([todo(2, "pending")]);
 	});
 });

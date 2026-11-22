@@ -51,23 +51,20 @@ function branchMessage(entry: unknown): Record<string, unknown> | undefined {
 	return typeof message === "object" && message !== null ? message as Record<string, unknown> : undefined;
 }
 
+// Rebuild the panel from the saved branch (session start, /reload, tree navigation).
+//
+// Only the LAST valid todo snapshot matters. Completion ages are deliberately
+// NOT replayed from the old turn history: a user who reloads or resumes a
+// session sees the full list in rpiv-todo's own widget for a moment, and
+// expects the same list in the sidebar. Replaying ages would hide every task
+// that finished more than five turns ago, so a fully completed list would
+// show an empty panel. Every completed task therefore gets a fresh five-turn
+// window from the moment of the rebuild. Live ageing (turn_end) is unchanged.
 export function todoDisplayFromBranch(branch: readonly unknown[]): TodoDisplayState {
 	const state = emptyTodoDisplay();
 	for (const entry of branch) {
 		const message = branchMessage(entry);
-		if (!message) continue;
-		// An assistant message represents one turn on the saved branch. Its tool
-		// results follow it, so a completion in those results starts at this
-		// turn, not at the next one. Live tool results arrive before turn_end.
-		if (message.role === "assistant") {
-			// Failed or cancelled responses do not finish a work turn. Keep
-			// branch replay in step with the live turn_end handler.
-			if (message.stopReason !== "aborted" && message.stopReason !== "error") {
-				state.turns += 1;
-			}
-			continue;
-		}
-		if (message.role !== "toolResult" || message.toolName !== "todo" || message.isError === true) continue;
+		if (message?.role !== "toolResult" || message.toolName !== "todo" || message.isError === true) continue;
 		const todos = normalizeTodoDetails(message.details);
 		if (todos !== undefined) applyTodoSnapshot(state, todos, state.turns);
 	}
