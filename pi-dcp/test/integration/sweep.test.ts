@@ -8,6 +8,39 @@ import { defaults } from "../../src/config/defaults.ts";
 import { createRuntime } from "../../src/runtime.ts";
 import { emptyRequestLayout, emptyState, outgoingPrune, reduceEnvelope } from "../../src/state/reducer.ts";
 import { createEnvelope } from "../../src/state/operations.ts";
+import { IMAGE_TOKEN_COST } from "../../src/tokens/estimate.ts";
+
+it("sweep records an image result at the image cost, not at its base64 size", async () => {
+  const text = "Read image file [image/png]";
+  const entries = [
+    { type: "message", id: "user-1", parentId: null, timestamp: new Date(1).toISOString(), message: { role: "user", content: "look at the screenshot", timestamp: 1 } },
+    { type: "message", id: "assistant-1", parentId: "user-1", timestamp: new Date(2).toISOString(), message: { role: "assistant", content: [{ type: "toolCall", id: "read-png", name: "read", arguments: { path: "shot.png" } }], api: "test", provider: "test", model: "model", stopReason: "toolUse", timestamp: 2 } },
+    { type: "message", id: "result-1", parentId: "assistant-1", timestamp: new Date(3).toISOString(), message: { role: "toolResult", toolCallId: "read-png", toolName: "read", content: [{ type: "text", text }, { type: "image", data: "A".repeat(4 * 1024 * 1024), mimeType: "image/png" }], isError: false, timestamp: 3 } },
+  ] as any[];
+  const appended: any[] = [];
+  const statsDir = await mkdtemp(join(tmpdir(), "pi-dcp-sweep-image-test-"));
+  const previousStatsDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = statsDir;
+  try {
+    const pi = { appendEntry: (_type: string, data: unknown) => { appended.push(data); } } as any;
+    const runtime = createRuntime(pi);
+    runtime.sessionId = "session-1";
+    runtime.config = structuredClone(defaults) as any;
+    const ctx = {
+      cwd: "/tmp",
+      ui: { notify: () => {} },
+      sessionManager: { buildContextEntries: () => entries, getBranch: () => entries, buildSessionProjection: () => buildSessionProjection(entries as any, "result-1") },
+    } as any;
+
+    await sweepCommand("", ctx, pi, runtime);
+
+    expect(appended[0].operation.decisions).toEqual([{ toolCallId: "read-png", kind: "sweep-output", estimatedTokens: IMAGE_TOKEN_COST + Math.ceil(text.length / 4) }]);
+  } finally {
+    if (previousStatsDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousStatsDir;
+    await rm(statsDir, { recursive: true, force: true });
+  }
+});
 
 it("uses Pi 0.87 host projection for sweep after a context edit", async () => {
   const originalToolCall = { type: "toolCall", id: "read-original", name: "read", arguments: { path: "src/example.ts" } };

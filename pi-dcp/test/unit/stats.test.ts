@@ -9,6 +9,7 @@ import { createSnapshot } from "../../src/identity/snapshot.ts";
 import { buildCompressionEnvelope } from "../../src/compression/service.ts";
 import { emptyState, reduceEnvelope } from "../../src/state/reducer.ts";
 import { appendSavingsRecord, emptySavingsTotals, readSavingsLedger, savingsFromOperation } from "../../src/stats.ts";
+import { IMAGE_TOKEN_COST } from "../../src/tokens/estimate.ts";
 import { formatStatsTable } from "../../src/commands/stats.ts";
 
 const temporaryDirectories: string[] = [];
@@ -63,6 +64,33 @@ describe("savings accounting", () => {
       expect(built.blocks[0].estimatedSourceTokens).toBeGreaterThan(built.blocks[0].estimatedSummaryTokens);
       expect(built.blocks[0].estimatedSavingsTokens).toBeGreaterThan(0);
     }
+  });
+
+  it("caps a stored pruning estimate at the output's current size, so an old inflated decision cannot zero a new block", () => {
+    const text = "Read image file [image/png]";
+    const messages = [
+      { role: "user", content: "A long completed user request ".repeat(80), timestamp: 1 },
+      { role: "assistant", content: [{ type: "toolCall", id: "read-shot", name: "read", arguments: { path: "shot.png" } }], api: "test", provider: "test", model: "test", stopReason: "toolUse", timestamp: 2 },
+      { role: "toolResult", toolCallId: "read-shot", toolName: "read", content: [{ type: "text", text }, { type: "image", data: "A".repeat(4 * 1024 * 1024), mimeType: "image/png" }], isError: false, timestamp: 3 },
+      { role: "user", content: "A newer request", timestamp: 4 },
+    ] as any[];
+    const entries = messages.map((message, index) => ({ type: "message", id: `entry-${index}`, parentId: index ? `entry-${index - 1}` : null, timestamp: new Date(index + 1).toISOString(), message }));
+    const projection = projectCurrentEntries(entries as any);
+    expect(projection.ok).toBe(true);
+    if (!projection.ok) return;
+    const index = buildProtocolUnits(projection.messages);
+    expect("units" in index).toBe(true);
+    if (!("units" in index)) return;
+    // A decision written before the image rule counted the base64 characters as text.
+    const state = reduceEnvelope(emptyState(), createEnvelope({ type: "tools.pruned", decisions: [{ toolCallId: "read-shot", kind: "dedup-output", estimatedTokens: 1_016_000 }] }, "session-stored", "0.1.0"));
+    const snapshot = createSnapshot({ sessionId: "session-stored", leafId: "entry-3", model: { provider: "test", id: "test", api: "test", contextWindow: 10_000 }, generation: 1, ttlMs: 60_000, index, state, branch: [], configHash: "stats" });
+
+    const built = buildCompressionEnvelope({ sessionId: "session-stored", extensionVersion: "0.1.0", snapshot, state, params: { topic: "shot", content: [{ startId: "m0001", endId: "m0002", summary: "short summary" }] }, model: undefined, index });
+
+    expect(built.ok).toBe(true);
+    if (!built.ok) return;
+    expect(built.blocks[0].creditedPruneTokens).toBe(IMAGE_TOKEN_COST + Math.ceil(text.length / 4));
+    expect(savingsFromOperation(built.envelope.operation).compression?.tokens).toBeGreaterThan(0);
   });
 
   it("deduplicates ledger records and aggregates operations from different sessions", async () => {

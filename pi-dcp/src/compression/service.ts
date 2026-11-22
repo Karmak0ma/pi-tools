@@ -10,7 +10,7 @@ import type { CanonicalIndex } from "../identity/types.ts";
 import { appendProtectedSections, collectProtectedToolSections, extractProtectedSection, type ProtectionOptions } from "./protected.ts";
 import { buildEligibility, compressibleRangeLabels, unitBlockReason, type UnitBlockReason } from "./eligibility.ts";
 import { unitAlias } from "../identity/snapshot.ts";
-import { estimateTokens } from "../tokens/estimate.ts";
+import { estimateTokens, estimateToolResultTokens } from "../tokens/estimate.ts";
 
 export interface CompressionBuildOptions { sessionId: string; extensionVersion: string; snapshot: BaselineSnapshot; state: ReducedState; params: CompressionParams; model: Model<any> | undefined; toolCallId?: string; maxSummaryChars?: number; index?: CanonicalIndex; protection?: ProtectionOptions; turnProtection?: { enabled: boolean; turns: number }; protectUserMessages?: boolean; }
 export type CompressionBuildFailure = {
@@ -120,7 +120,7 @@ export function buildCompressionEnvelope(options: CompressionBuildOptions): Comp
     // Cues are rendered with the block, so they count toward its footprint.
     const estimatedSummaryTokens = Math.max(1, Math.ceil([finalSummary, ...recall].join("\n").length / 4));
     const estimatedSourceTokens = estimateCompressionSourceTokens(options, units, range.consumedBlockIds);
-    const creditedPruneTokens = prunedTokensInRange(options.state, units, children);
+    const creditedPruneTokens = prunedTokensInRange(options.state, units, children, currentOutputTokens(options.index, units));
     // A range names its own phase when it can. A blank range topic counts as absent,
     // so the call topic applies. normalizeCompressionParams has already defaulted it.
     const block: CreatedBlock = { blockId: randomId(), ordinal: index, topic: params.content[index].topic?.trim() || params.topic, summary: finalSummary, authoredSummary: authored, estimatedSummaryTokens, estimatedSourceTokens, estimatedSavingsTokens: Math.max(0, estimatedSourceTokens - estimatedSummaryTokens), coverage: { directEntryIds, effectiveEntryIds, directToolCallIds, effectiveToolCallIds }, anchor: { beforeEntryId: options.snapshot.units[range.start - 1]?.entryIds.at(-1), afterEntryId: options.snapshot.units[range.end + 1]?.entryIds[0] }, consumedBlockIds: range.consumedBlockIds, nestedDepth, ...(recall.length ? { recall } : {}), ...(creditedPruneTokens > 0 ? { creditedPruneTokens } : {}) };
@@ -155,20 +155,47 @@ function cleanRecall(cues: readonly string[] | undefined): string[] {
  * range's own units. The block's source estimate reads raw history, so it already
  * contains these bytes. Consumed children are skipped: each child subtracted its
  * own decisions when it was created, and its raw bytes are not counted here again.
+ *
+ * An output's credit is capped at its current size (see currentOutputTokens). A
+ * decision recorded before the image rule can hold a number far above the output's
+ * real size, and subtracting that number would zero a block that really saves tokens.
+ * The cap comes from the same messages the source counts, so the credit can never
+ * exceed the part of the source that it removes.
  */
-function prunedTokensInRange(state: ReducedState, units: readonly { toolCallIds: readonly string[] }[], children: readonly { coverage: { effectiveToolCallIds: readonly string[] } }[]): number {
+function prunedTokensInRange(state: ReducedState, units: readonly { toolCallIds: readonly string[] }[], children: readonly { coverage: { effectiveToolCallIds: readonly string[] } }[], outputTokens: ReadonlyMap<string, number>): number {
   const consumed = new Set(children.flatMap((child) => child.coverage.effectiveToolCallIds));
   let total = 0;
   for (const unit of units) for (const toolCallId of unit.toolCallIds) {
     if (consumed.has(toolCallId)) continue;
     const prune = state.toolPrunes.get(toolCallId);
     if (!prune) continue;
+    // Without a current size (no index) the stored number stands. The source is then
+    // not estimated at all (estimateCompressionSourceTokens returns 0), so no saving depends on it.
+    const stored = prune.output?.estimatedTokens ?? 0;
+    const current = outputTokens.get(toolCallId);
+    const outputCredit = current === undefined ? stored : Math.min(stored, current);
     // oldErrorInput is legacy (see reducer.ts). Its tokens still lie inside the range.
     // Skipping it here would count them twice: once as the decision, and again inside
     // the block's own saving.
-    total += (prune.output?.estimatedTokens ?? 0) + (prune.oldErrorInput?.estimatedTokens ?? 0) + (prune.questionInput?.estimatedTokens ?? 0);
+    total += outputCredit + (prune.oldErrorInput?.estimatedTokens ?? 0) + (prune.questionInput?.estimatedTokens ?? 0);
   }
   return total;
+}
+
+/**
+ * Current size of each tool output in this range's own units, keyed by tool call.
+ * It reads the same entries and projections that estimateCompressionSourceTokens
+ * counts, so a credit taken from here measures the bytes that the source measured.
+ */
+function currentOutputTokens(index: CanonicalIndex | undefined, units: readonly { messageKeys: readonly { entryId: string; projection: number }[] }[]): Map<string, number> {
+  const outputs = new Map<string, number>();
+  if (!index) return outputs;
+  const keys = new Set(units.flatMap((unit) => unit.messageKeys.map((key) => `${key.entryId}:${key.projection}`)));
+  for (const item of index.entries) {
+    if (item.message.role !== "toolResult" || !keys.has(`${item.key.entryId}:${item.key.projection}`)) continue;
+    outputs.set(item.message.toolCallId, estimateToolResultTokens(item.message));
+  }
+  return outputs;
 }
 
 /**

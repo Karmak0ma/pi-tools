@@ -56,6 +56,8 @@ export interface CreatedBlock {
    * it contains these bytes again. Stats subtract them here, so each token is
    * counted once. The estimate itself is unchanged and still describes the raw
    * source. Absent when no decision lies in the range, so such blocks keep their bytes.
+   * Each output counts at most its current size (compression/service.ts), so a stored
+   * decision recorded by an older rule cannot zero the block.
    */
   creditedPruneTokens?: number;
   coverage: CanonicalCoverage;
